@@ -1,0 +1,150 @@
+#!/usr/bin/env python3
+"""Rasterize a monospace TrueType font into Axiom's anti-aliased glyph atlas.
+
+Writes src/kernel/gen/font.bin (8-bit coverage, glyph after glyph, size after
+size) and src/kernel/gen/font.inc (metrics table and codes for the extra
+symbols). Box-drawing and block characters are drawn procedurally so lines
+join exactly across cells.
+
+Default font: Cascadia Mono (SIL Open Font License 1.1).
+Usage: python tools/mkfont.py [path/to/font.ttf]
+"""
+import pathlib
+import sys
+
+from fontTools.ttLib import TTFont
+from PIL import Image, ImageDraw, ImageFont
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+OUT = ROOT / "src" / "kernel" / "gen"
+FONT = sys.argv[1] if len(sys.argv) > 1 else r"C:\Windows\Fonts\CascadiaMono.ttf"
+
+CELL_HEIGHTS = [20, 30, 40]
+EXTRA_BASE = 128
+
+# Bytes 128+ in Axiom strings select these symbols, in this order.
+EXTRAS = [
+    ("BLOCK", "\u2588"), ("SHADE3", "\u2593"), ("SHADE2", "\u2592"), ("SHADE1", "\u2591"),
+    ("HLINE", "\u2500"), ("VLINE", "\u2502"), ("TL", "\u250c"), ("TR", "\u2510"),
+    ("BL", "\u2514"), ("BR", "\u2518"), ("TEE_L", "\u251c"), ("TEE_R", "\u2524"),
+    ("TEE_T", "\u252c"), ("TEE_B", "\u2534"), ("CROSS", "\u253c"),
+    ("HALF_L", "\u258c"), ("HALF_R", "\u2590"), ("HALF_T", "\u2580"), ("HALF_B", "\u2584"),
+    ("BULLET", "\u2022"), ("MIDDOT", "\u00b7"), ("ARROW_R", "\u2192"), ("ARROW_L", "\u2190"),
+    ("ARROW_U", "\u2191"), ("ARROW_D", "\u2193"), ("CHECK", "\u2713"), ("CROSSMARK", "\u2717"),
+    ("DOT", "\u25cf"), ("CIRCLE", "\u25cb"), ("DIAMOND", "\u25c6"), ("ELLIPSIS", "\u2026"),
+    ("DEGREE", "\u00b0"), ("MICRO", "\u00b5"), ("TIMES", "\u00d7"), ("TRI_R", "\u25b6"),
+    ("APPROX", "\u2248"), ("LE", "\u2264"), ("GE", "\u2265"), ("BAR8", "\u2587"),
+]
+
+# light box drawing: which of (up, down, left, right) arms a glyph has
+BOX = {
+    "\u2500": (0, 0, 1, 1), "\u2502": (1, 1, 0, 0), "\u250c": (0, 1, 0, 1),
+    "\u2510": (0, 1, 1, 0), "\u2514": (1, 0, 0, 1), "\u2518": (1, 0, 1, 0),
+    "\u251c": (1, 1, 0, 1), "\u2524": (1, 1, 1, 0), "\u252c": (0, 1, 1, 1),
+    "\u2534": (1, 0, 1, 1), "\u253c": (1, 1, 1, 1),
+}
+
+
+def procedural(ch, w, h):
+    """Return an 'L' image for box/block characters, or None."""
+    img = Image.new("L", (w, h), 0)
+    d = ImageDraw.Draw(img)
+    if ch in BOX:
+        up, down, left, right = BOX[ch]
+        t = max(1, round(h / 18))
+        cx0 = (w - t) // 2
+        cy0 = (h - t) // 2
+        if up:
+            d.rectangle([cx0, 0, cx0 + t - 1, cy0 + t - 1], fill=255)
+        if down:
+            d.rectangle([cx0, cy0, cx0 + t - 1, h - 1], fill=255)
+        if left:
+            d.rectangle([0, cy0, cx0 + t - 1, cy0 + t - 1], fill=255)
+        if right:
+            d.rectangle([cx0, cy0, w - 1, cy0 + t - 1], fill=255)
+        return img
+    shades = {"\u2588": 255, "\u2593": 192, "\u2592": 128, "\u2591": 64}
+    if ch in shades:
+        d.rectangle([0, 0, w - 1, h - 1], fill=shades[ch])
+        return img
+    halves = {
+        "\u258c": [0, 0, w // 2 - 1, h - 1], "\u2590": [w // 2, 0, w - 1, h - 1],
+        "\u2580": [0, 0, w - 1, h // 2 - 1], "\u2584": [0, h // 2, w - 1, h - 1],
+        "\u2587": [0, h // 8, w - 1, h - 1],
+    }
+    if ch in halves:
+        d.rectangle(halves[ch], fill=255)
+        return img
+    return None
+
+
+def pick_size(cell_h):
+    """Largest em size whose line height fits the cell."""
+    best = None
+    for px in range(6, cell_h * 2):
+        f = ImageFont.truetype(FONT, px)
+        asc, desc = f.getmetrics()
+        if asc + desc <= cell_h:
+            best = (px, f, asc, desc)
+    return best
+
+
+def main():
+    cmap = TTFont(FONT).getBestCmap()
+    chars = [chr(c) for c in range(32, 127)] + [c for _, c in EXTRAS]
+    OUT.mkdir(parents=True, exist_ok=True)
+
+    blob = bytearray()
+    table = []
+    previews = []
+    for cell_h in CELL_HEIGHTS:
+        px, font, asc, desc = pick_size(cell_h)
+        cell_w = round(font.getlength("M"))
+        top = (cell_h - (asc + desc)) // 2
+        baseline = top + asc
+        table.append((len(blob), cell_w, cell_h))
+        sheet = Image.new("L", (cell_w * 32, cell_h * ((len(chars) + 31) // 32)), 0)
+        for i, ch in enumerate(chars):
+            img = procedural(ch, cell_w, cell_h)
+            if img is None:
+                glyph = ch if ord(ch) in cmap else "?"
+                img = Image.new("L", (cell_w, cell_h), 0)
+                ImageDraw.Draw(img).text((0, baseline), glyph, font=font, fill=255, anchor="ls")
+            blob += img.tobytes()
+            sheet.paste(img, ((i % 32) * cell_w, (i // 32) * cell_h))
+        previews.append(sheet)
+        missing = [f"U+{ord(c):04X}" for c in chars if ord(c) not in cmap and procedural(c, 4, 4) is None]
+        print(f"cell {cell_w}x{cell_h}: em {px}px, baseline {baseline}, missing {missing or 'none'}")
+
+    (OUT / "font.bin").write_bytes(blob)
+
+    lines = [
+        "; generated by tools/mkfont.py - do not edit",
+        f"; source: {pathlib.Path(FONT).name} (SIL Open Font License 1.1)",
+        f"FONT_SIZES      equ {len(CELL_HEIGHTS)}",
+        f"FONT_GLYPHS     equ {len(chars)}",
+        f"FONT_EXTRA_BASE equ {EXTRA_BASE}",
+        f"FONT_EXTRAS     equ {len(EXTRAS)}",
+        "align 8",
+        "font_sizes:                 ; qword offset into font_data, dword cell width, dword cell height",
+    ]
+    for off, w, h in table:
+        lines.append(f"    dq {off}")
+        lines.append(f"    dd {w}, {h}")
+    for i, (name, _) in enumerate(EXTRAS):
+        lines.append(f"G_{name:<14} equ {EXTRA_BASE + i}")
+    (OUT / "font.inc").write_text("\n".join(lines) + "\n")
+
+    width = max(p.width for p in previews)
+    height = sum(p.height for p in previews) + 8 * len(previews)
+    preview = Image.new("L", (width, height), 40)
+    y = 0
+    for p in previews:
+        preview.paste(p, (0, y))
+        y += p.height + 8
+    preview.save(OUT / "font_preview.png")
+    print(f"wrote {len(blob)} bytes of glyphs")
+
+
+if __name__ == "__main__":
+    main()

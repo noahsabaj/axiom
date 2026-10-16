@@ -1,0 +1,89 @@
+; =============================================================================
+;  kernel.asm - the Axiom kernel: one flat image linked at KERNEL_BASE.
+;  The loader copies the file, zeroes the rest up to the header's memory
+;  size (.bss) and jumps to kernel_main.
+; =============================================================================
+
+bits 64
+default rel
+
+%include "bootinfo.inc"
+%include "defs.inc"
+%include "macros.inc"
+
+org KERNEL_BASE
+
+section .text progbits align=16
+section .rodata progbits align=64 follows=.text
+section .data progbits align=64 follows=.rodata
+section .bss nobits align=64
+
+[map all build/kernel.map]
+
+section .text
+kernel_header:
+    db 'AXIOMKRN'
+    dq kernel_main
+    dq kernel_file_end - KERNEL_BASE
+    dq kernel_end - KERNEL_BASE
+
+section .rodata
+%include "gen/font.inc"
+align 64
+font_data:      incbin "gen/font.bin"
+
+section .text
+%include "lib.asm"
+%include "serial.asm"
+%include "cpu.asm"
+%include "gdt.asm"
+%include "idt.asm"
+%include "pmm.asm"
+%include "gfx.asm"
+%include "console.asm"
+%include "acpi.asm"
+%include "smbios.asm"
+%include "apic.asm"
+%include "smp.asm"
+%include "pci.asm"
+%include "kbd.asm"
+%include "usb.asm"
+%include "usbdev.asm"
+%include "usbhub.asm"
+%include "hid.asm"
+%include "usbmsc.asm"
+%include "bt.asm"
+%include "pointer.asm"
+%include "nvme.asm"
+%include "disk.asm"
+%include "fat.asm"
+%include "rtc.asm"
+%include "log.asm"
+%include "net.asm"
+%include "rtl8168.asm"
+%include "tcp.asm"
+%include "netapp.asm"
+%include "sha256.asm"
+%include "aesgcm.asm"
+%include "x25519.asm"
+%include "rand.asm"
+%include "tls.asm"
+%include "http.asm"
+%include "cryptotest.asm"
+%include "mandel.asm"
+%include "ui.asm"
+%include "shell.asm"
+%include "power.asm"
+%include "boot.asm"
+
+section .data
+align 8
+boot_info:      dq 0
+phys_base:      dq PHYS_BASE
+kernel_file_end:
+
+section .bss
+alignb 64
+percpu:         resb MAX_CPUS * PC_SIZE
+alignb 4096
+kernel_end:

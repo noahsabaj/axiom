@@ -1,0 +1,5 @@
+# generated: images, the ESP, test programs and their output, logs
+build/
+__pycache__/
+# parked work, not part of the tree
+*.wip
