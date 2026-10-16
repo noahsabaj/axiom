@@ -74,7 +74,7 @@ agents issue structured intents against the object graph.
 | **M1 Spine** | Physical and virtual memory managers, kernel objects and capability tables, threads, a P/E-aware per-core scheduler, async rings, ring-3 tasks. |
 | **M2 Reach** | USB hubs and mice, NVMe with per-core queues, Realtek GbE, VT-d isolation for every driver. *Under way: hubs, hot-plug, HID mice and keyboards, USB sticks, NVMe (one polled queue), FAT32 and Realtek Ethernet (one ring pair) work today.* |
 | **M3 Store** | A transactional, content-addressed object store on NVMe with provenance and snapshots. |
-| **M4 Net** | TCP/IP, TLS 1.3 on AES-NI/SHA-NI/VAES, HTTP: talk to models in the cloud. *Under way: ARP, IPv4, ICMP, UDP, DHCP, DNS, TCP (client), HTTP and HTTPS over a TLS 1.3 client of our own (AES-128-GCM, X25519, SHA-256 on AES-NI, PCLMULQDQ and SHA-NI) work today, with server certificates verified (X.509, RSA, ECDSA, Mozilla's trusted roots).* |
+| **M4 Net** | TCP/IP, TLS 1.3 on AES-NI/SHA-NI/VAES, HTTP: talk to models in the cloud. *Under way: ARP, IPv4, ICMP, UDP, DHCP, DNS, TCP (client), HTTP and HTTPS over a TLS 1.3 client of our own (AES-128-GCM, X25519, SHA-256 on AES-NI, PCLMULQDQ and SHA-NI) work today, with server certificates verified (X.509, RSA, ECDSA, Mozilla's trusted roots), and `ask` talks to Claude through the Messages API, streamed.* |
 | **M5 Agents** | Principals, budgets, staged transactions, the structured workspace, and local inference across all cores. |
 
 ## Honest frontiers

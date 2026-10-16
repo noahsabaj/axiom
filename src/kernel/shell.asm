@@ -2,7 +2,7 @@
 ;  shell.asm - a small command line in the console panel
 ; =============================================================================
 
-LINE_MAX        equ 120
+LINE_MAX        equ 1000
 
 section .text
 
@@ -50,9 +50,70 @@ sh_flush:
     pop rdi
     ret
 
+; shell_wait: the command runs on (a fetch); the prompt waits for
+; shell_resume, and keys but ctrl+C are ignored meanwhile. Preserves all.
+shell_wait:
+    mov byte [sh_wait], 1
+    ret
+
+; shell_resume: what the prompt waited for is over. Preserves all.
+shell_resume:
+    cmp byte [sh_wait], 0
+    je .out
+    mov byte [sh_wait], 0
+    call shell_prompt
+.out:
+    ret
+
+; sh_secret(RDI = line) -> CF if it sets a secret ('claude key <key>'):
+; then it is shown as stars, and neither logged nor kept for KEY_UP.
+; Preserves all.
+sh_secret:
+    push rsi
+    push rdi
+    mov rsi, rdi
+.lead:
+    cmp byte [rsi], ' '
+    jne .word
+    inc rsi
+    jmp .lead
+.word:
+    lea rdi, [str_sh_claude]
+    call http_prefix
+    jc .no
+    cmp byte [rsi], ' '
+    jne .no
+.gap:
+    inc rsi
+    cmp byte [rsi], ' '
+    je .gap
+    lea rdi, [str_sh_key]
+    call http_prefix
+    jc .no
+    cmp byte [rsi], ' '
+    jne .no
+.key:
+    inc rsi                             ; and something after it
+    cmp byte [rsi], ' '
+    je .key
+    cmp byte [rsi], 0
+    je .no
+    stc
+    jmp .out
+.no:
+    clc
+.out:
+    pop rdi
+    pop rsi
+    ret
+
 ; shell_key(EAX = key code)
 shell_key:
     push rbx
+    cmp eax, 3                          ; ctrl+C, always
+    je .cancel
+    cmp byte [sh_wait], 0
+    jne .out
     cmp eax, 10
     je .enter
     cmp eax, 8
@@ -61,8 +122,6 @@ shell_key:
     je .history
     cmp eax, 12                         ; ctrl+L
     je .clear
-    cmp eax, 3                          ; ctrl+C
-    je .cancel
     cmp eax, 32
     jb .out
     cmp eax, 126
@@ -72,7 +131,13 @@ shell_key:
     jae .out
     lea rdx, [sh_line]
     mov [rdx + rcx], al
+    mov byte [rdx + rcx + 1], 0
     inc dword [sh_len]
+    lea rdi, [sh_line]
+    call sh_secret                      ; the key itself is not shown
+    jnc .echo
+    mov al, '*'
+.echo:
     call sh_echo
     jmp .out
 .backspace:
@@ -106,7 +171,8 @@ shell_key:
     call shell_prompt
     jmp .out
 .cancel:
-    call net_cancel                     ; a ping or a lookup stops
+    mov byte [sh_wait], 0               ; (the prompt comes back below)
+    call net_cancel                     ; a ping, a lookup or a fetch stops
     mov dword [sh_len], 0
     lea rdi, [str_ctrl_c]
     call kputs
@@ -120,13 +186,26 @@ shell_key:
     mov byte [rdx + rcx], 0
     test ecx, ecx
     jz .empty
+    lea rdi, [sh_line]
+    call sh_secret
+    jc .secret
     lea rdi, [sh_history]
     lea rsi, [sh_line]
     mov ecx, LINE_MAX + 1
     rep movsb
     lea rdi, [sh_line]
     call log_command
+    jmp .exec
+.secret:
+    lea rdi, [str_sh_secret]
+    call log_command
+.exec:
     call shell_exec
+    mov dword [sh_len], 0
+    cmp byte [sh_wait], 0
+    jne .out
+    call shell_prompt
+    jmp .out
 .empty:
     mov dword [sh_len], 0
     call shell_prompt
@@ -449,6 +528,9 @@ cmd_panic:
 section .rodata
 str_prompt:     db 'axiom> ', 0
 str_ctrl_c:     db '^C', 10, 0
+str_sh_claude:  db 'claude', 0
+str_sh_key:     db 'key', 0
+str_sh_secret:  db 'claude key (not logged)', 0
 
 %macro COMMAND 3                        ; name, handler, help
     dq %%name, %2, %%help
@@ -492,6 +574,8 @@ commands:
     COMMAND 'host',     cmd_host,     'host <name>: look up its address'
     COMMAND 'arp',      cmd_arp,      'the neighbours Axiom knows'
     COMMAND 'http',     cmd_http,     'http [-k] <[https://]host[:port][/path]> [file]: fetch a page; -k: no certificate check'
+    COMMAND 'ask',      cmd_ask,      'ask <question>: ask Claude; the conversation goes on'
+    COMMAND 'claude',   cmd_claude,   'claude [key <key>|model <name>|server <url> [-k]|new]: settings for ask'
     COMMAND 'tcp',      cmd_tcp,      'TCP connections'
     COMMAND 'crypto',   cmd_crypto,   'check the TLS crypto against its test vectors, and time it'
     COMMAND 'log',      cmd_log,      'log [save|on|off]: AXIOM.LOG on the boot stick'
@@ -527,6 +611,7 @@ demo_on:        db 0
 
 section .bss
 sh_len:         resd 1
+sh_wait:        resb 1
 alignb 8
 sh_args:        resq 1
 sh_word:        resb 32

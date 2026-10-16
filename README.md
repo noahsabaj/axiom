@@ -2,7 +2,7 @@
 
 An operating system written entirely in x86-64 assembly, booting straight from
 UEFI onto the hardware that is actually present. No C, no libc, no GRUB, no
-borrowed kernel: about thirty-three thousand lines of NASM, top to bottom.
+borrowed kernel: about thirty-six thousand lines of NASM, top to bottom.
 
 Why it exists and where it is going: [docs/VISION.md](docs/VISION.md).
 How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
@@ -30,6 +30,11 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   The server's certificate chain is checked against 136 built-in trusted
   roots, its name and dates too; `http -k` fetches without checking, and
   says so.
+- **Claude**, from the prompt: `ask <question>` sends it to the Messages API
+  over that https and shows the answer as it is written, word-wrapped, the
+  conversation kept until `claude new`. The API key is typed once
+  (`claude key ...`, shown as stars and never logged) or read from
+  `CLAUDE.KEY` on the boot stick.
 - **TLS 1.3**, written here: SHA-256 on the SHA extensions, HMAC, HKDF,
   AES-128-GCM on AES-NI and PCLMULQDQ, X25519, keys from RDSEED, the
   client handshake, and certificates: X.509, SHA-384/512, RSA (PKCS #1 v1.5
@@ -37,8 +42,8 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   every boot; `crypto` repeats the check and times each.
 - A shell over a USB keyboard, a PS/2 keyboard or the serial port. Commands:
   `help info cpus mem pci acpi usb disks vol ls cd cat cp write mkdir rm date
-  net ip dhcp ping host arp http tcp crypto log demo bench uptime echo clear panic
-  reboot poweroff`.
+  net ip dhcp ping host arp http ask claude tcp crypto log demo bench uptime
+  echo clear panic reboot poweroff`.
 - **A log on the boot stick**: everything Axiom prints, the commands typed
   and any panic report go into `AXIOM.LOG` on the USB stick it booted from,
   readable from Windows afterwards.
@@ -143,7 +148,9 @@ python tools/run.py --nic rtl8139
 There, `http example.com` fetches through QEMU to the internet, and
 `http 10.0.2.2:8000/` reaches a server on your own machine (for instance
 `python -m http.server 8000 --bind 127.0.0.1`); `python tools/httpsd.py`
-serves `https://10.0.2.2:8443/` the same way. To see TCP cope with a bad
+serves `https://10.0.2.2:8443/` the same way, and `python tools/claudemock.py`
+stands in for the Claude API at `https://10.0.2.2:8444` (`claude server
+https://10.0.2.2:8444 -k`, then the key it prints). To see TCP cope with a bad
 network, `tools/netpeer.py` plays a server at 10.1.0.1 that loses, reorders,
 refuses and resets on purpose (its docstring lists the ports); start it,
 then boot with `--netdev "socket,connect=127.0.0.1:5555"`, set
@@ -200,6 +207,11 @@ Things worth knowing:
   seconds; `net` shows the link and address, `ping 1.1.1.1` or
   `ping example.com` tries the way out, `http example.com` fetches a page,
   ctrl+C stops any of them.
+- To talk to Claude, put your API key (from console.anthropic.com) in a file
+  `CLAUDE.KEY` at the top of the stick, or type `claude key <key>` once
+  booted; then `ask <question>`. The file is plain text on the stick, so keep
+  the stick to yourself, or type the key instead. Each question is billed to
+  that key; `claude model <name>` picks a cheaper model.
 - Keyboards and mice work directly or through hubs (the Keychron's receiver
   included). Bluetooth isn't supported yet, so a Bluetooth-only mouse won't
   move the cursor.
@@ -220,12 +232,14 @@ tools/mkdisk.py         a GPT + FAT32 test disk (as an NVMe drive or a USB stick
 tools/mkstick.py        a bootable stick image with build/esp on it
 tools/netpeer.py        an unreliable network peer, to test TCP against
 tools/httpsd.py         a local HTTPS server (TLS 1.3), to test https against
+tools/claudemock.py     a stand-in for the Claude Messages API, to test ask against
 tools/fatcheck.py       check that disk after Axiom has written to it
 tools/mkroots.py        the trusted roots, src/kernel/gen/roots.asm, from
                         certifi's copy of Mozilla's list
 tools/test/             host-side tests for self-contained modules (tls: the
                         crypto; tlsclient: the TLS client against OpenSSL;
-                        pki: certificates and signatures)
+                        pki: certificates and signatures; claude: ask, in
+                        QEMU, against claudemock.py)
 tools/mkfont.py         rasterize the console font into src/kernel/gen/
 docs/                   vision and architecture
 ```

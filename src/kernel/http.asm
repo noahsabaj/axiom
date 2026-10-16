@@ -1,17 +1,37 @@
 ; =============================================================================
-;  http.asm - 'http <url> [file]': one GET over tcp.asm, or for https://
-;  over tls.asm on top of it. The answer is kept in memory (1 MiB at most);
-;  at the end come the status line, a few headers, and the start of the
-;  body, or the body goes to a file on the current volume. HTTP/1.0, so the
-;  server closes when it is done and never sends chunks. For https the
-;  server's certificate must name the host and lead to a trusted root
-;  (tls.asm, x509.asm), dates taken from the CMOS clock; 'http -k' fetches
-;  without checking who the server is, as curl's -k does.
+;  http.asm - one request at a time over tcp.asm, or for https:// over
+;  tls.asm on top of it, for a client: 'http <url> [file]' here, which GETs
+;  over HTTP/1.0 (so the server closes when it is done and never sends
+;  chunks) and keeps the answer in memory (1 MiB at most), then shows the
+;  status line, a few headers and the start of the body, or saves the body
+;  to a file on the current volume; or claude.asm. For https the server's
+;  certificate must name the host and lead to a trusted root (tls.asm,
+;  x509.asm), dates taken from the CMOS clock; 'http -k' fetches without
+;  checking who the server is, as curl's -k does.
+;
+;    http_fetch(RSI = URL, RDX = the client, ECX = HF_* flags) -> CF (said
+;        why) if it could not begin; else the client hears how it goes
+;    http_hangup    the client has what it wants: closed now (close_notify
+;        first for https), and neither DONE nor LOST follows. Preserves all.
+;
+;  The client is a table of handlers, at HA_*: REQUEST (-> RSI = the
+;  request, RDX = its bytes; http_host, http_port and http_path are set),
+;  DATA (RSI = bytes of the answer, EDX = how many), DONE (the server
+;  closed: the answer is whole) and LOST (it ended early, already said why,
+;  or was stopped). They may change RAX, RCX, RDX, RSI, RDI and R8-R11.
 ; =============================================================================
 
 HTTP_MAX        equ 1024 * 1024
 HTTP_LINES      equ 20                  ; of the body, shown
 HTTP_LINE       equ 150                 ; characters of a line, shown
+
+HA_REQUEST      equ 0
+HA_DATA         equ 8
+HA_DONE         equ 16
+HA_LOST         equ 24
+
+HF_INSECURE     equ 1                   ; do not check the certificate chain
+HF_QUIET        equ 2                   ; only warnings and failures are said
 
 section .text
 
@@ -19,10 +39,10 @@ section .text
 cmd_http:
     push r12
     push r13
-    cmp qword [http_conn], 0            ; (not while one is running: -k is its)
+    cmp qword [http_app], 0             ; (not while one runs: the file is its)
     jne .busy
     mov rsi, [sh_args]
-    mov byte [http_insecure], 0
+    xor r13d, r13d                      ; R13 = HF_*
     cmp word [rsi], '-k'
     jne .url
     mov al, [rsi + 2]
@@ -31,7 +51,7 @@ cmd_http:
     cmp al, ' '
     jne .url
 .flag:
-    mov byte [http_insecure], 1
+    mov r13d, HF_INSECURE
     call arg_split
     mov rsi, rdi
 .url:
@@ -53,24 +73,12 @@ cmd_http:
     jb .file
     mov byte [rdi + rcx], 0
 .filed:
-    cmp qword [http_conn], 0
-    jne .busy
     mov rsi, r12
-    call http_url
+    lea rdx, [http_get]
+    mov ecx, r13d
+    call http_fetch
     jc .out
-    call net_ready
-    jc .out
-    lea rsi, [http_host]
-    call ip_parse
-    jc .name
-    cmp byte [rsi], 0
-    jne .name
-    call http_begin
-    jmp .out
-.name:
-    lea rsi, [http_host]
-    mov edx, 2
-    call dns_lookup
+    call shell_wait                     ; the prompt comes back with the answer
     jmp .out
 .busy:
     KLOG "http: a fetch is under way (ctrl+C stops it)"
@@ -80,6 +88,49 @@ cmd_http:
 .out:
     pop r13
     pop r12
+    ret
+
+http_fetch:
+    push rcx
+    push rdx
+    push rsi
+    cmp qword [http_app], 0
+    jne .busy
+    mov eax, ecx
+    and al, HF_INSECURE
+    mov [http_insecure], al
+    and cl, HF_QUIET
+    mov [http_quiet], cl
+    xor eax, eax
+    mov [http_len], rax
+    mov [http_total], rax
+    call http_url
+    jc .out
+    call net_ready
+    jc .out
+    mov [http_app], rdx
+    lea rsi, [http_host]
+    call ip_parse
+    jc .name
+    cmp byte [rsi], 0
+    jne .name
+    call http_connect
+    jmp .started
+.name:
+    lea rsi, [http_host]
+    mov edx, 2
+    call dns_lookup                     ; then http_begin, or http_dns_failed
+.started:
+    jnc .out
+    mov qword [http_app], 0
+    jmp .out
+.busy:
+    KLOG "http: busy with another request (ctrl+C stops it)"
+    stc
+.out:
+    pop rsi
+    pop rdx
+    pop rcx
     ret
 
 ; http_url(RSI = text) -> http_host, http_port, http_path; CF (said why) if
@@ -215,33 +266,50 @@ http_prefix:
     pop rax
     ret
 
-; http_begin(EAX = the server's address): from cmd_http, or from dns_done
+; http_begin(EAX = the server's address): from dns_done
 http_begin:
+    cmp qword [http_app], 0
+    je .out
+    call http_connect
+    jc http_lost
+.out:
+    ret
+
+; http_dns_failed: the lookup for http_fetch went nowhere (and said why)
+http_dns_failed:
+    cmp qword [http_conn], 0
+    je http_lost
+    ret
+
+; http_connect(EAX = the server's address) -> CF (said why) if it cannot
+http_connect:
     push rcx
     push rdx
     push rsi
     push rdi
     cmp qword [http_conn], 0
-    jne .out
+    jne .fail
     mov [http_ip], eax
+    cmp byte [http_quiet], 0
+    jne .connect
     lea rdx, [http_host]
     lea rsi, [http_path]
     mov ecx, [http_port]
     KLOG "http: GET %s from %s (%I) port %u", rsi, rdx, rax, rcx
+.connect:
     mov edi, eax
-    mov esi, ecx
+    mov esi, [http_port]
     lea rdx, [http_ops]
     call tcp_connect
     jc .fail
     mov [http_conn], rax
-    xor eax, eax
-    mov [http_len], rax
-    mov [http_total], rax
     RDTSC64
     mov [http_t0], rax
+    clc
     jmp .out
 .fail:
     KLOG "http: cannot connect (no route, or every connection is busy)"
+    stc
 .out:
     pop rdi
     pop rsi
@@ -249,17 +317,80 @@ http_begin:
     pop rcx
     ret
 
+; http_end: the answer is whole; the client hears it
+http_end:
+    mov qword [http_conn], 0
+    mov rax, [http_app]
+    mov qword [http_app], 0
+    test rax, rax
+    jz .out
+    jmp [rax + HA_DONE]
+.out:
+    ret
+
+; http_lost: it ended early, and has said why; the client hears it
+http_lost:
+    mov qword [http_conn], 0
+    mov rax, [http_app]
+    mov qword [http_app], 0
+    test rax, rax
+    jz .out
+    jmp [rax + HA_LOST]
+.out:
+    ret
+
+http_hangup:
+    push rax
+    push rdi
+    mov rdi, [http_conn]
+    test rdi, rdi
+    jz .out
+    cmp byte [http_tls], 0
+    je .tcp
+    call tls_close                      ; (sent through http_conn)
+.tcp:
+    mov qword [http_conn], 0
+    mov qword [http_app], 0
+    call tcp_close
+.out:
+    pop rdi
+    pop rax
+    ret
+
 ; http_cancel: ctrl+C. Preserves all.
 http_cancel:
     cmp qword [http_conn], 0
     je .out
+    push rax
+    push rcx
+    push rdx
+    push rsi
     push rdi
+    push r8
+    push r9
+    push r10
+    push r11
     mov rdi, [http_conn]
-    mov qword [http_conn], 0
     call tcp_abort
     call tls_abort
-    pop rdi
+    cmp byte [http_quiet], 0
+    jne .client_first
     KLOG "http: stopped"
+    call http_lost
+    jmp .said
+.client_first:                          ; (it may be in the middle of a line)
+    call http_lost
+    KLOG "http: stopped"
+.said:
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rax
 .out:
     ret
 
@@ -267,25 +398,20 @@ http_cancel:
 ;  The connection's handlers (RDI = the connection)
 ; -----------------------------------------------------------------------------
 
+; http_open: the client's request goes out
 http_open:
-    mov rcx, [http_port]
-    lea rdx, [http_host]
-    lea rsi, [http_path]
-    cmp ecx, [http_defport]
-    jne .port
-    SPRINTF http_req, `GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: Axiom/0.1\r\nAccept: */*\r\nConnection: close\r\n\r\n`, rsi, rdx
-    jmp .send
-.port:
-    mov ecx, ecx
-    SPRINTF http_req, `GET %s HTTP/1.0\r\nHost: %s:%u\r\nUser-Agent: Axiom/0.1\r\nAccept: */*\r\nConnection: close\r\n\r\n`, rsi, rdx, rcx
-.send:
-    mov edx, eax
-    lea rsi, [http_req]
+    mov rax, [http_app]
+    test rax, rax
+    jz http_drop
+    call [rax + HA_REQUEST]
     cmp byte [http_tls], 0
     jne .tls
     mov rdi, [http_conn]
     call tcp_write
-    ret
+    cmp rax, rdx
+    je .out
+    KLOG "http: the request is too big to send"
+    jmp http_drop
 .tls:
     call tls_write
     jnc .out
@@ -294,7 +420,24 @@ http_open:
 .out:
     ret
 
-; http_drop: the connection given up, at once
+; http_get_request: http's own GET
+http_get_request:
+    mov rcx, [http_port]
+    lea rdx, [http_host]
+    lea rsi, [http_path]
+    cmp ecx, [http_defport]
+    jne .port
+    SPRINTF http_req, `GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: Axiom/0.1\r\nAccept: */*\r\nConnection: close\r\n\r\n`, rsi, rdx
+    jmp .made
+.port:
+    mov ecx, ecx
+    SPRINTF http_req, `GET %s HTTP/1.0\r\nHost: %s:%u\r\nUser-Agent: Axiom/0.1\r\nAccept: */*\r\nConnection: close\r\n\r\n`, rsi, rdx, rcx
+.made:
+    mov edx, eax
+    lea rsi, [http_req]
+    ret
+
+; http_drop: the connection given up, at once; the client hears it
 http_drop:
     mov rdi, [http_conn]
     test rdi, rdi
@@ -302,6 +445,7 @@ http_drop:
     mov qword [http_conn], 0
     call tcp_abort
     call tls_abort
+    jmp http_lost
 .out:
     ret
 
@@ -338,10 +482,22 @@ http_t_open:
     ret
 
 http_t_data:
+    cmp rdi, [http_conn]                ; (not after a hangup)
+    jne .out
     cmp byte [http_tls], 0
-    je http_data
+    je http_app_data
     mov edx, edx
     jmp tls_input
+.out:
+    ret
+
+http_app_data:
+    mov rax, [http_app]
+    test rax, rax
+    jz .out
+    jmp [rax + HA_DATA]
+.out:
+    ret
 
 http_t_fin:
     cmp byte [http_tls], 0
@@ -350,15 +506,18 @@ http_t_fin:
     jne .out
     cmp dword [tls_state], TL_OPEN
     jne .early
+    cmp byte [http_quiet], 0            ; (a quiet client knows if it is whole)
+    jne .quiet
     KLOG "https: the server closed without close_notify (the answer may be cut short)"
+.quiet:
     call tls_abort
     call tcp_close
-    jmp http_finish
+    jmp http_end
 .early:
     KLOG "https: the server closed the connection during the TLS handshake"
     call tls_abort
     call tcp_close
-    mov qword [http_conn], 0
+    jmp http_lost
 .out:
     ret
 
@@ -376,6 +535,8 @@ http_tls_ready:
     mov ecx, [tls_cert_bytes]
     cmp dword [tls_verified], 0
     je .unchecked
+    cmp byte [http_quiet], 0
+    jne http_open
     mov edx, [x509_depth]
     lea rsi, [http_host]
     KLOG "https: TLS 1.3, AES-128-GCM, X25519; certificate for %s checked: %u intermediate(s), trusted root %s", rsi, rdx, qword [x509_anchor]
@@ -388,7 +549,7 @@ http_tls_closed:                        ; the server's close_notify: the end
     call tls_close
     mov rdi, [http_conn]
     call tcp_close
-    jmp http_finish
+    jmp http_end
 
 ; EAX = what went wrong
 http_tls_fail:
@@ -403,7 +564,12 @@ http_tls_fail:
     cmp ecx, TLE_CERT
     jne .plain
     lea rsi, [http_host]
+    cmp byte [http_quiet], 0
+    jne .quiet
     KLOG "https: not fetched: %s (%s); 'http -k' fetches it anyway, without knowing who sends it", rax, rsi
+    jmp .drop
+.quiet:
+    KLOG "https: %s cannot prove who it is: %s", rsi, rax
     jmp .drop
 .plain:
     KLOG "https: %s", rax
@@ -413,13 +579,11 @@ http_tls_fail:
     jz .out
     mov qword [http_conn], 0
     call tcp_abort
-    cmp qword [http_total], 0
-    je .out
-    KLOG "http: %b had arrived", qword [http_total]
+    jmp http_lost
 .out:
     ret
 
-; RSI = data, EDX = bytes
+; http's own GET: RSI = data, EDX = bytes
 http_data:
     mov eax, edx
     add [http_total], rax
@@ -438,7 +602,7 @@ http_fin:
     cmp rdi, [http_conn]
     jne .out
     call tcp_close
-    call http_finish
+    jmp http_end
 .out:
     ret
 
@@ -456,21 +620,30 @@ http_gone:
     cmp esi, TCP_TIMEOUT
     je .timeout
     KLOG "http: the connection ended early"
-    jmp .partial
+    jmp http_lost
 .refused:
     KLOG "http: %I refused the connection on port %u", qword [http_ip], rax
-    ret
+    jmp http_lost
 .reset:
     KLOG "http: the server reset the connection"
-    jmp .partial
+    jmp http_lost
 .timeout:
     KLOG "http: no answer from %I (timed out)", qword [http_ip]
-.partial:
+    jmp http_lost
+.out:
+    ret
+
+; http's own GET: the end of it, whole or not
+http_get_done:
+    call http_finish
+    jmp shell_resume
+
+http_get_lost:
     cmp qword [http_total], 0
     je .out
     KLOG "http: %b had arrived", qword [http_total]
 .out:
-    ret
+    jmp shell_resume
 
 ; http_finish: the whole answer is in; what it says
 http_finish:
@@ -478,7 +651,6 @@ http_finish:
     push r12
     push r13
     push r14
-    mov qword [http_conn], 0
     RDTSC64
     sub rax, [http_t0]
     xor edx, edx
@@ -613,11 +785,13 @@ str_h_type:     db 'content-type:', 0
 str_h_location: db 'location:', 0
 align 8
 http_ops:       dq http_t_open, http_t_data, http_t_fin, http_gone
-http_tls_ops:   dq http_tls_ready, http_data, http_tls_closed, http_tls_fail
+http_tls_ops:   dq http_tls_ready, http_app_data, http_tls_closed, http_tls_fail
+http_get:       dq http_get_request, http_data, http_get_done, http_get_lost
 
 section .bss
 alignb 8
 http_conn:      resq 1
+http_app:       resq 1                  ; the client, while one runs
 http_len:       resq 1                  ; bytes kept
 http_total:     resq 1                  ; bytes that came
 http_t0:        resq 1
@@ -626,6 +800,7 @@ http_ip:        resd 1
 http_defport:   resd 1                  ; 80, or 443 for https
 http_tls:       resb 1
 http_insecure:  resb 1                  ; -k
+http_quiet:     resb 1
 http_host:      resb 256
 http_path:      resb 512
 http_file:      resb 256

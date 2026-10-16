@@ -322,7 +322,9 @@ def main():
                 proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 proc.kill()
-        print(serial.read_text(errors="replace"))
+        sys.stdout.flush()                      # (UTF-8 now: Claude's answers)
+        sys.stdout.buffer.write(serial.read_bytes().replace(b"\r\n", b"\n") + b"\n")
+        sys.stdout.flush()
         print(f"run.py: {time.time() - t0:.1f} s in all", file=sys.stderr)
     else:
         args += ["-serial", "stdio"]

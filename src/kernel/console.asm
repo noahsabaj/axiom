@@ -103,7 +103,13 @@ con_putc:
     jmp .out
 .backspace:
     cmp qword [con_cx], 0
-    je .out
+    jne .back
+    cmp qword [con_cy], 0               ; to the end of the row above, where
+    je .out                             ; a long line wrapped
+    dec qword [con_cy]
+    mov rcx, [con_cols]
+    mov [con_cx], rcx
+.back:
     dec qword [con_cx]
     mov edx, ' '
     call con_draw_at_cursor

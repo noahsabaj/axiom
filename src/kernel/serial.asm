@@ -97,6 +97,29 @@ serial_write:
     pop rax
     ret
 
+; serial_text(RDI string): as serial_write, but bytes over 127 go out as
+; they are (the string is UTF-8, not the console's glyph codes). Preserves all.
+serial_text:
+    push rax
+    push rdi
+.next:
+    mov al, [rdi]
+    test al, al
+    jz .done
+    cmp al, 10
+    jne .plain
+    mov al, 13
+    call serial_putc
+    mov al, 10
+.plain:
+    call serial_putc
+    inc rdi
+    jmp .next
+.done:
+    pop rdi
+    pop rax
+    ret
+
 ; serial_extra(AL = glyph code >= 128): a UTF-8 equivalent, or '?'
 serial_extra:
     push rax

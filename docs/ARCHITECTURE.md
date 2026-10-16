@@ -241,8 +241,12 @@ off. `log` shows the state; `log save`, `log on`, `log off`.
   ones are trimmed. A segment for no connection gets a reset. Both closes
   work; TIME_WAIT lasts 10 s, and a new connection may take over a slot in
   it. `tcp` lists connections with their state, bytes and round trip.
-- **HTTP** (`http.asm`): `http <host[:port][/path]> [file]`, one GET at a
-  time over HTTP/1.0 (so no chunks, and the server's close ends the body).
+- **HTTP** (`http.asm`): one request at a time for a client, a table of
+  four handlers (the request, data, done, lost), so that `http` and `ask`
+  share the connection, TLS and failure handling. `http_hangup` lets a
+  client close as soon as it has what it wants. `http <host[:port][/path]>
+  [file]` is its own client: one GET over HTTP/1.0 (so no chunks, and the
+  server's close ends the body).
   Up to 1 MiB of the answer is kept; then the status line, `Content-Type`
   and `Location`, and the first 20 lines of the body, or the body goes to a
   file on the current volume. `https://` goes over `tls.asm` (below), port
@@ -374,6 +378,54 @@ A TLS 1.3 client (RFC 8446) and the crypto under it.
   with plain-x86 SHA-256 and again with SHA-NI. On this i7-14700F: SHA-256
   about 1.6 GB/s on SHA-NI (210 MB/s plain), AES-128-GCM 575 MB/s, X25519
   64 us.
+
+## Claude: `claude.asm`, `json.asm`, `text.asm`
+
+`ask <question>` talks to Claude through the Messages API.
+
+- **The request**: `POST /v1/messages` over HTTP/1.1 with `x-api-key`,
+  `anthropic-version: 2023-06-01` and `Connection: close`; the JSON body
+  holds the model (`claude-opus-5-5` unless `claude model` says otherwise),
+  `max_tokens` 4096, `stream: true`, a system prompt saying the console shows
+  plain text only, and the whole conversation, which is kept in memory (80
+  KiB, the oldest exchanges dropped first) and sent each time. A question
+  that gets no answer leaves it again; a partial answer stays.
+- **The answer** is undone a byte at a time, so it may arrive cut anywhere:
+  the headers (status, `Transfer-Encoding: chunked`, `Content-Type:
+  text/event-stream`, `Content-Length`), the chunks, lines of server-sent
+  events, and each event's JSON. `content_block_delta` text is shown as it
+  comes; thinking and other blocks are not; `message_start` and
+  `message_delta` give the token counts and the stop reason; at
+  `message_stop` Axiom hangs up without waiting for the server's close. An
+  `error` event, or a body that is not events (401, 400, 529...), is said
+  with the API's own message.
+- **On the screen** the answer is wrapped at word boundaries, tracking the
+  console's column; its UTF-8 is decoded (`text.asm`) and each code point
+  drawn as the font has it (ASCII, or one of its 39 symbols: bullets,
+  arrows, box drawing, check marks), as a look-alike (curly quotes, dashes,
+  accented Latin letters) or as `?`. The log and the serial port get the
+  UTF-8 itself.
+- **JSON** (`json.asm`): find a key in an object, read a string (escapes,
+  `\u` and surrogate pairs to UTF-8, cut on a character boundary), a number,
+  skip any value; and escape text for a string.
+- **The key** is typed (`claude key <key>`: the shell shows it as stars and
+  logs `claude key (not logged)` instead, and it never enters the line
+  history) or read from `CLAUDE.KEY` at the top of the boot stick (`NAME=`
+  and quotes around it are dropped). It lives in memory only; the request
+  buffer that held it is wiped after each answer.
+- The shell waits for the answer: its prompt comes back when it is over, and
+  ctrl+C stops it (`shell_wait`, `shell_resume`; `http` does the same).
+- `tools/test/claude/run.py` boots Axiom in QEMU against
+  `tools/claudemock.py`, a mock of the API that checks every request (the
+  JSON, the headers, each earlier answer sent back byte for byte) and
+  answers in chunks of random sizes sent in random pieces, with `\u`
+  escapes or raw UTF-8 at random, so every layer sees its input split
+  anywhere. It covers echoed Unicode, 7.5 KB answers, thinking blocks,
+  bodies that end at the close, max_tokens, an error event, a dropped
+  connection, 400, 401, ctrl+C mid-answer, a conversation that grows to 21
+  messages, `claude new`, and a server whose certificate is not trusted;
+  `--live` asks the real API with a made-up key (401) and fetches
+  example.com.
 
 ## Graphics and text: `gfx.asm`, `console.asm`, `ui.asm`
 

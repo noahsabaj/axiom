@@ -12,7 +12,7 @@
 ; =============================================================================
 
 MAX_TCP         equ 8
-TCP_SBUF        equ 8192                ; what one connection can have unacknowledged
+TCP_SBUF        equ 131072              ; what one connection can have unacknowledged
 TCP_WINDOW      equ 64240               ; what we offer: handlers take everything
 TCP_MSS         equ 1460
 TCP_RETRIES     equ 8

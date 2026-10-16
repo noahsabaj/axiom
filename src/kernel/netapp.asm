@@ -41,9 +41,38 @@ net_cancel:
     mov dword [dns_state], 0
     mov qword [dns_next], 0
     KLOG "host: stopped"
+    push rax
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    call dns_failed
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rax
 .ping:
     call http_cancel
     jmp ping_end
+
+; dns_failed: the lookup ended without an address (said why); whoever was
+; waiting for it hears so
+dns_failed:
+    cmp dword [dns_then], 2
+    jne .out
+    mov dword [dns_then], 0
+    jmp http_dns_failed
+.out:
+    ret
 
 ; -----------------------------------------------------------------------------
 ;  DHCP
@@ -533,12 +562,15 @@ dns_lookup:
     add rax, [net_second]
     add rax, [net_second]
     mov [dns_next], rax
+    clc
     jmp .out
 .no_server:
     KLOG "host: no DNS server (DHCP named none; 'ip' can set one)"
+    stc
     jmp .out
 .bad:
     KLOG "host: '%s' is not a host name", r8
+    stc
 .out:
     pop r8
     pop rdi
@@ -675,6 +707,7 @@ dns_input:
 .end:
     pop r13
     pop r12
+    jmp dns_failed
 .out:
     ret
 
@@ -741,6 +774,7 @@ dns_tick:
     mov dword [dns_state], 0
     mov qword [dns_next], 0
     KLOG "host: no answer from the DNS server %I", qword [dns_server]
+    jmp dns_failed
 .out:
     ret
 

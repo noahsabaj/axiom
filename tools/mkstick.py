@@ -2,10 +2,11 @@
 """A bootable USB stick image for QEMU: build/stick.img, GPT, one FAT32
 EFI system partition holding build/esp (so EFI/BOOT/BOOTX64.EFI).
 
-    python tools/mkstick.py [out.img] [--serial HEX]
+    python tools/mkstick.py [out.img] [--serial HEX] [--file NAME=PATH ...]
 
 Boot it with run.py --stick build/stick.img. Axiom keeps its log in
 /AXIOM.LOG there; fatcheck.py --show /AXIOM.LOG prints it afterwards.
+--file puts more files at the top of it (CLAUDE.KEY, for instance).
 """
 import argparse
 import pathlib
@@ -24,14 +25,16 @@ def tree(path):
     return out
 
 
-def build(out, serial, mib=64):
+def build(out, serial, mib=64, extra=None):
     total = mib * 1024 * 1024 // fat32.SECTOR
     img = bytearray(total * fat32.SECTOR)
     part = (2048, total - 34)
     fat32.write_gpt(img, total, [(fat32.ESP_TYPE, *part, "AXIOM BOOT")])
     fs = fat32.Fat32(img, part[0], part[1] - part[0] + 1)
     fs.format(spc=1, label=b"AXIOM BOOT ", serial=serial)
-    fs.add_tree(tree(ROOT / "build" / "esp"))
+    files = tree(ROOT / "build" / "esp")
+    files.update(extra or {})
+    fs.add_tree(files)
     fs.flush_fat()
     out.write_bytes(img)
 
@@ -40,6 +43,12 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("out", nargs="?", default=str(ROOT / "build" / "stick.img"))
     ap.add_argument("--serial", default="5354494B", help="FAT volume serial, hex")
+    ap.add_argument("--file", action="append", default=[], metavar="NAME=PATH",
+                    help="one more file at the top")
     opts = ap.parse_args()
-    build(pathlib.Path(opts.out), int(opts.serial, 16))
+    extra = {}
+    for f in opts.file:
+        name, _, path = f.partition("=")
+        extra[name] = pathlib.Path(path).read_bytes()
+    build(pathlib.Path(opts.out), int(opts.serial, 16), extra=extra)
     print(opts.out)
