@@ -6,8 +6,10 @@
 Serves DIR (default build/www, made with an index page and a 300 KB file,
 big.bin, if missing) over TLS 1.3 only, on 127.0.0.1, with the test
 certificate for axiom.test that tools/test/tlsclient/run.py makes (made
-here too if it is not there yet). In Axiom, booted with --nic rtl8139:
-`http https://10.0.2.2:8443/` or `http https://10.0.2.2:8443/big.bin big.bin`.
+here too if it is not there yet). Axiom does not trust that test CA, so
+`http https://10.0.2.2:8443/` is refused; booted with --nic rtl8139,
+`http -k https://10.0.2.2:8443/` or `http -k https://10.0.2.2:8443/big.bin
+big.bin` fetch without checking the certificate.
 Each request is printed with the cipher it came over.
 """
 import argparse
@@ -24,7 +26,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 def certs():
     d = ROOT / "build" / "test" / "tlsclient" / "certs"
-    if not (d / "done").exists():
+    if not (d / "done2").exists():
         spec = importlib.util.spec_from_file_location(
             "tlsclient", ROOT / "tools" / "test" / "tlsclient" / "run.py")
         mod = importlib.util.module_from_spec(spec)

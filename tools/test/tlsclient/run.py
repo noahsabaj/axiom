@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Host tests for src/kernel/tls.asm, the TLS 1.3 client, against OpenSSL.
 
-    python tools/test/tlsclient/run.py [--seed N] [--cc PATH]
+    python tools/test/tlsclient/run.py [--seed N] [--cc PATH] [--live]
 
 Assembles tls.asm with what it stands on the way kernel.asm does (-f bin,
 just to prove it assembles there) and into a DLL with shim.asm and host.c,
@@ -12,18 +12,27 @@ certificates, a chain too big for one record, no server name, data both
 ways, close_notify both ways; then a tampered record, a tampered
 ClientHello (so the Finished cannot match), a TLS 1.2-only server, a
 server that wants a client certificate, one that wants another key
-exchange, and a connection that will not take the bytes. Outputs go to
-build/test/tlsclient/. Exit status 0 only if every test passed.
+exchange, and a connection that will not take the bytes. Certificates are
+checked throughout, the test CA trusted as an extra root; then a chain to
+no trusted root, the wrong name, a stopped clock, and, from a hand-made
+server with a real certificate, a good CertificateVerify, a forged one and
+one in a scheme that does not suit the key. --live also fetches pages from
+real servers over sockets, checked against the built-in roots. Outputs go
+to build/test/tlsclient/. Exit status 0 only if every test passed.
 """
 import argparse
 import ctypes
+import hashlib
+import importlib.util
 import os
 import pathlib
 import random
 import shutil
+import socket
 import ssl
 import subprocess
 import sys
+import time
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 HERE = pathlib.Path(__file__).resolve().parent
@@ -31,11 +40,15 @@ OUT = ROOT / "build" / "test" / "tlsclient"
 GCC = (r"C:\Users\noahs\AppData\Local\Microsoft\WinGet\Packages"
        r"\BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe"
        r"\mingw64\bin\gcc.exe")
-MODULES = ("sha256.asm", "aesgcm.asm", "x25519.asm", "rand.asm", "tls.asm")
+MODULES = ("sha256.asm", "sha512.asm", "aesgcm.asm", "x25519.asm", "rand.asm", "bignum.asm",
+           "pubkey.asm", "x509.asm", "tls.asm")
+sys.path.insert(0, str(ROOT / "tools"))
+import mkroots  # noqa: E402
 
 EV_READY, EV_CLOSED, EV_FAIL = 1, 2, 4
 TLE = {1: "RNG", 2: "PROTO", 3: "VERSION", 4: "CIPHER", 5: "HRR", 6: "MAC", 7: "FINISHED",
-       8: "ALERT", 9: "TOOBIG", 10: "CLIENTCERT", 11: "SEND", 12: "KEYSHARE", 13: "OVERFLOW"}
+       8: "ALERT", 9: "TOOBIG", 10: "CLIENTCERT", 11: "SEND", 12: "KEYSHARE", 13: "OVERFLOW",
+       14: "CERT", 15: "VERIFY", 16: "SIGALG"}
 
 passes = fails = 0
 
@@ -71,7 +84,7 @@ def find_openssl():
 def make_certs(d):
     ossl = find_openssl()
     d.mkdir(parents=True, exist_ok=True)
-    if (d / "done").exists():
+    if (d / "done2").exists():
         return
     o = lambda *a: run([ossl, *a], "openssl " + a[0])
     o("ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", d / "ca.key")
@@ -83,7 +96,7 @@ def make_certs(d):
         else:
             o("ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", d / "ec.key")
         o("req", "-new", "-key", d / f"{kind}.key", "-subj", "/CN=axiom.test", "-out", d / f"{kind}.csr")
-        (d / "san.ext").write_text("subjectAltName=DNS:axiom.test\n")
+        (d / "san.ext").write_text("subjectAltName=DNS:axiom.test,IP:10.0.2.2\n")
         o("x509", "-req", "-in", d / f"{kind}.csr", "-CA", d / "ca.pem", "-CAkey", d / "ca.key",
           "-CAcreateserial", "-days", "3650", "-extfile", d / "san.ext", "-out", d / f"{kind}.pem")
         (d / f"{kind}-chain.pem").write_text((d / f"{kind}.pem").read_text() +
@@ -95,7 +108,7 @@ def make_certs(d):
           "-days", "3650", "-out", d / f"filler{i}.pem")
         extra += (d / f"filler{i}.pem").read_text()
     (d / "big-chain.pem").write_text((d / "rsa.pem").read_text() + extra)
-    (d / "done").write_text("ok\n")
+    (d / "done2").write_text("ok\n")
 
 
 # ---- the client, through the DLL ---------------------------------------------
@@ -104,7 +117,9 @@ def make_certs(d):
 class Client:
     def __init__(self, dll):
         self.d = dll
-        dll.h_start.argtypes = [ctypes.c_char_p]
+        dll.h_start.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_uint64]
+        dll.h_set_extra.argtypes = [ctypes.c_void_p]
+        dll.h_anchor.restype = ctypes.c_char_p
         dll.h_input.argtypes = [ctypes.c_char_p, ctypes.c_size_t]
         dll.h_write.argtypes = [ctypes.c_char_p, ctypes.c_size_t]
         dll.h_reply_on_ready.argtypes = [ctypes.c_char_p, ctypes.c_size_t]
@@ -117,8 +132,14 @@ class Client:
         dll.h_error_text.restype = ctypes.c_char_p
         dll.h_info.argtypes = [ctypes.POINTER(ctypes.c_int)] * 3
 
-    def start(self, host):
-        return self.d.h_start(host.encode() if host is not None else None)
+    def start(self, host, insecure=False, now=None):
+        return self.d.h_start(host.encode() if host is not None else None, int(insecure),
+                              int(time.time()) if now is None else now)
+
+    def checked(self):
+        """How the certificate went: (verified, root name, X5E_* code)."""
+        a = self.d.h_anchor() if self.d.h_verified() else None
+        return self.d.h_verified(), (a.decode() if a else None), self.d.h_cert_err()
 
     def out(self):
         n = self.d.h_out_len()
@@ -243,6 +264,9 @@ def full_session(cl, rng, certs, chain, key, host, chunks, label, sigalg=None, n
     certs_n, cert_bytes, alg = cl.info()
     if sigalg and alg != sigalg:
         problems.append(f"CertificateVerify algorithm {alg:#06x}, want {sigalg:#06x}")
+    verified, anchor, _ = cl.checked()
+    if not verified or anchor != "Axiom Test CA":
+        problems.append(f"certificate not checked (verified {verified}, root {anchor})")
     req = b"GET / HTTP/1.0\r\nHost: axiom.test\r\n\r\n" * 3
     if cl.d.h_write(req, len(req)):
         problems.append("tls_write refused")
@@ -276,8 +300,8 @@ def full_session(cl, rng, certs, chain, key, host, chunks, label, sigalg=None, n
         problems.append("the server did not take our close_notify")
     if cl.d.h_state() != 0:
         problems.append(f"state {cl.d.h_state()} after tls_close")
-    result(not problems, f"{label}: {certs_n} certificate(s), {cert_bytes} bytes, signed with "
-           f"{alg:#06x}, {len(body)} bytes in, pieces '{chunks}'" +
+    result(not problems, f"{label}: {certs_n} certificate(s), {cert_bytes} bytes, checked, signed "
+           f"with {alg:#06x}, {len(body)} bytes in, pieces '{chunks}'" +
            ("" if not problems else ": " + "; ".join(problems)))
 
 
@@ -305,7 +329,7 @@ def mini_tests(cl, rng):
 
     def session(label, data_steps=None, **knobs):
         sv = minisrv.MiniServer(rng, **knobs)
-        cl.start("axiom.test")
+        cl.start("axiom.test", insecure="chain" not in knobs)
         for _ in range(4):
             b = cl.out()
             if not b:
@@ -404,10 +428,131 @@ def mini_tests(cl, rng):
            f"hand-made server, a fatal alert: {cl.fail_text()} {cl.d.h_alert()}")
 
 
+def cert_tests(cl, rng, certs, extra):
+    """The chain refused, each for its own reason, and the alert the server hears."""
+    rctx = lambda: server_ctx(certs / "rsa-chain.pem", certs / "rsa.key")
+    for label, kw, want, alert in (
+            ("a chain to no trusted root", {"trusted": False}, "ISSUER", "unknown ca"),
+            ("another name", {"host": "other.test"}, "NAME", "bad certificate"),
+            ("another address", {"host": "10.0.2.3"}, "NAME", "bad certificate"),
+            ("twenty years on", {"now": int(time.time()) + 20 * 365 * 86400}, "EXPIRED",
+             "certificate expired"),
+            ("a clock in 2024", {"now": 1717200000}, "CLOCK", "certificate unknown")):
+        cl.d.h_set_extra(None if kw.get("trusted") is False else ctypes.addressof(extra))
+        sv = Server(rctx())
+        cl.start(kw.get("host", "axiom.test"), now=kw.get("now"))
+        pump(cl, sv, rng, "random")
+        ev = cl.d.h_events()
+        x5 = cl.d.h_cert_err()
+        names = ["OK", "MALFORMED", "ALGORITHM", "KEY", "EXPIRED", "NOTYET", "NAME", "ISSUER",
+                 "SIGNATURE", "NOTCA", "PATHLEN", "PURPOSE", "CRITICAL", "CLOCK"]
+        ok = (ev & EV_FAIL and not ev & EV_READY and TLE.get(cl.d.h_fail_code()) == "CERT"
+              and names[x5] == want and alert in str(sv.error).lower())
+        result(ok, f"{label}: {cl.fail_text()} [{names[x5]}]; server: {str(sv.error)[:60]}")
+    cl.d.h_set_extra(None)
+    sv = Server(rctx())
+    cl.start("axiom.test", insecure=True)
+    pump(cl, sv, rng, "random")
+    v, a, _ = cl.checked()
+    result(cl.d.h_events() & EV_READY and not v and cl.d.h_sigalg_checked(),
+           f"no trusted root, but told not to check (http -k): events {cl.d.h_events()}, "
+           f"verified {v}, CertificateVerify still checked")
+    cl.d.h_abort()
+    cl.d.h_set_extra(ctypes.addressof(extra))
+
+
+def cv_tests(cl, rng, certs):
+    """A hand-made server with a real certificate: CertificateVerify good, forged, misnamed."""
+    import minisrv
+    spec = importlib.util.spec_from_file_location("pkirun", HERE.parent / "pki" / "run.py")
+    pki = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pki)
+    pki.OSSL = find_openssl()
+    run([pki.OSSL, "pkey", "-in", certs / "ec.key", "-outform", "DER", "-out", certs / "ec.der"],
+        "openssl pkey")
+    d = pki.pkcs8(certs / "ec.der")[1]["d"]
+    c = pki.Curve("prime256v1", 32, 2)
+    leaf = next(mkroots.pem_certs((certs / "ec.pem").read_text()))
+    sign = lambda key, content: pki.der_sig(*c.sign(key, hashlib.sha256(content).digest(), rng))
+    for label, signer, want, alert in (
+            ("a good CertificateVerify", lambda m: (0x0403, sign(d, m)), None, None),
+            ("a CertificateVerify signed with another key", lambda m: (0x0403, sign(d + 1, m)),
+             "VERIFY", 51),
+            ("a CertificateVerify over something else", lambda m: (0x0403, sign(d, m[:-1] + b"x")),
+             "VERIFY", 51),
+            ("P-256 signature called P-384 (0x0503)", lambda m: (0x0503, sign(d, m)), "SIGALG", 47),
+            ("an ECDSA key's signature called RSA-PSS", lambda m: (0x0804, sign(d, m)), "SIGALG", 47),
+            ("PKCS#1 v1.5, which TLS 1.3 forbids here", lambda m: (0x0401, sign(d, m)), "SIGALG", 47)):
+        sv = minisrv.MiniServer(rng, chain=[leaf], signer=signer)
+        cl.start("axiom.test")
+        for _ in range(4):
+            b = cl.out()
+            if not b:
+                break
+            feed(cl, sv.receive(b), rng, "random")
+        sv.receive(cl.out())
+        ev = cl.d.h_events()
+        if want is None:
+            ok = ev & EV_READY and "finished" in sv.events and cl.checked()[0]
+        else:
+            ok = (ev & EV_FAIL and TLE.get(cl.d.h_fail_code()) == want and f"alert {alert}" in sv.events
+                  and "finished" not in sv.events)
+        result(ok, f"hand-made server, {label}: " + (cl.fail_text() if ev & EV_FAIL else f"events {ev}") +
+               f"; server saw {sv.events}")
+        cl.d.h_abort()
+
+
+LIVE = ["example.com", "www.google.com", "github.com", "www.cloudflare.com", "en.wikipedia.org",
+        "letsencrypt.org", "www.amazon.com", "www.microsoft.com"]
+
+
+def live_tests(cl):
+    """Real servers, over sockets, against the built-in roots."""
+    cl.d.h_set_extra(None)
+    for host in LIVE:
+        try:
+            s = socket.create_connection((host, 443), timeout=10)
+        except OSError as e:
+            result(True, f"{host}: not reached ({e.__class__.__name__}), skipped")
+            continue
+        req = f"GET / HTTP/1.0\r\nHost: {host}\r\nUser-Agent: axiom-test\r\n\r\n".encode()
+        cl.d.h_reply_on_ready(req, len(req))
+        t0 = time.perf_counter()
+        cl.start(host)
+        try:
+            s.sendall(cl.out())
+            while True:
+                data = s.recv(65536)
+                if not data:
+                    break
+                cl.d.h_input(data, len(data))
+                out = cl.out()
+                if out:
+                    s.sendall(out)
+                ev = cl.d.h_events()
+                if ev & (EV_FAIL | EV_CLOSED):
+                    break
+        except OSError as e:
+            print(f"      {host}: {e}")
+        s.close()
+        dt = time.perf_counter() - t0
+        ev = cl.d.h_events()
+        app = cl.app()
+        v, anchor, _ = cl.checked()
+        ok = ev & EV_READY and v and app.startswith(b"HTTP/")
+        status = app.split(b"\r\n", 1)[0].decode(errors="replace")
+        result(ok, f"{host}: " + (f"{status!r}, {len(app)} bytes, root {anchor}, signed with "
+                                  f"{cl.info()[2]:#06x}, {dt * 1000:.0f} ms" if ok else
+                                  (cl.fail_text() if ev & EV_FAIL else f"events {ev}")))
+        cl.d.h_abort()
+    cl.d.h_reply_on_ready(None, 0)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--seed", type=int, default=8446)
     ap.add_argument("--cc", default=os.environ.get("CC", GCC))
+    ap.add_argument("--live", action="store_true", help="also fetch from real servers")
     opts = ap.parse_args()
     sys.stdout.reconfigure(line_buffering=True)
     nasm = shutil.which("nasm")
@@ -440,6 +585,9 @@ def main():
 
     cl = Client(ctypes.CDLL(str(dll)))
     rng = random.Random(opts.seed)
+    ca = mkroots.parse(next(mkroots.pem_certs((certs / "ca.pem").read_text())))
+    extra = ctypes.create_string_buffer(mkroots.table([ca]))
+    cl.d.h_set_extra(ctypes.addressof(extra))      # the test CA, trusted
 
     print("-- handshakes and data")
     full_session(cl, rng, certs, "rsa-chain.pem", "rsa.key", "axiom.test", "whole",
@@ -525,9 +673,15 @@ def main():
     result(rc == 0 and cl.d.h_state() == 1 and len(cl.out()) > 100, "and a new one starts cleanly")
     cl.d.h_abort()
 
+    print("-- certificates")
+    cert_tests(cl, rng, certs, extra)
     print("-- against a hand-made server")
     sys.path.insert(0, str(HERE))
     mini_tests(cl, rng)
+    cv_tests(cl, rng, certs)
+    if opts.live:
+        print("-- real servers")
+        live_tests(cl)
 
     print(f"-- {passes} passed, {fails} failed")
     sys.exit(1 if fails else 0)

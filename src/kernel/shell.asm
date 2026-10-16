@@ -491,7 +491,7 @@ commands:
     COMMAND 'ping',     cmd_ping,     'ping <address or name> [count]'
     COMMAND 'host',     cmd_host,     'host <name>: look up its address'
     COMMAND 'arp',      cmd_arp,      'the neighbours Axiom knows'
-    COMMAND 'http',     cmd_http,     'http <[https://]host[:port][/path]> [file]: fetch a page'
+    COMMAND 'http',     cmd_http,     'http [-k] <[https://]host[:port][/path]> [file]: fetch a page; -k: no certificate check'
     COMMAND 'tcp',      cmd_tcp,      'TCP connections'
     COMMAND 'crypto',   cmd_crypto,   'check the TLS crypto against its test vectors, and time it'
     COMMAND 'log',      cmd_log,      'log [save|on|off]: AXIOM.LOG on the boot stick'

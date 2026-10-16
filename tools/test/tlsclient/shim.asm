@@ -1,7 +1,8 @@
 ; =============================================================================
 ;  shim.asm - host test shim for src/kernel/tls.asm (nasm -f win64), linked
 ;  into a DLL with host.c. Includes the TLS client and what it stands on
-;  (sha256, aesgcm, x25519, rand) unchanged, and exports:
+;  (sha256, sha512, aesgcm, x25519, rand, bignum, pubkey, x509 with the
+;  built-in roots) unchanged, and exports:
 ;    kc      u64 kc(void *target, const u64 args[6], int *cf): RDI, RSI,
 ;            RDX, RCX, R8, R9 from args, call target, return RAX and store
 ;            the carry flag, preserving what the Windows x64 ABI requires;
@@ -20,13 +21,18 @@ section .bss bss align=64
 
 global tls_start, tls_input, tls_write, tls_close, tls_abort, tls_error_text
 global tls_state, tls_error, tls_alert, tls_certs, tls_cert_bytes, tls_sigalg
+global tls_cert_err, tls_verified, x509_extra, x509_anchor, x509_depth, tl_have_key
 global kc, host_send, host_ops, tl_text
 extern c_send, c_ready, c_data, c_closed, c_fail
 
 %include "sha256.asm"
+%include "sha512.asm"
 %include "aesgcm.asm"
 %include "x25519.asm"
 %include "rand.asm"
+%include "bignum.asm"
+%include "pubkey.asm"
+%include "x509.asm"
 %include "tls.asm"
 
 section .text

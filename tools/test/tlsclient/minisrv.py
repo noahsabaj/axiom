@@ -2,7 +2,9 @@
 to do what OpenSSL will not on request (a wrong Finished, KeyUpdate, padded
 and empty records, handshake messages cut across records, tickets), on the
 pure-Python references in tools/test/tls/run.py. Its certificate and
-signature are random bytes: the client does not check them yet.
+signature are random bytes (the client is told not to check them, as by
+http -k) unless it is given a certificate chain and a signer, which gets
+what CertificateVerify signs and returns the scheme and the signature.
 
     s = MiniServer(rng, **knobs)
     s.receive(bytes from the client) -> bytes for the client
@@ -67,13 +69,15 @@ class Keys:
 
 class MiniServer:
     def __init__(self, rng, bad_finished=False, split=None, pad=0, ccs=True,
-                 cert_size=600):
+                 cert_size=600, chain=None, signer=None):
         self.rng = rng
         self.bad_finished = bad_finished
         self.split = split            # None, "each" (a record per message) or a size
         self.pad = pad
         self.ccs = ccs
         self.cert_size = cert_size
+        self.chain = chain            # DER certificates, the server's first
+        self.signer = signer
         self.inbuf = b""
         self.state = "hello"
         self.app = b""
@@ -150,9 +154,15 @@ class MiniServer:
         self.c = Keys(ref.expand_label(hs, b"c hs traffic", H(tr), 32))
         self.s = Keys(ref.expand_label(hs, b"s hs traffic", H(tr), 32))
         ee = msg(8, u16(0))
-        cert = self.rng.randbytes(self.cert_size)
-        cm = msg(11, b"\0" + u24(len(cert) + 5) + u24(len(cert)) + cert + u16(0))
-        cv = msg(15, u16(0x0804) + u16(256) + self.rng.randbytes(256))
+        chain = self.chain or [self.rng.randbytes(self.cert_size)]
+        entries = b"".join(u24(len(c)) + c + u16(0) for c in chain)
+        cm = msg(11, b"\0" + u24(len(entries)) + entries)
+        if self.signer:
+            scheme, sig = self.signer(b" " * 64 + b"TLS 1.3, server CertificateVerify\0" +
+                                      H(tr + ee + cm))
+        else:
+            scheme, sig = 0x0804, self.rng.randbytes(256)
+        cv = msg(15, u16(scheme) + u16(len(sig)) + sig)
         tr += ee + cm + cv
         fin = hmac.new(ref.expand_label(self.s.secret, b"finished", b"", 32), H(tr),
                        hashlib.sha256).digest()

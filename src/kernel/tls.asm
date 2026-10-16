@@ -4,13 +4,17 @@
 ;  TLS_AES_128_GCM_SHA256 and an X25519 key share, which every TLS 1.3
 ;  server must take, and accepts no resumption and no early data.
 ;
-;  The server's certificate chain is received and counted but NOT verified
-;  yet: the connection is private and tamper-proof against anyone who is
-;  not in the middle of it, but nothing proves the server is who it says.
+;  The server proves who it is: its certificate chain must lead to a
+;  trusted root and name the host (x509.asm), and its CertificateVerify
+;  must be its certificate's key's signature over the handshake
+;  (pubkey.asm). tls_start can be told not to check the chain (http -k);
+;  CertificateVerify is still checked then if the certificate can be read.
 ;
-;    tls_start(RDI = server name for SNI, or 0; RSI = send; RDX = handlers)
-;        -> CF if it could not begin (tls_error says why); else the
-;        ClientHello is on its way
+;    tls_start(RDI = the server's name: sent as SNI unless it is an IPv4
+;        address, and the certificate checked against it; or 0; RSI = send;
+;        RDX = handlers; RCX = 1 not to check the certificate chain, else 0;
+;        R8 = now, Unix seconds) -> CF if it could not begin (tls_error says
+;        why); else the ClientHello is on its way
 ;    tls_input(RSI = bytes from the server, RDX = how many)
 ;    tls_write(RSI = data, RDX = bytes) -> CF if not open, or not sent (then
 ;        the session is forgotten and tls_error says why)
@@ -21,8 +25,10 @@
 ;  send(RSI = bytes, EDX = how many) -> CF if it could not take them all.
 ;  The handlers, at TLO_*: READY (handshake done), DATA (RSI, EDX:
 ;  plaintext, valid during the call), CLOSED (the server's close_notify),
-;  FAIL (EAX = error; tls_alert holds the server's alert for TLE_ALERT;
-;  the session is already forgotten). Send and the handlers may change RAX,
+;  FAIL (EAX = error; tls_alert holds the server's alert for TLE_ALERT,
+;  tls_cert_err the X5E_* for TLE_CERT; the session is already forgotten).
+;  At READY, tls_verified says whether the chain was checked, and then
+;  x509_anchor names the root and x509_depth counts the intermediates. Send and the handlers may change RAX,
 ;  RCX, RDX, RSI, RDI and R8-R11, and may call tls_write, tls_close or
 ;  tls_abort. Every tls_* preserves all registers but RAX. Main loop only.
 ; =============================================================================
@@ -57,7 +63,10 @@ TLE_CLIENTCERT  equ 10
 TLE_SEND        equ 11
 TLE_KEYSHARE    equ 12
 TLE_OVERFLOW    equ 13
-TLE_COUNT       equ 14
+TLE_CERT        equ 14                  ; tls_cert_err says why
+TLE_VERIFY      equ 15
+TLE_SIGALG      equ 16
+TLE_COUNT       equ 17
 
 TL_REC_MAX      equ 16384 + 256         ; a record's body, encrypted
 TL_PLAIN_MAX    equ 16384
@@ -111,12 +120,16 @@ tls_start:
     call tl_wipe
     mov [tl_send], r13
     mov [tl_ops], r14
+    mov [tl_insecure], cl
+    mov [tl_now], r8
     xor eax, eax
     mov [tls_error], eax
     mov [tls_alert], eax
     mov [tls_certs], eax
     mov [tls_cert_bytes], eax
     mov [tls_sigalg], eax
+    mov [tls_cert_err], eax
+    mov [tls_verified], eax
     test r12, r12                       ; the name, for SNI
     jz .named
     lea rdi, [tl_host]
@@ -282,6 +295,11 @@ tls_abort:
     ret
 
 tls_error_text:
+    cmp eax, TLE_CERT
+    jne .tls
+    mov eax, [tls_cert_err]
+    jmp x509_error_text
+.tls:
     cmp eax, TLE_COUNT
     jb .known
     xor eax, eax
@@ -316,6 +334,12 @@ tl_fail:
     mov [tls_error], eax
     lea rcx, [tl_alert_for]
     movzx ecx, byte [rcx + rax]
+    cmp eax, TLE_CERT                   ; the certificate's own reason
+    jne .alert
+    mov ecx, [tls_cert_err]
+    lea rdx, [x5_alerts]
+    movzx ecx, byte [rdx + rcx]
+.alert:
     cmp ecx, 0xFF
     je .quiet
     mov eax, [tls_state]
@@ -654,16 +678,9 @@ tl_message:
     jne .bad
     jmp tl_certificate
 .cv:
-    cmp eax, 15                         ; CertificateVerify: its algorithm noted
+    cmp eax, 15
     jne .bad
-    cmp ecx, 6
-    jb .bad
-    movzx eax, word [rsi + 4]
-    xchg al, ah
-    mov [tls_sigalg], eax
-    call tl_transcript
-    mov dword [tls_state], TL_WAIT_FIN
-    jmp .ok
+    jmp tl_cert_verify
 .fin:
     cmp eax, 20
     jne .bad
@@ -873,7 +890,8 @@ tl_client_keys:
     mov qword [tl_c_seq], 0
     ret
 
-; tl_certificate(RSI, ECX) -> CF: the chain counted (not verified)
+; tl_certificate(RSI, ECX) -> CF: the chain counted and checked (or, not
+; to be checked, the server's own certificate read for its key)
 tl_certificate:
     push rbx
     push r12
@@ -912,6 +930,14 @@ tl_certificate:
     jz .bad
     add r12, 3
     TL_NEED rax
+    cmp ebx, X5_MAX                     ; the first few kept for x509.asm
+    jae .kept
+    mov ecx, ebx
+    shl ecx, 4
+    lea rdx, [tl_chain]
+    mov [rdx + rcx], r12
+    mov [rdx + rcx + 8], rax
+.kept:
     add r12, rax
     add [tls_cert_bytes], eax
     inc ebx
@@ -926,11 +952,37 @@ tl_certificate:
     test ebx, ebx                       ; there must be one
     jz .bad
     mov [tls_certs], ebx
+    cmp byte [tl_insecure], 0
+    jne .unchecked
+    lea rsi, [tl_chain]
+    mov ecx, ebx
+    cmp ecx, X5_MAX
+    jbe .chain
+    mov ecx, X5_MAX
+.chain:
+    lea rdx, [tl_host]
+    mov r8, [tl_now]
+    call x509_chain
+    jc .refused
+    mov dword [tls_verified], 1
+    mov byte [tl_have_key], 1
+    jmp .checked
+.unchecked:
+    mov rsi, [tl_chain]                 ; its key, if Axiom can read it
+    mov ecx, [tl_chain + 8]
+    call x509_leaf
+    setnc byte [tl_have_key]
+.checked:
     mov rsi, r14
     mov ecx, r15d
     call tl_transcript
     mov dword [tls_state], TL_WAIT_CV
     clc
+    jmp .out
+.refused:
+    mov [tls_cert_err], eax
+    mov eax, TLE_CERT
+    call tl_fail
     jmp .out
 .bad:
     mov eax, TLE_PROTO
@@ -938,6 +990,88 @@ tl_certificate:
 .out:
     pop r15
     pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+; tl_cert_verify(RSI, ECX = CertificateVerify) -> CF: the server's signature
+; over the handshake so far, with its certificate's key, in a scheme that
+; suits that key (RFC 8446 4.4.3); not checked only if http -k was given
+; and the certificate could not be read
+tl_cert_verify:
+    push rbx
+    push r12
+    push r13
+    mov r12, rsi
+    mov r13d, ecx
+    cmp ecx, 8
+    jb .bad
+    movzx eax, word [rsi + 4]           ; the scheme, then the signature
+    xchg al, ah
+    mov [tls_sigalg], eax
+    mov ebx, eax
+    movzx edx, word [rsi + 6]
+    xchg dl, dh
+    lea eax, [rdx + 8]
+    cmp eax, ecx
+    jne .bad
+    cmp byte [tl_have_key], 0
+    je .noted
+    mov eax, [x509_key + K_TYPE]
+    mov ecx, KT_P256
+    cmp ebx, 0x0403
+    je .suits
+    mov ecx, KT_P384
+    cmp ebx, 0x0503
+    je .suits
+    mov ecx, KT_RSA
+    cmp ebx, 0x0804
+    jb .sigalg
+    cmp ebx, 0x0806
+    ja .sigalg
+.suits:
+    cmp eax, ecx
+    jne .sigalg
+    call tl_hash_now
+    lea rdi, [tl_cvbuf]                 ; 64 spaces, the context, 0, the hash
+    mov ecx, 64
+    mov al, ' '
+    rep stosb
+    lea rsi, [str_tl_cv]
+    mov ecx, str_tl_cv_len              ; with its 0
+    rep movsb
+    lea rsi, [tl_th]
+    mov ecx, 32
+    rep movsb
+    lea rdi, [x509_key]
+    mov esi, ebx
+    lea rdx, [tl_cvbuf]
+    mov ecx, 64 + str_tl_cv_len + 32
+    lea r8, [r12 + 8]
+    movzx r9d, word [r12 + 6]
+    rol r9w, 8
+    call sig_verify
+    jc .wrong
+.noted:
+    mov rsi, r12
+    mov ecx, r13d
+    call tl_transcript
+    mov dword [tls_state], TL_WAIT_FIN
+    clc
+    jmp .out
+.sigalg:
+    mov eax, TLE_SIGALG
+    call tl_fail
+    jmp .out
+.wrong:
+    mov eax, TLE_VERIFY
+    call tl_fail
+    jmp .out
+.bad:
+    mov eax, TLE_PROTO
+    call tl_fail
+.out:
     pop r13
     pop r12
     pop rbx
@@ -1172,11 +1306,10 @@ tl_ch_suites:   db 0x00, 0x02, 0x13, 0x01  ; TLS_AES_128_GCM_SHA256
                 db 0x01, 0x00              ; no compression
 tl_ch_suites_len equ $ - tl_ch_suites
 tl_ch_exts:     db 0x00, 0x0a, 0x00, 0x04, 0x00, 0x02, 0x00, 0x1d  ; groups: x25519
-                db 0x00, 0x0d, 0x00, 0x16, 0x00, 0x14              ; signature algorithms
-                db 0x04, 0x03, 0x05, 0x03, 0x06, 0x03              ;  ECDSA P-256/384/521
+                db 0x00, 0x0d, 0x00, 0x12, 0x00, 0x10              ; signature algorithms:
+                db 0x04, 0x03, 0x05, 0x03                          ;  ECDSA P-256, P-384
                 db 0x08, 0x04, 0x08, 0x05, 0x08, 0x06              ;  RSA-PSS
-                db 0x04, 0x01, 0x05, 0x01, 0x06, 0x01              ;  RSA PKCS#1
-                db 0x08, 0x07                                      ;  Ed25519
+                db 0x04, 0x01, 0x05, 0x01, 0x06, 0x01              ;  RSA PKCS#1 (certificates)
                 db 0x00, 0x2b, 0x00, 0x03, 0x02, 0x03, 0x04        ; versions: TLS 1.3
                 db 0x00, 0x33, 0x00, 0x26, 0x00, 0x24, 0x00, 0x1d, 0x00, 0x20  ; key share
 tl_ch_exts_len equ $ - tl_ch_exts
@@ -1199,9 +1332,11 @@ str_tl_key:     db 'key', 0
 str_tl_iv:      db 'iv', 0
 str_tl_finished: db 'finished', 0
 str_tl_upd:     db 'traffic upd', 0
+str_tl_cv:      db 'TLS 1.3, server CertificateVerify', 0
+str_tl_cv_len   equ $ - str_tl_cv
 
 ; the alert we send for each error (0xFF: none)
-tl_alert_for:   db 0xFF, 80, 10, 70, 40, 40, 20, 51, 0xFF, 80, 40, 0xFF, 47, 22
+tl_alert_for:   db 0xFF, 80, 10, 70, 40, 40, 20, 51, 0xFF, 80, 40, 0xFF, 47, 22, 42, 51, 47
 
 str_tle_0:      db 'no error', 0
 str_tle_rng:    db 'no hardware random numbers (RDSEED or RDRAND) for keys', 0
@@ -1217,11 +1352,15 @@ str_tle_clientcert: db 'the server wants a client certificate', 0
 str_tle_send:   db 'the connection would not take the bytes', 0
 str_tle_keyshare: db "the server's key share is no good", 0
 str_tle_overflow: db 'a record longer than TLS allows', 0
+str_tle_cert:   db 'the certificate will not do', 0
+str_tle_verify: db "the server's signature over the handshake is wrong (it does not hold its certificate's key)", 0
+str_tle_sigalg: db 'the server signed the handshake in a way that does not suit its key', 0
 align 8
 tl_error_texts: dq str_tle_0, str_tle_rng, str_tle_proto, str_tle_version
                 dq str_tle_cipher, str_tle_hrr, str_tle_mac, str_tle_finished
                 dq str_tle_alert, str_tle_toobig, str_tle_clientcert, str_tle_send
-                dq str_tle_keyshare, str_tle_overflow
+                dq str_tle_keyshare, str_tle_overflow, str_tle_cert, str_tle_verify
+                dq str_tle_sigalg
 
 section .bss
 alignb 8
@@ -1231,8 +1370,12 @@ tls_alert:      resd 1                  ; the server's, for TLE_ALERT
 tls_certs:      resd 1                  ; certificates the server sent
 tls_cert_bytes: resd 1
 tls_sigalg:     resd 1                  ; what CertificateVerify used
+tls_cert_err:   resd 1                  ; X5E_*, for TLE_CERT
+tls_verified:   resd 1                  ; the chain was checked
 tl_send:        resq 1
 tl_ops:         resq 1
+tl_now:         resq 1
+tl_insecure:    resb 1
 alignb 16
 tl_wipe_start:
 tl_c_gcm:       resb GCM_CTX
@@ -1259,6 +1402,10 @@ tl_nonce_buf:   resb 16
 tl_c_seq:       resq 1
 tl_s_seq:       resq 1
 tl_msg:         resb 64
+tl_have_key:    resb 1                  ; x509_key is the server's
+alignb 8
+tl_chain:       resq 2 * X5_MAX         ; certificates: where, how long
+tl_cvbuf:       resb 64 + 34 + 32
 tl_rlen:        resd 1
 tl_hlen:        resd 1
 tl_host:        resb 256

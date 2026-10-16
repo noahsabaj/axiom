@@ -261,10 +261,10 @@ off. `log` shows the state; `log save`, `log on`, `log off`.
   and asks for 64-byte segments, with three duplicate ACKs at a gap. Every
   case completes, and the 200 KB it serves through the losses arrives
   intact. The RTL8168 code paths (G-family takeover, PHY, MSI) run only on
-  real hardware. Not yet: certificate checks, a TCP server side, IPv6,
+  real hardware. Not yet: a TCP server side, IPv6,
   other NICs.
 
-## TLS: `tls.asm`, `rand.asm`, `sha256.asm`, `aesgcm.asm`, `x25519.asm`
+## TLS: `tls.asm`, `rand.asm`, `sha256.asm`, `aesgcm.asm`, `x25519.asm`, and certificates
 
 A TLS 1.3 client (RFC 8446) and the crypto under it.
 
@@ -279,11 +279,43 @@ A TLS 1.3 client (RFC 8446) and the crypto under it.
   traffic keys and IVs; per-record nonces), checks the server's Finished in
   constant time, sends its own, strips record padding, ignores session
   tickets, follows KeyUpdate both ways, and ends with close_notify. A
-  failure sends the matching alert and wipes every key. **The certificate
-  chain is counted, not verified**: the connection is private and
-  tamper-proof against anyone who is not in the middle, but nothing yet
-  proves the server is who it claims to be. Verifying it needs X.509, RSA
-  and ECDSA signatures, and a set of trusted roots.
+  failure sends the matching alert and wipes every key. The certificate
+  chain goes to `x509_chain` (below) with the server's name and the RTC's
+  time; CertificateVerify is checked against the leaf's key, in a scheme
+  that must suit it (ECDSA P-256 with 0x0403, P-384 with 0x0503, RSA with
+  PSS 0x0804-0x0806; PKCS #1 v1.5 is refused there, as RFC 8446 says). With
+  `http -k` the chain is not checked, only parsed for the leaf's key, so
+  CertificateVerify still proves the server holds the key it sent.
+- **Certificates** (`x509.asm`): X.509 v3 in DER. The leaf must name the
+  host in a subjectAltName (DNS, with a wildcard only as the whole first
+  label, or an IPv4 address; no Common Name fallback), be in date, and allow
+  serverAuth and digitalSignature when it says what it is for. Each issuer
+  is looked up among the trusted roots by the SHA-256 of its Name, else
+  among the certificates sent (byte-exact Name match, any order, up to 8):
+  it must be a CA, allowed keyCertSign, within its pathLen, in date, and
+  its signature on the one below must hold. An unknown critical extension
+  is refused. Dates get a day of slack (the RTC holds local time), and a
+  clock before 2025 is reported rather than trusted. Each failure has its
+  own message and TLS alert.
+- **The trusted roots** (`gen/roots.asm`, made by `tools/mkroots.py`): the
+  136 CAs of Mozilla's list, as certifi ships it, each reduced to the
+  SHA-256 of its Name, its key and its name, 55 KB in all. `x509_extra`
+  can point to one more table (the tests' CA).
+- **Signatures** (`pubkey.asm`, on `bignum.asm`): RSA with 2048- to
+  4096-bit keys, PKCS #1 v1.5 and PSS (MGF1, salt as long as the hash);
+  ECDSA on P-256 and P-384 in Jacobian coordinates with Shamir's trick;
+  each with SHA-256, SHA-384 or SHA-512 (`sha512.asm`). `bignum.asm` is
+  Montgomery arithmetic (CIOS) on 64-bit limbs up to 4096 bits. Only public
+  values pass through it, so it is not constant-time, and need not be.
+- `tools/test/pki/run.py` checks all of it on the host: SHA-384/512 against
+  hashlib; Montgomery products, powers and inverses against Python's
+  integers over 141 moduli; 264 RSA and 442 ECDSA signatures, from OpenSSL
+  and an independent reference, good and damaged; 43 chains made by OpenSSL
+  (RSA and EC, intermediates, wildcards, addresses, every refusal) and 400
+  damaged at random; the built-in roots compared with certifi; the chains
+  of 20 real sites; register preservation. On this CPU an RSA-2048 check
+  takes about 55 us, P-256 320 us, P-384 1 ms, a two-certificate chain
+  under 0.5 ms.
 - **Random numbers** (`rand.asm`): a SHA-256 pool stirred with RDSEED (else
   RDRAND) and the TSC on every call, moved on after each use; TLS refuses
   to start on a CPU with neither.
@@ -298,9 +330,14 @@ A TLS 1.3 client (RFC 8446) and the crypto under it.
   do on request: a wrong Finished, KeyUpdate with and without a request,
   padding, empty records, messages cut across records, oversized records.
   Live, the same DLL fetched pages from example.com, cloudflare.com,
-  google.com and github.com.
-- In QEMU, `http https://example.com/` and a 300 KB file from
-  `tools/httpsd.py` (saved, compared byte for byte).
+  google.com and github.com. With certificates checked: the test CA as
+  an extra root, then a chain to no trusted root, another name, another
+  address, twenty years on and a clock in 2024 each refused with the
+  right alert; a forged CertificateVerify and three in the wrong scheme
+  refused; `--live` fetches from eight real sites, each verified.
+- In QEMU, `http https://example.com/` (verified to its root), and from
+  `tools/httpsd.py`, whose test CA Axiom does not trust: refused, then a
+  300 KB file with `http -k` (saved, compared byte for byte).
 
 - **SHA-256** (`sha256.asm`): one call or init/update/final over a context
   the caller owns (copyable, so a transcript hash can be forked). Blocks go
@@ -321,9 +358,12 @@ A TLS 1.3 client (RFC 8446) and the crypto under it.
   XMM0-XMM10; their scratch is in .bss, so main loop only.
 - `cryptotest.asm` checks each against its published vectors (FIPS 180-4,
   RFC 4231, RFC 5869, RFC 8448, GCM test case 4 with a forged tag refused,
-  RFC 7748) at boot, both SHA-256 paths when the CPU has SHA-NI, and logs one
-  line. `crypto` repeats the check and times SHA-256 (each way), AES-GCM and
-  one X25519.
+  RFC 7748, SHA-384/512 of "abc", RFC 6979's P-256 signature, and RSA-2048
+  PKCS #1 v1.5 and PSS and P-384 signatures made for the tests, each also
+  with a changed byte that must be refused) at boot, both SHA-256 paths
+  when the CPU has SHA-NI, and logs one line. `crypto` repeats the check
+  and times SHA-256 (each way), AES-GCM, one X25519 and each signature
+  check.
 - `tools/test/tls/run.py` runs them on the host: the published vectors plus
   about 670 random cases from independent references (hashlib; a pure-Python
   AES-GCM and X25519 written from SP 800-38D and RFC 7748, each made to

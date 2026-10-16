@@ -2,7 +2,7 @@
 
 An operating system written entirely in x86-64 assembly, booting straight from
 UEFI onto the hardware that is actually present. No C, no libc, no GRUB, no
-borrowed kernel: about twenty-nine thousand lines of NASM, top to bottom.
+borrowed kernel: about thirty-three thousand lines of NASM, top to bottom.
 
 Why it exists and where it is going: [docs/VISION.md](docs/VISION.md).
 How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
@@ -27,10 +27,13 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 - **Ethernet** on Realtek RTL8111/8168 chips (the Victus's): DHCP, ARP, IPv4,
   ICMP, UDP, DNS and **TCP**. `ping` and `host` work by name, and `http`
   fetches a web page, over **TLS 1.3** for `https://`, or saves it to a file.
-  The server's certificate is not verified yet, and `http` says so.
+  The server's certificate chain is checked against 136 built-in trusted
+  roots, its name and dates too; `http -k` fetches without checking, and
+  says so.
 - **TLS 1.3**, written here: SHA-256 on the SHA extensions, HMAC, HKDF,
-  AES-128-GCM on AES-NI and PCLMULQDQ, X25519, keys from RDSEED, and the
-  client handshake. The crypto is checked against the published vectors at
+  AES-128-GCM on AES-NI and PCLMULQDQ, X25519, keys from RDSEED, the
+  client handshake, and certificates: X.509, SHA-384/512, RSA (PKCS #1 v1.5
+  and PSS) and ECDSA on P-256 and P-384. The crypto is checked against the published vectors at
   every boot; `crypto` repeats the check and times each.
 - A shell over a USB keyboard, a PS/2 keyboard or the serial port. Commands:
   `help info cpus mem pci acpi usb disks vol ls cd cat cp write mkdir rm date
@@ -218,8 +221,11 @@ tools/mkstick.py        a bootable stick image with build/esp on it
 tools/netpeer.py        an unreliable network peer, to test TCP against
 tools/httpsd.py         a local HTTPS server (TLS 1.3), to test https against
 tools/fatcheck.py       check that disk after Axiom has written to it
+tools/mkroots.py        the trusted roots, src/kernel/gen/roots.asm, from
+                        certifi's copy of Mozilla's list
 tools/test/             host-side tests for self-contained modules (tls: the
-                        crypto; tlsclient: the TLS client against OpenSSL)
+                        crypto; tlsclient: the TLS client against OpenSSL;
+                        pki: certificates and signatures)
 tools/mkfont.py         rasterize the console font into src/kernel/gen/
 docs/                   vision and architecture
 ```
@@ -230,3 +236,9 @@ The console font is rasterized from **Cascadia Mono**, © Microsoft Corporation,
 licensed under the [SIL Open Font License 1.1](https://openfontlicense.org).
 The bitmaps in `src/kernel/gen/` are a derivative of it and carry the same
 license. `tools/mkfont.py` regenerates them from any TrueType font you prefer.
+
+The trusted roots in `src/kernel/gen/roots.asm` are the public keys and names
+of the certificate authorities in Mozilla's root store, taken from
+[certifi](https://github.com/certifi/python-certifi) (2026.01.04), which
+distributes it under the [Mozilla Public License 2.0](https://mozilla.org/MPL/2.0/).
+`tools/mkroots.py` regenerates them from certifi or any PEM bundle.

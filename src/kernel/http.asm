@@ -3,8 +3,10 @@
 ;  over tls.asm on top of it. The answer is kept in memory (1 MiB at most);
 ;  at the end come the status line, a few headers, and the start of the
 ;  body, or the body goes to a file on the current volume. HTTP/1.0, so the
-;  server closes when it is done and never sends chunks. The server's
-;  certificate is not verified yet (tls.asm), and https says so.
+;  server closes when it is done and never sends chunks. For https the
+;  server's certificate must name the host and lead to a trusted root
+;  (tls.asm, x509.asm), dates taken from the CMOS clock; 'http -k' fetches
+;  without checking who the server is, as curl's -k does.
 ; =============================================================================
 
 HTTP_MAX        equ 1024 * 1024
@@ -13,11 +15,26 @@ HTTP_LINE       equ 150                 ; characters of a line, shown
 
 section .text
 
-; http <url> [file]
+; http [-k] <url> [file]
 cmd_http:
     push r12
     push r13
+    cmp qword [http_conn], 0            ; (not while one is running: -k is its)
+    jne .busy
     mov rsi, [sh_args]
+    mov byte [http_insecure], 0
+    cmp word [rsi], '-k'
+    jne .url
+    mov al, [rsi + 2]
+    test al, al
+    jz .flag
+    cmp al, ' '
+    jne .url
+.flag:
+    mov byte [http_insecure], 1
+    call arg_split
+    mov rsi, rdi
+.url:
     cmp byte [rsi], 0
     je .usage
     call arg_split
@@ -59,7 +76,7 @@ cmd_http:
     KLOG "http: a fetch is under way (ctrl+C stops it)"
     jmp .out
 .usage:
-    KLOG "usage: http <[https://]host[:port][/path]> [file], e.g. http https://example.com"
+    KLOG "usage: http [-k] <[https://]host[:port][/path]> [file], e.g. http https://example.com (-k: do not check the certificate)"
 .out:
     pop r13
     pop r12
@@ -296,6 +313,18 @@ http_drop:
 http_t_open:
     cmp byte [http_tls], 0
     je http_open
+    call rtc_read                       ; now, for the certificate's dates
+    push rdi
+    mov edi, [rtc_year]
+    mov esi, [rtc_mon]
+    mov edx, [rtc_day]
+    mov ecx, [rtc_hour]
+    mov r8d, [rtc_min]
+    mov r9d, [rtc_sec]
+    call x509_unix
+    pop rdi
+    mov r8, rax
+    movzx ecx, byte [http_insecure]
     lea rdi, [http_host]
     lea rsi, [http_tls_send]
     lea rdx, [http_tls_ops]
@@ -345,7 +374,14 @@ http_tls_send:
 http_tls_ready:
     mov eax, [tls_certs]
     mov ecx, [tls_cert_bytes]
-    KLOG "https: TLS 1.3, AES-128-GCM, X25519; %u certificate(s), %b, NOT verified", rax, rcx
+    cmp dword [tls_verified], 0
+    je .unchecked
+    mov edx, [x509_depth]
+    lea rsi, [http_host]
+    KLOG "https: TLS 1.3, AES-128-GCM, X25519; certificate for %s checked: %u intermediate(s), trusted root %s", rsi, rdx, qword [x509_anchor]
+    jmp http_open
+.unchecked:
+    KLOG "https: TLS 1.3, AES-128-GCM, X25519; %u certificate(s), %b, NOT checked (-k): this may not be the real server", rax, rcx
     jmp http_open
 
 http_tls_closed:                        ; the server's close_notify: the end
@@ -364,6 +400,12 @@ http_tls_fail:
     KLOG "https: the server sent alert %u and gave up", rcx
     jmp .drop
 .say:
+    cmp ecx, TLE_CERT
+    jne .plain
+    lea rsi, [http_host]
+    KLOG "https: not fetched: %s (%s); 'http -k' fetches it anyway, without knowing who sends it", rax, rsi
+    jmp .drop
+.plain:
     KLOG "https: %s", rax
 .drop:
     mov rdi, [http_conn]
@@ -583,6 +625,7 @@ http_port:      resq 1
 http_ip:        resd 1
 http_defport:   resd 1                  ; 80, or 443 for https
 http_tls:       resb 1
+http_insecure:  resb 1                  ; -k
 http_host:      resb 256
 http_path:      resb 512
 http_file:      resb 256

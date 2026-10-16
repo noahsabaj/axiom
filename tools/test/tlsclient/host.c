@@ -16,6 +16,8 @@ u64 kc(void *target, const u64 *args, int *cf);
 extern char tls_start[], tls_input[], tls_write[], tls_close[], tls_abort[];
 extern char tls_error_text[], host_send[], host_ops[];
 extern u32 tls_state, tls_error, tls_alert, tls_certs, tls_cert_bytes, tls_sigalg;
+extern u32 tls_cert_err, tls_verified, x509_depth;
+extern u64 x509_extra, x509_anchor;
 
 enum { EV_READY = 1, EV_CLOSED = 2, EV_FAIL = 4 };
 
@@ -47,11 +49,12 @@ static size_t take(u8 **buf, size_t *len, u8 *dst, size_t max)
 
 static int cf;
 #define P(x) ((u64)(uintptr_t)(x))
-static u64 K(void *fn, u64 a, u64 b, u64 c)
+static u64 K5(void *fn, u64 a, u64 b, u64 c, u64 d, u64 e)
 {
-    u64 args[6] = { a, b, c, 0, 0, 0 };
+    u64 args[6] = { a, b, c, d, e, 0 };
     return kc(fn, args, &cf);
 }
+#define K(fn, a, b, c) K5(fn, a, b, c, 0, 0)
 
 int c_send(const u8 *p, u32 n)
 {
@@ -73,14 +76,21 @@ void c_data(const u8 *p, u32 n) { put(&app, &app_len, &app_cap, p, n); }
 void c_closed(void) { events |= EV_CLOSED; }
 void c_fail(u32 code) { events |= EV_FAIL; fail_code = (int)code; }
 
-API int h_start(const char *host)
+API int h_start(const char *host, int insecure, u64 now)
 {
     out_len = app_len = 0;
     events = fail_code = refuse_send = 0;
     reply_cf = -1;
-    K(tls_start, P(host), P(host_send), P(host_ops));
+    K5(tls_start, P(host), P(host_send), P(host_ops), (u64)insecure, now);
     return cf ? -(int)tls_error : 0;
 }
+API void h_set_extra(const void *table) { x509_extra = P(table); }
+API int h_verified(void) { return (int)tls_verified; }
+extern u8 tl_have_key;
+API int h_sigalg_checked(void) { return (int)tl_have_key; }
+API int h_cert_err(void) { return (int)tls_cert_err; }
+API int h_depth(void) { return (int)x509_depth; }
+API const char *h_anchor(void) { return (const char *)(uintptr_t)x509_anchor; }
 API void h_reply_on_ready(const char *p, size_t n)
 {
     free(reply);
