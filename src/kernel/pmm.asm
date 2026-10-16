@@ -424,7 +424,8 @@ pmm_alloc_zero:
 .out:
     ret
 
-; pmm_free(RDI = physical address, RSI = pages)
+; pmm_free(RDI = physical address, RSI = pages). Panics if one of them is
+; not in use: freed twice, or never ours. Preserves all.
 pmm_free:
     push rax
     push rcx
@@ -435,9 +436,23 @@ pmm_free:
     lea rdi, [pmm_lock]
     call spin_lock
     mov rax, [rsp + 8]
+    shr rax, 12                         ; first page
     mov rcx, rsi
-    call pmm_mark_free
-    add [pmm_free_pages], rsi
+    mov rdx, [pmm_bitmap]
+.page:
+    test rcx, rcx
+    jz .freed
+    cmp rax, LOW_PAGES
+    jb .bad
+    cmp rax, [pmm_pages]
+    jae .bad
+    btr [rdx], rax
+    jnc .bad
+    inc qword [pmm_free_pages]
+    inc rax
+    dec rcx
+    jmp .page
+.freed:
     lea rdi, [pmm_lock]
     call spin_unlock
     popfq
@@ -446,9 +461,16 @@ pmm_free:
     pop rcx
     pop rax
     ret
+.bad:
+    mov dword [pmm_lock], 0
+    mov rdi, rax
+    shl rdi, 12
+    lea rsi, [str_pmm_bad]
+    jmp mem_bad
 
 section .rodata
 str_pmm_nohome: db 'No conventional memory region can hold the page bitmap', 0
+str_pmm_bad:    db 'pmm_free: a page that was not in use', 0
 
 section .data
 align 8

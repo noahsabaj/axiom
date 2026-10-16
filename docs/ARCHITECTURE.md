@@ -28,6 +28,9 @@ the firmware left 5-level paging on.
      usual MMIO hole is covered);
    - `PML4[511]`: the kernel at `0xFFFFFFFF80000000` in 4 KiB pages, and the
      framebuffer at `0xFFFFFFFF00000000` write-combining (PAT entry 4).
+
+   The kernel replaces these with its own straight away (see Memory); the
+   loader's PML4 lives on as the firmware's tables.
 6. Take the final memory map and call `ExitBootServices` (retrying if the map
    changed). `SetVirtualAddressMap` is never called: runtime services stay
    identity mapped, so `ResetSystem` keeps working.
@@ -42,9 +45,11 @@ directly with no RIP-relative gymnastics.
 ## Kernel image: `src/kernel/kernel.asm`
 
 One file that `%include`s every module into four sections (`.text`,
-`.rodata`, `.data`, `.bss`) laid out back to back. The first bytes are a
-header the loader reads: magic `AXIOMKRN`, entry point, file size, memory
-size. `build/kernel.map` lists every symbol.
+`.rodata`, `.data`, `.bss`) laid out back to back, `.rodata` and `.data`
+each starting on a page of their own (`kernel_rodata`, `kernel_data`) so
+that each can be mapped as it should be. The first bytes are a header the
+loader reads: magic `AXIOMKRN`, entry point, file size, memory size.
+`build/kernel.map` lists every symbol.
 
 `kernel_main` (`boot.asm`) brings the machine up in dependency order:
 
@@ -53,9 +58,9 @@ size. `build/kernel.map` lists every symbol.
 | 1 | `gdt.asm`, `idt.asm` | Our GDT, the BSP's per-CPU block in GS, 256 interrupt stubs |
 | 2 | `serial.asm`, `lib.asm`, `log.asm` | COM1 log, TSC time base, `sprintf`, `KLOG`; the clock and the boot volume into the log |
 | 3 | `cpu.asm` | CPUID features and brand, hybrid core types, PAT, NX, SSE/AVX through XSETBV, HWP, telemetry MSRs |
-| 4 | `pmm.asm` | Bitmap page allocator from the UEFI memory map |
+| 4 | `pmm.asm`, `vmm.asm`, `heap.asm` | Bitmap page allocator from the UEFI memory map; the kernel's own page tables (no identity map, W^X), the vm region, the heap |
 | 5 | `gfx.asm`, `console.asm`, `ui.asm` | Framebuffer, alpha-blended glyphs, the dashboard and console |
-| 6 | TSS, IST | #DF, NMI and #MC each get their own stack |
+| 6 | TSS, IST | Guarded stacks: the BSP moves onto its own, the loader's goes back; #DF, NMI and #MC each get one too |
 | 7 | `acpi.asm`, `smbios.asm` | MADT (CPUs, I/O APICs, overrides), MCFG, FADT, `_S5_`; board, BIOS and memory strings |
 | 8 | `pmm.asm` | Reclaim boot-services memory |
 | 9 | `apic.asm` | x2APIC through MSRs, else xAPIC MMIO; 8259s masked; I/O APIC entries masked |
@@ -75,24 +80,75 @@ refresh or frame, the next key repeat, the next network timer, or 4 ms while
 a USB controller or a network card needs polling. A USB event, a network
 interrupt or pointer movement wakes it early.
 
-## Memory
+## Memory: `pmm.asm`, `vmm.asm`, `heap.asm`
 
-- **Physical:** one bit per 4 KiB page, built from the UEFI memory map. The
-  kernel, its page tables and the loader's allocations are marked used; boot
-  services memory is released after ACPI and SMBIOS have been read.
-- **Virtual:** fixed. Physical memory at `PHYS_BASE + pa`; MMIO above the
-  direct map goes into an uncached 1 GiB window at `0xFFFF808000000000`
-  (`mmio_map` in `usb.asm`). There are no per-task address spaces yet: that is
-  M1.
+- **Physical** (`pmm.asm`): one bit per 4 KiB page, built from the UEFI
+  memory map. The kernel, its page tables and the loader's allocations are
+  marked used; boot services memory is released after ACPI and SMBIOS have
+  been read. `pmm_free` panics on a page that was not in use.
+- **The kernel's page tables** (`vmm_init`, right after `pmm_init`). Nothing
+  is mapped in the lower half, so a null pointer, or a physical address used
+  as a pointer, faults. The upper half:
+
+  | PML4 | At | What |
+  |---|---|---|
+  | 256 | `0xFFFF800000000000` | The direct map of `[0, phys_top)`, 2 MiB pages, writable, never executable; the 4 KiB pages holding the kernel's code and constants are read-only there too |
+  | 257 | `0xFFFF808000000000` | The vm region, 512 GiB in 2 MiB slots (below) |
+  | 511 | `0xFFFFFFFF00000000` | The framebuffer, write-combining |
+  | 511 | `0xFFFFFFFF80000000` | The kernel: code read-only, constants read-only and not executable, data and `.bss` writable and not executable |
+
+  Every kernel page is global (CR4.PGE); SMEP and SMAP are on where the CPU
+  has them. The upper-half PML4 entries never change after `vmm_init`, so any
+  set of tables that copies them sees the same kernel. No page anywhere is
+  both writable and executable: `mem test` walks every entry to check.
+- **The firmware tables** are the loader's PML4 (below 4 GiB): its identity
+  map of `[0, phys_top)` in `PML4[0]`, the kernel's upper half copied in.
+  UEFI runtime calls switch to them and back (`fw_enter`, `fw_leave`), and an
+  AP runs on them from its trampoline until `ap_entry`. Nothing else ever
+  sees an identity map.
+- **The vm region**: `vm_alloc(bytes)` gives zeroed pages of its own;
+  `vm_map_phys(phys, bytes, flags)` maps a physical range (`mmio_map` does,
+  uncached, for MMIO above the direct map); `vm_free` takes either back.
+  Slots are found next-fit in a bitmap. A mapping sits at the top of its
+  slots with at least one unmapped page below it, and the next slot's first
+  page is never mapped, so running off either end faults. Every kernel stack
+  is one: each CPU's 64 KiB stack and its three 16 KiB interrupt stacks.
+- **TLB shootdowns**: `vm_free` unmaps each slot at its PDE, then
+  `tlb_shootdown` sends `VEC_TLB` to every other CPU and waits for them all
+  (`invlpg` per page, or a full flush past 64), and only then gives the pages
+  and page tables back. A CPU waiting for the lock, or for a job to finish,
+  answers other shootdowns as it waits.
+- **The heap**: `kmalloc(bytes)` gives zeroed, 16-byte aligned memory; up to
+  1 KiB it comes from slabs (a page from pmm each, through the direct map,
+  one object size per slab: 16 to 1024 bytes), larger from a vm mapping of
+  its own, placed to end where the mapping does. A slab's first 128 bytes
+  say what it holds, with a bit per object, so `kfree` refuses a pointer it
+  never gave out, or one freed twice. A freed object is filled with `0xDF`,
+  and `kmalloc` checks it still is before handing it out again. Each size
+  keeps one empty slab and gives the rest back.
+- **What a fault hit**: a page fault or double fault report ends with a line
+  saying what the access was, why it failed and what lives at the address:
+  `cause: a write to 0xffffffff80019676, which is read-only: kernel code`;
+  `...where nothing is mapped: the guard page below CPU 3's kernel stack (a
+  stack overflow)`; `...a null pointer`; `...just past the end of a vm
+  mapping (an overrun?)`. Misuse of the allocators panics with its own
+  message (`kfree: freed twice: 0x...`).
+- `mem` shows all of this; `mem <address>` says what is at an address and
+  how it is mapped; `mem test` runs the heap and the vm region hard on one
+  CPU and then on all of them at once. `panic null|code|const|nx|stack|
+  guard|twice|after|page|vm` makes each kind of fault on purpose.
 
 ## Processors: `smp.asm`
 
 - The MADT gives the APIC IDs. The BSP is moved to index 0.
-- A 16-bit trampoline is copied below 1 MiB. The BSP patches in the GDT, CR3
+- A 16-bit trampoline is copied below 1 MiB. The BSP patches in the GDT, the
+  firmware tables' CR3 (below 4 GiB, with the identity map the trampoline
+  needs), the EFER bits (long mode, and NX, which the kernel's tables use)
   and the 64-bit entry, then sends INIT to every AP at once, waits 10 ms and
-  sends two rounds of SIPIs. Each AP goes 16 → 32 → 64-bit, finds its own index
-  by matching its x2APIC ID (CPUID leaf 0xB) and sets up its GS block, TSS, IST
-  stacks, LAPIC and features.
+  sends two rounds of SIPIs. Each AP goes 16 → 32 → 64-bit, moves onto the
+  kernel's tables in `ap_entry`, finds its own index by matching its x2APIC
+  ID (CPUID leaf 0xB) and sets up its GS block, TSS, IST stacks, LAPIC and
+  features.
 - `smp_topology` sorts threads by kind (P-core, E-core, other), then APIC ID,
   and numbers cores within each kind. That order drives the dashboard tiles.
 - **Jobs:** `job_run(fn, items, arg)` wakes every CPU with an IPI on
@@ -105,11 +161,12 @@ interrupt or pointer movement wakes it early.
 ## Interrupts
 
 Vectors: `0x21` PS/2 keyboard (I/O APIC, with MADT overrides applied), `0x22`
-xHCI and `0x23` network cards (MSI-X or MSI to the BSP, set up by `pci_msi`), `0x30` TSC-deadline timer, `0x40` job wake-up, `0xFF`
+xHCI and `0x23` network cards (MSI-X or MSI to the BSP, set up by `pci_msi`), `0x30` TSC-deadline timer, `0x40` job wake-up, `0x41` TLB shootdown, `0xFF`
 spurious. Every stub saves all general registers and calls the handler
 registered with `irq_register`; the common path sends the EOI. Exceptions go
 to `panic`, which stops the other CPUs and paints a full report (registers,
-CR2, CR3, segments) on screen and serial.
+CR2, CR3, segments, and for a page fault what it ran into) on screen and
+serial.
 
 ## USB: `usb.asm`, `usbdev.asm`, `usbhub.asm`, `hid.asm`, `usbmsc.asm`, `pointer.asm`
 
@@ -457,7 +514,7 @@ restarts before double precision runs out.
 
 ## Power: `power.asm`
 
-Reboot and power-off use UEFI `ResetSystem` first. Fallbacks: the ACPI reset
+Reboot and power-off use UEFI `ResetSystem` first, on the firmware tables. Fallbacks: the ACPI reset
 register, port CF9, the 8042 and a triple fault for reboot; ACPI S5 (SLP_TYP
 from `_S5_`) for power-off, then QEMU's port 0x604.
 

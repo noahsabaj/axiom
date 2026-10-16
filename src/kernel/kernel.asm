@@ -14,11 +14,16 @@ default rel
 org KERNEL_BASE
 
 section .text progbits align=16
-section .rodata progbits align=64 follows=.text
-section .data progbits align=64 follows=.rodata
-section .bss nobits align=64
+section .rodata progbits align=4096 follows=.text
+section .data progbits align=4096 follows=.rodata
+section .bss nobits align=4096
 
 [map all build/kernel.map]
+
+section .rodata                         ; each section starts on a page of
+kernel_rodata:                          ; its own, for vmm_init's W^X
+section .data
+kernel_data:
 
 section .text
 kernel_header:
@@ -45,6 +50,8 @@ section .text
 %include "smbios.asm"
 %include "apic.asm"
 %include "smp.asm"
+%include "vmm.asm"
+%include "heap.asm"
 %include "pci.asm"
 %include "kbd.asm"
 %include "usb.asm"
@@ -77,6 +84,7 @@ section .text
 %include "text.asm"
 %include "claude.asm"
 %include "cryptotest.asm"
+%include "memtest.asm"
 %include "mandel.asm"
 %include "ui.asm"
 %include "shell.asm"
@@ -86,6 +94,7 @@ section .text
 section .data
 align 8
 boot_info:      dq 0
+boot_rsp:       dq 0                    ; the loader's stack, until it goes back
 phys_base:      dq PHYS_BASE
 kernel_file_end:
 

@@ -26,6 +26,7 @@ PC_MPERF        equ 104
 PC_CORE         equ 112                 ; core number within its kind
 PC_THREAD       equ 120                 ; SMT thread within the core
 PC_TSS          equ 128                 ; 104-byte TSS
+PC_TLB_GEN      equ 232                 ; last TLB shootdown this CPU answered
 PC_SIZE         equ 256
 
 CPU_KIND_UNKNOWN equ 0
@@ -51,6 +52,7 @@ VEC_USB         equ 0x22
 VEC_NET         equ 0x23
 VEC_TIMER       equ 0x30
 VEC_WAKE        equ 0x40
+VEC_TLB         equ 0x41
 VEC_SPURIOUS    equ 0xFF
 
 ; interrupt frame built by isr_common (offsets from the frame pointer)

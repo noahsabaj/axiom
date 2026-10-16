@@ -229,6 +229,9 @@ panic_compose:
     add rdi, rax
     SPRINTF rdi, `R9  %p  R10 %p  R11 %p  R12 %p\nR13 %p  R14 %p  R15 %p\n`, qword [rbx + FR_R9], qword [rbx + FR_R10], qword [rbx + FR_R11], qword [rbx + FR_R12], qword [rbx + FR_R13], qword [rbx + FR_R14], qword [rbx + FR_R15]
     add rdi, rax
+    mov rsi, rbx                        ; a page fault: what it ran into
+    call vmm_fault_text
+    add rdi, rax
 .done:
     pop rbx
     ret

@@ -1,7 +1,7 @@
 ; =============================================================================
 ;  power.asm - reboot and power off. UEFI runtime ResetSystem first (we never
-;  called SetVirtualAddressMap, so the runtime still runs identity-mapped),
-;  then the ACPI paths, then the legacy ones.
+;  called SetVirtualAddressMap, so the runtime runs identity-mapped, on the
+;  firmware tables), then the ACPI paths, then the legacy ones.
 ; =============================================================================
 
 RT_RESET_SYSTEM equ 104
@@ -13,14 +13,18 @@ section .text
 ; efi_reset(EDI = reset type): returns only if the firmware refuses
 efi_reset:
     push rbx
+    push r12
     mov rax, [boot_info]
     mov rax, [rax + BI_RUNTIME]
     test rax, rax
     jz .out
-    mov rax, [rax + RT_RESET_SYSTEM]
-    test rax, rax
+    add rax, [phys_base]                ; its table, through the direct map
+    mov r12, [rax + RT_RESET_SYSTEM]
+    test r12, r12
     jz .out
     cli
+    call fw_enter                       ; the firmware runs identity-mapped
+    push rax
     mov ecx, edi                        ; MS x64: type, status, size, data
     xor edx, edx
     xor r8d, r8d
@@ -28,9 +32,12 @@ efi_reset:
     mov rbx, rsp
     and rsp, -16
     sub rsp, 32
-    call rax
+    call r12
     mov rsp, rbx
+    pop rdi
+    call fw_leave
 .out:
+    pop r12
     pop rbx
     ret
 

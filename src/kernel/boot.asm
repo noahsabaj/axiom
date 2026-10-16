@@ -7,11 +7,13 @@ MSR_TSC_DEADLINE equ 0x6E0
 section .text
 
 ; The loader jumps here with RDI = boot information (direct-mapped),
-; RSP = a 64 KiB stack, interrupts off, our page tables live.
+; RSP = the top of a 64 KiB stack (direct-mapped), interrupts off, the
+; loader's page tables live.
 kernel_main:
     cli
     cld
     mov [boot_info], rdi
+    mov [boot_rsp], rsp
     mov rax, 'AXIOMBI1'
     cmp [rdi + BI_MAGIC], rax
     jne boot_stop
@@ -46,6 +48,19 @@ kernel_main:
     mov rax, [pmm_free_pages]
     shl rax, 12
     KLOG "memory: %b usable, %b free", qword [pmm_usable_bytes], rax
+    call vmm_init
+    call heap_init
+    call tlb_init
+    lea rax, [kernel_rodata]
+    mov rcx, KERNEL_BASE
+    sub rax, rcx
+    lea rdx, [kernel_data]
+    lea rcx, [kernel_rodata]
+    sub rdx, rcx
+    lea r8, [kernel_end]
+    lea rcx, [kernel_data]
+    sub r8, rcx
+    KLOG "memory: our own page tables; code %b read-only, constants %b, data %b not executable; no identity map", rax, rdx, r8
     call gfx_init
     call ui_init
     mov byte [log_to_screen], 1
@@ -57,6 +72,12 @@ kernel_main:
 
     lea rbx, [percpu]                   ; BSP: interrupt stacks and TSS
     call smp_alloc_stacks
+    mov rsp, [rbx + PC_STACK_TOP]       ; onto a stack with a guard page
+    mov rdi, [boot_rsp]                 ; and the loader's goes back
+    sub rdi, [phys_base]
+    sub rdi, BOOT_STACK_SIZE
+    mov esi, BOOT_STACK_SIZE / 4096
+    call pmm_free
     call tss_install
     call idt_use_ist
 

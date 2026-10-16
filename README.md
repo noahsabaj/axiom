@@ -2,7 +2,7 @@
 
 An operating system written entirely in x86-64 assembly, booting straight from
 UEFI onto the hardware that is actually present. No C, no libc, no GRUB, no
-borrowed kernel: about thirty-six thousand lines of NASM, top to bottom.
+borrowed kernel: about thirty-nine thousand lines of NASM, top to bottom.
 
 Why it exists and where it is going: [docs/VISION.md](docs/VISION.md).
 How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
@@ -47,6 +47,15 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 - **A log on the boot stick**: everything Axiom prints, the commands typed
   and any panic report go into `AXIOM.LOG` on the USB stick it booted from,
   readable from Windows afterwards.
+- **Memory of its own**: the kernel builds its own page tables at boot, with
+  nothing mapped in the lower half (a null pointer faults), no page both
+  writable and executable, and a guard page under every stack. A vm region
+  for stacks, device memory and large blocks, TLB shootdowns across every
+  CPU, and a heap (`kmalloc`, `kfree`) that catches double frees and writes
+  after free. A fault report says what the access ran into: `a write to
+  ..., which is read-only: kernel code`, `the guard page below CPU 3's
+  kernel stack (a stack overflow)`. `mem test` runs it all hard on every
+  CPU; `panic <kind>` makes each fault on purpose.
 - ACPI (MADT, MCFG, FADT, the DSDT's `_S5_`), SMBIOS, PCI Express enumeration,
   x2APIC (falling back to xAPIC), I/O APIC, TSC-deadline timer, and a panic
   screen that stops every other CPU.
@@ -238,8 +247,11 @@ tools/mkroots.py        the trusted roots, src/kernel/gen/roots.asm, from
                         certifi's copy of Mozilla's list
 tools/test/             host-side tests for self-contained modules (tls: the
                         crypto; tlsclient: the TLS client against OpenSSL;
-                        pki: certificates and signatures; claude: ask, in
-                        QEMU, against claudemock.py)
+                        pki: certificates and signatures; heap: kmalloc and
+                        kfree, from four threads at once) and QEMU suites
+                        (claude: ask, against claudemock.py; memory: the
+                        page tables, W^X, guard pages, the vm region and
+                        the heap, and each kind of fault)
 tools/mkfont.py         rasterize the console font into src/kernel/gen/
 docs/                   vision and architecture
 ```

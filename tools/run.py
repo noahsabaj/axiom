@@ -11,7 +11,8 @@
 Headless runs log the serial port to build/serial.log and talk to the QEMU
 monitor on 127.0.0.1:4444 for screenshots and keystrokes. They wait for the
 shell's first prompt line, not a fixed time (--wait N for that instead), and
-'until TEXT' in --script waits for TEXT in the log after the last keys typed.
+'until TEXT' in --script waits for TEXT in the log after the last keys typed;
+'ended' waits for the guest to end QEMU itself (poweroff).
 
 QEMU runs on the Windows Hypervisor Platform (WHPX) when it can, many times
 faster than its own CPU emulation (TCG); --accel picks one. The first run
@@ -287,6 +288,13 @@ def main():
                         qmp.abs(x, y, [(b, False)])
                 elif line.startswith("wait "):
                     time.sleep(float(line[5:]))
+                elif line == "ended":
+                    # ended: wait for the guest to end QEMU itself (poweroff)
+                    end = time.time() + opts.timeout
+                    while proc.poll() is None and time.time() < end:
+                        time.sleep(0.05)
+                    print("run.py: QEMU " + ("ended by itself" if proc.poll() is not None
+                                             else "is still running"), file=sys.stderr)
                 elif line.startswith("until "):
                     # until TEXT: in the log, after the last keys typed
                     if not log.until(line[6:], opts.timeout, proc):

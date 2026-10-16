@@ -146,86 +146,6 @@ PORTSC_KEEP     equ (1 << 9) | (3 << 14) | (7 << 25)   ; bits safe to write back
 
 section .text
 
-; -----------------------------------------------------------------------------
-;  mmio_map(RDI = physical, RSI = bytes) -> RAX = mapped address (0 on failure)
-;  Below phys_top the direct map already covers it. Anything else (64-bit
-;  BARs sit high) goes into a 1 GiB uncached window at MMIO_VIRT, 2 MiB pages.
-; -----------------------------------------------------------------------------
-MMIO_VIRT       equ 0xFFFF808000000000  ; PML4[257]
-
-mmio_map:
-    push rbx
-    push rcx
-    push rdx
-    push r12
-    mov rax, rdi
-    add rax, rsi
-    mov rcx, [boot_info]
-    cmp rax, [rcx + BI_PHYS_TOP]
-    jbe .direct
-    mov r12, rdi
-    and r12, ~0x1FFFFF                  ; first 2 MiB page
-    add rax, 0x1FFFFF
-    and rax, ~0x1FFFFF
-    sub rax, r12
-    shr rax, 21
-    mov rcx, rax                        ; pages
-    add eax, [mmio_used]
-    cmp eax, 512
-    ja .fail
-    cmp qword [mmio_pd], 0
-    jne .have_pd
-    push rdi
-    mov edi, 2
-    call pmm_alloc_zero
-    pop rdi
-    test rax, rax
-    jz .fail
-    mov rdx, rax                        ; PDPT, then the PD after it
-    add rdx, [phys_base]
-    lea rbx, [rax + 0x1000]
-    or rbx, 3
-    mov [rdx], rbx
-    lea rbx, [rdx + 0x1000]
-    mov [mmio_pd], rbx
-    mov rbx, cr3
-    and rbx, ~0xFFF
-    add rbx, [phys_base]
-    or rax, 3
-    mov [rbx + 257 * 8], rax
-.have_pd:
-    mov eax, [mmio_used]
-    mov rbx, [mmio_pd]
-    lea rbx, [rbx + rax * 8]
-    shl rax, 21
-    mov rdx, MMIO_VIRT
-    add rax, rdx                        ; virtual address of the first page
-    add [mmio_used], ecx
-    mov rdx, r12
-    or rdx, 0x9B                        ; present, writable, PWT, PCD, 2 MiB
-.pde:
-    mov [rbx], rdx
-    add rbx, 8
-    add rdx, 0x200000
-    dec ecx
-    jnz .pde
-    mov rcx, rdi
-    sub rcx, r12
-    add rax, rcx
-    jmp .out
-.direct:
-    mov rax, rdi
-    add rax, [phys_base]
-    jmp .out
-.fail:
-    xor eax, eax
-.out:
-    pop r12
-    pop rdx
-    pop rcx
-    pop rbx
-    ret
-
 ; usb_alloc_page -> RAX = physical, RDX = mapped; zeroed. Panics if out of memory.
 usb_alloc_page:
     push rdi
@@ -917,9 +837,6 @@ usb_poll_needed: db 0                   ; a controller without MSI: poll often
 section .bss
 alignb 8
 xhci_count:     resd 1
-alignb 8
-mmio_pd:        resq 1
-mmio_used:      resd 1
 alignb 8
 xhci_bar:       resq 1
 xhci_ctrl:      resb MAX_XHCI * XC_SIZE

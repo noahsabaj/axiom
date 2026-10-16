@@ -206,6 +206,18 @@ cpu_setup_local:
     mov cr0, rax
     mov rax, cr4
     or rax, (1 << 9) | (1 << 10)        ; OSFXSR, OSXMMEXCPT
+    test dword [cpu_f1_edx], 1 << 13
+    jz .no_pge
+    or rax, 1 << 7                      ; PGE: kernel mappings are global
+.no_pge:
+    test dword [cpu_f7_ebx], 1 << 7
+    jz .no_smep
+    or rax, 1 << 20                     ; SMEP: never run user pages
+.no_smep:
+    test dword [cpu_f7_ebx], 1 << 20
+    jz .no_smap
+    or rax, 1 << 21                     ; SMAP: never touch them by accident
+.no_smap:
     test dword [cpu_f1_ecx], 1 << 26
     jz .no_osxsave
     or rax, 1 << 18                     ; OSXSAVE

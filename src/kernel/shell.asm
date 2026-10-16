@@ -362,27 +362,6 @@ cmd_cpus:
     pop rbx
     ret
 
-cmd_mem:
-    push rbx
-    xor ebx, ebx
-.next:
-    lea rax, [mem_by_type]
-    mov rcx, [rax + rbx * 8]
-    test rcx, rcx
-    jz .skip
-    lea rax, [mem_type_names]
-    mov rax, [rax + rbx * 8]
-    KLOG "  %-14s %b", rax, rcx
-.skip:
-    inc ebx
-    cmp ebx, 16
-    jb .next
-    mov rax, [pmm_free_pages]
-    shl rax, 12
-    KLOG "  usable %b, free %b, bitmap at %p", qword [pmm_usable_bytes], rax, qword [pmm_bitmap_phys]
-    pop rbx
-    ret
-
 cmd_pci:
     push rbx
     push r12
@@ -521,10 +500,6 @@ cmd_poweroff:
     call log_final
     jmp power_off
 
-cmd_panic:
-    KLOG "testing the panic screen"
-    ud2
-
 section .rodata
 str_prompt:     db 'axiom> ', 0
 str_ctrl_c:     db '^C', 10, 0
@@ -553,7 +528,7 @@ commands:
     COMMAND 'help',     cmd_help,     'this list'
     COMMAND 'info',     cmd_info,     'what this machine is'
     COMMAND 'cpus',     cmd_cpus,     'each logical CPU: kind, clock, heat, work'
-    COMMAND 'mem',      cmd_mem,      'physical memory by type'
+    COMMAND 'mem',      cmd_mem,      'mem [test | <hex address>]: memory by type and use, a self-test, or what is at an address'
     COMMAND 'pci',      cmd_pci,      'PCI Express functions'
     COMMAND 'acpi',     cmd_acpi,     'firmware ACPI tables'
     COMMAND 'usb',      usb_list,     'USB devices, hubs and what drives them'
@@ -584,7 +559,7 @@ commands:
     COMMAND 'uptime',   cmd_uptime,   'time since power-on'
     COMMAND 'echo',     cmd_echo,     'print the arguments'
     COMMAND 'clear',    cmd_clear,    'clear the console (also ctrl+L)'
-    COMMAND 'panic',    cmd_panic,    'test the crash screen'
+    COMMAND 'panic',    cmd_panic,    'panic [null|code|const|nx|stack|guard|twice|after|page|vm]: test the crash screen, or a kind of memory fault'
     COMMAND 'reboot',   cmd_reboot,   'restart the machine'
     COMMAND 'poweroff', cmd_poweroff, 'turn the machine off'
     dq 0, 0, 0

@@ -66,21 +66,30 @@ smp_init_bsp:
 ; -----------------------------------------------------------------------------
 ;  smp_alloc_stacks(RBX = per-CPU block): kernel stack plus three IST stacks
 ; -----------------------------------------------------------------------------
-smp_alloc_stacks:
+smp_alloc_stacks:                       ; each in the vm region, guarded
     push rax
     push rdi
-    mov edi, (KSTACK_SIZE + 3 * IST_SIZE) / 4096
-    call pmm_alloc_zero
+    mov edi, KSTACK_SIZE
+    call vm_alloc
     test rax, rax
     jz .oom
-    add rax, [phys_base]
     add rax, KSTACK_SIZE
     mov [rbx + PC_STACK_TOP], rax
     mov [rbx + PC_TSS + TSS_RSP0], rax
+    mov edi, IST_SIZE
+    call vm_alloc
+    test rax, rax
+    jz .oom
     add rax, IST_SIZE
     mov [rbx + PC_TSS + TSS_IST1], rax  ; double fault
+    call vm_alloc
+    test rax, rax
+    jz .oom
     add rax, IST_SIZE
     mov [rbx + PC_TSS + TSS_IST2], rax  ; NMI
+    call vm_alloc
+    test rax, rax
+    jz .oom
     add rax, IST_SIZE
     mov [rbx + PC_TSS + TSS_IST3], rax  ; machine check
     pop rdi
@@ -125,8 +134,14 @@ smp_start:
     mov [r12 + (tramp_far32 - tramp_start)], edx
     lea rdx, [rax + (tramp_lm64 - tramp_start)]
     mov [r12 + (tramp_far64 - tramp_start)], edx
-    mov rax, cr3
+    mov rax, [fw_cr3]                   ; the firmware tables: identity map
     mov [r12 + (tramp_cr3 - tramp_start)], rax
+    mov eax, 1 << 8                     ; long mode, and NX if we use it
+    cmp qword [vmm_nx], 0
+    je .efer
+    or eax, 1 << 11
+.efer:
+    mov [r12 + (tramp_efer - tramp_start)], eax
     lea rax, [ap_entry]
     mov [r12 + (tramp_entry - tramp_start)], rax
 
@@ -258,10 +273,12 @@ smp_find_trampoline:
     ret
 
 ; -----------------------------------------------------------------------------
-;  ap_entry: an AP arrives here in 64-bit mode on the kernel page tables,
-;  with no stack and interrupts off
+;  ap_entry: an AP arrives here in 64-bit mode on the firmware tables, with no
+;  stack and interrupts off
 ; -----------------------------------------------------------------------------
 ap_entry:
+    mov rax, [vmm_cr3]                  ; the kernel's own
+    mov cr3, rax
     mov eax, 1
     cpuid
     shr ebx, 24
@@ -477,6 +494,7 @@ job_dispatch:
     mov eax, [job_checkins]
     cmp eax, [job_cpus]
     jae .done
+    call tlb_service                    ; a worker may be freeing vm memory
     pause
     jmp .wait
 .done:
@@ -610,7 +628,7 @@ tramp_pm32:
     mov cr3, eax
     mov ecx, MSR_EFER
     rdmsr
-    or eax, 1 << 8                      ; long mode enable
+    or eax, [ebx + (tramp_efer - tramp_start)]  ; long mode, NX
     wrmsr
     mov eax, cr0
     or eax, 0x80000000                  ; paging on: long mode, compatibility
@@ -643,6 +661,7 @@ tramp_far64:
 align 8
 tramp_cr3:      dq 0
 tramp_entry:    dq 0
+tramp_efer:     dd 0
 tramp_end:
 
 section .rodata
