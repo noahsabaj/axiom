@@ -60,39 +60,141 @@ CPU_KIND_UNKNOWN equ 0
 CPU_KIND_P       equ 1                  ; performance core
 CPU_KIND_E       equ 2                  ; efficient core
 
-; a thread (sched.asm)
-TH_RSP          equ 0                   ; saved stack pointer, while not running
-TH_STATE        equ 8                   ; dword TS_*
-TH_ONCPU        equ 12                  ; dword: a CPU is on its stack
-TH_CPU          equ 16                  ; the CPU it runs or waits on
-TH_PIN          equ 24                  ; -1, or the only CPU it may run on
-TH_CLASS        equ 32                  ; THC_*: the kind of core it wants
-TH_NEXT         equ 40                  ; run queue, sleep queue or zombie link
-TH_VR           equ 48                  ; virtual runtime (relative while parked)
-TH_WAKE_AT      equ 56                  ; TSC deadline while parked with one
-TH_TOKEN        equ 64                  ; dword: an unpark came while not parked
-TH_WOKEN        equ 68                  ; dword: the last park ended by unpark
-TH_ID           equ 72
-TH_STACK        equ 80                  ; its stack's vm mapping, 0 if borrowed
-TH_STACK_TOP    equ 88
-TH_XSAVE        equ 96                  ; its SIMD state, 64-byte aligned
-TH_ALL_NEXT     equ 104                 ; every thread, for listings
-TH_ALL_PREV     equ 112
-TH_RUN_TSC      equ 120                 ; when it last started running
-TH_CYC_P        equ 128                 ; TSC cycles run on P-cores
-TH_CYC_E        equ 136                 ; on E-cores
-TH_CYC_O        equ 144                 ; on cores of no known kind
-TH_SWITCHES     equ 152                 ; times it was switched to
-TH_MIGRATIONS   equ 160                 ; times it ran on a different CPU
-TH_FLAGS        equ 168                 ; TF_*
-TH_REFS         equ 176                 ; dword: its own, and its handle's
-TH_EXIT         equ 184                 ; what it returned
-TH_JOINER       equ 192                 ; the thread waiting in thread_join
-TH_HINT         equ 200                 ; -1, or the CPU to start on (tests)
-TH_LAST         equ 208                 ; the CPU it last ran on, -1 if none
-TH_NAME         equ 216
-TH_NAME_LEN     equ 24
-TH_SIZE         equ 256
+; every kernel object begins with this (object.asm)
+OB_TYPE         equ 0                   ; dword OT_*
+OB_REFS         equ 4                   ; dword: references; each capability holds one
+OB_ID           equ 8                   ; never reused
+OB_NEXT         equ 16                  ; every live object of its type
+OB_PREV         equ 24
+OB_NAME         equ 32                  ; NUL-terminated
+OB_NAME_LEN     equ 24
+OB_CAPS         equ 56                  ; dword: capabilities that point at it
+OB_MAKER        equ 60                  ; dword: the id of the task that made it
+OB_SIZE         equ 64
+
+OT_TASK         equ 1
+OT_THREAD       equ 2
+OT_EVENT        equ 3
+OT_MEMORY       equ 4
+OT_TYPES        equ 5                   ; with 0, none
+
+; what a capability allows (RT_*): three for any object, the rest by type
+RT_DUP          equ 1 << 0              ; derive more from it
+RT_GIVE         equ 1 << 1              ; hand it to another task
+RT_INFO         equ 1 << 2              ; see what the object is
+RT_TASK_HANDLES equ 1 << 8              ; a task: give it handles
+RT_TASK_SPAWN   equ 1 << 9              ; start threads in it
+RT_THREAD_WAIT  equ 1 << 8              ; a thread: wait for it to end
+RT_EV_SIGNAL    equ 1 << 8              ; an event: signal or reset it
+RT_EV_WAIT      equ 1 << 9              ; wait for it
+RT_MEM_READ     equ 1 << 8              ; memory: read it
+RT_MEM_WRITE    equ 1 << 9              ; write it
+RT_ALL          equ 0xFFFF
+
+; what handle operations return when they fail
+E_BADH          equ -1                  ; no such handle
+E_TYPE          equ -2                  ; the wrong type of object
+E_RIGHTS        equ -3                  ; not allowed by the capability
+E_EXPIRED       equ -4
+E_REVOKED       equ -5
+E_RANGE         equ -6                  ; outside a memory window
+E_NOMEM         equ -7
+E_FULL          equ -8                  ; the handle table is full
+E_TIMEOUT       equ -9
+E_ARG           equ -10
+E_COUNT         equ 11                  ; with 0, none
+E_ANY           equ -4096               ; what returns a pointer or an E_*: an
+                                        ; error is RAX >= E_ANY, unsigned (the
+                                        ; kernel's pointers are negative too)
+
+; a thread (sched.asm), an object
+TH_ID           equ OB_ID
+TH_REFS         equ OB_REFS             ; its own, and its creator's handle
+TH_NAME         equ OB_NAME
+TH_NAME_LEN     equ OB_NAME_LEN
+TH_ALL_NEXT     equ OB_NEXT             ; every thread, for listings
+TH_ALL_PREV     equ OB_PREV
+TH_RSP          equ 64                  ; saved stack pointer, while not running
+TH_STATE        equ 72                  ; dword TS_*
+TH_ONCPU        equ 76                  ; dword: a CPU is on its stack
+TH_CPU          equ 80                  ; the CPU it runs or waits on
+TH_PIN          equ 88                  ; -1, or the only CPU it may run on
+TH_CLASS        equ 96                  ; THC_*: the kind of core it wants
+TH_NEXT         equ 104                 ; run queue, sleep queue or zombie link
+TH_VR           equ 112                 ; virtual runtime
+TH_WAKE_AT      equ 120                 ; TSC deadline while parked with one
+TH_TOKEN        equ 128                 ; dword: an unpark came while not parked
+TH_WOKEN        equ 132                 ; dword: the last park ended by unpark
+TH_STACK        equ 136                 ; its mapping, 0 if it kept the stack it had
+TH_STACK_TOP    equ 144
+TH_XSAVE        equ 152                 ; its SIMD state, 64-byte aligned
+TH_RUN_TSC      equ 160                 ; when it last started running
+TH_CYC_P        equ 168                 ; TSC cycles run on P-cores
+TH_CYC_E        equ 176                 ; on E-cores
+TH_CYC_O        equ 184                 ; on cores of no known kind
+TH_SWITCHES     equ 192                 ; times it was switched to
+TH_MIGRATIONS   equ 200                 ; times it ran on a different CPU
+TH_FLAGS        equ 208                 ; TF_*
+TH_EXIT         equ 216                 ; what it returned
+TH_ENDED        equ 224                 ; dword: 1 once it has ended
+TH_WQ           equ 232                 ; WQ_SIZE: those waiting for it to end
+TH_HINT         equ 248                 ; -1, or the CPU to start on (tests)
+TH_LAST         equ 256                 ; the CPU it last ran on, -1 if none
+TH_TASK         equ 264                 ; the task it acts for (a reference)
+TH_SIZE         equ 320
+
+; a wait queue (kobj.asm): threads waiting for a flag
+WQ_LOCK         equ 0                   ; dword
+WQ_HEAD         equ 8                   ; waiters, each on its thread's stack
+WQ_SIZE         equ 16
+EW_THREAD       equ 0
+EW_NEXT         equ 8
+EW_SIZE         equ 16
+
+; a task (kobj.asm), an object: who acts, and the capabilities it holds
+TK_SLOTS        equ 64                  ; its handle table, HS_SIZE bytes a slot
+TK_NSLOTS       equ 72                  ; dword
+TK_USED         equ 76                  ; dword: slots not free
+TK_FREE         equ 80                  ; dword: the first free slot, 0 if none
+TK_THREADS      equ 84                  ; dword: threads acting for it
+TK_PARENT       equ 88                  ; the task that made it (a reference)
+TK_OPS          equ 96                  ; handle operations it made
+TK_DENIED       equ 104                 ; of those, refused
+TK_SIZE         equ 128
+
+; a slot of a handle table; a handle is (HS_GEN << 16) | its index, never 0
+HS_CAP          equ 0                   ; its capability, 0 if free or revoked
+HS_GEN          equ 8                   ; word: 1 to 0x7FFF, bumped when freed
+HS_STATE        equ 10                  ; word HSS_*
+HS_NEXT         equ 12                  ; dword: the next free slot
+HS_SIZE         equ 16
+HSS_FREE        equ 0
+HSS_USED        equ 1
+HSS_REVOKED     equ 2                   ; says so until closed
+
+; a capability (object.asm)
+CAP_OBJ         equ 0                   ; the object (a reference)
+CAP_RIGHTS      equ 8                   ; dword RT_*
+CAP_SLOT        equ 12                  ; dword: where in its task's table
+CAP_TASK        equ 16                  ; the task holding it
+CAP_EXPIRES     equ 24                  ; TSC, 0 = never
+CAP_PARENT      equ 32                  ; the capability it was derived from
+CAP_CHILD       equ 40                  ; the first derived from it
+CAP_SIBLING     equ 48                  ; the next derived from its parent
+CAP_OFF         equ 56                  ; memory: the window it allows
+CAP_LEN         equ 64
+CAP_SIZE        equ 80
+
+; an event (kobj.asm), an object
+EV_STATE        equ 64                  ; dword: 1 = signalled
+EV_WQ           equ 72                  ; WQ_SIZE
+EV_SIGNALS      equ 88                  ; times signalled
+EV_SIZE         equ 96
+
+; a block of memory (kobj.asm), an object
+MO_BASE         equ 64                  ; its pages, in the vm region
+MO_BYTES        equ 72
+MO_SIZE         equ 80
 
 TS_NEW          equ 0
 TS_READY        equ 1

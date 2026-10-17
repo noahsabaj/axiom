@@ -2,7 +2,7 @@
 
 An operating system written entirely in x86-64 assembly, booting straight from
 UEFI onto the hardware that is actually present. No C, no libc, no GRUB, no
-borrowed kernel: about forty-two thousand lines of NASM, top to bottom.
+borrowed kernel: about forty-six thousand lines of NASM, top to bottom.
 
 Why it exists and where it is going: [docs/VISION.md](docs/VISION.md).
 How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
@@ -41,7 +41,7 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   and PSS) and ECDSA on P-256 and P-384. The crypto is checked against the published vectors at
   every boot; `crypto` repeats the check and times each.
 - A shell over a USB keyboard, a PS/2 keyboard or the serial port. Commands:
-  `help info cpus mem threads pci acpi usb disks vol ls cd cat cp write mkdir
+  `help info cpus mem threads objects pci acpi usb disks vol ls cd cat cp write mkdir
   rm date net ip dhcp ping host arp http ask claude tcp crypto log demo bench
   uptime echo clear panic reboot poweroff`.
 - **A log on the boot stick**: everything Axiom prints, the commands typed
@@ -64,6 +64,14 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   when one frees up. The main loop is the first thread, and a key still
   answers at once with every CPU busy. `threads` shows each CPU and thread;
   `threads test` checks it all; `threads spin 16 perf` puts load on.
+- **Kernel objects and capabilities**: tasks, threads, events and blocks of
+  memory are typed objects, and a task reaches them only through handles in
+  its own table. A handle carries rights, an expiry and, for memory, a
+  window; derived ones have fewer, can be given to another task, and are
+  taken back wherever they went by revoking the one they came from. Every
+  change and every refusal goes into an audit ring. `objects` shows each
+  type and task, `objects <task>` its handles, `objects audit` the ring, and
+  `objects test` checks it all.
 - ACPI (MADT, MCFG, FADT, the DSDT's `_S5_`), SMBIOS, PCI Express enumeration,
   x2APIC (falling back to xAPIC), I/O APIC, TSC-deadline timer, and a panic
   screen that stops every other CPU.
@@ -264,7 +272,8 @@ tools/test/             host-side tests for self-contained modules (tls: the
                         (claude: ask, against claudemock.py; memory: the
                         page tables, W^X, guard pages, the vm region and
                         the heap, and each kind of fault; threads: the
-                        scheduler on 8 CPUs, on one, and under TCG)
+                        scheduler on 8 CPUs, on one, and under TCG;
+                        objects: handles and capabilities, likewise)
 tools/mkfont.py         rasterize the console font into src/kernel/gen/
 docs/                   vision and architecture
 ```

@@ -95,6 +95,7 @@ kernel_main:
     call ioapic_init
     lea rbx, [percpu]
     call cpu_identify_local
+    call obj_boot                       ; the task 'kernel'
     call sched_init                     ; from here on, this is the thread 'main'
     call smp_start
     call sched_topology

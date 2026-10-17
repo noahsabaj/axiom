@@ -212,8 +212,6 @@ sched_adopt:
     mov [r12 + TH_RUN_TSC], rax
     mov [rbx + PC_LAST_TSC], rax
     mov [rbx + PC_CURRENT], r12
-    mov rdi, r12
-    call thread_link
     mov rax, r12
     pop r13
     pop r12
@@ -345,6 +343,8 @@ sched_pretend:
 ;    thread_spawn(RDI = entry, RSI = argument, RDX = name, RCX = class) ->
 ;      RAX = a started thread's handle, or 0
 ;    thread_join(RDI) -> RAX = what it returned; gives the handle back
+;    thread_put(RDI) = obj_put: a thread is an object (OT_THREAD), acting
+;      for a task (TH_TASK), its creator's unless thread_set_task says
 ;    thread_detach(RDI): gives the handle back; it is freed when it ends
 ;    thread_exit(RDI = result): never returns
 ;    thread_yield: let the next thread run
@@ -371,40 +371,31 @@ thread_alloc:
 .out:
     ret
 
-; thread_init(RDI = zeroed memory for a thread, RSI = name or 0) -> RAX = it,
-; with an id, a SIMD area and one reference. Linked nowhere yet.
+; thread_init(RDI = zeroed memory for a thread, RSI = name or 0) -> RAX = it:
+; an object with one reference and a SIMD area, acting for the current
+; thread's task, not yet started
 thread_init:
     push rbx
-    push r12
-    mov rbx, rdi
-    mov r12, rsi
+    mov rdx, rsi
+    mov esi, OT_THREAD
+    call obj_init
+    mov rbx, rax
     lea rax, [rbx + TH_SIZE + 63]
     and rax, -64
     mov [rbx + TH_XSAVE], rax
     mov word [rax], 0x037F              ; x87 control word, for FXRSTOR
     mov dword [rax + 24], 0x1F80        ; MXCSR: every exception masked
-    mov eax, 1
-    lock xadd [thread_next_id], rax
-    mov [rbx + TH_ID], rax
-    mov dword [rbx + TH_REFS], 1
     mov qword [rbx + TH_PIN], -1
     mov qword [rbx + TH_HINT], -1
     mov qword [rbx + TH_LAST], -1
-    test r12, r12
-    jz .named
-    lea rdi, [rbx + TH_NAME]
-    mov rsi, r12
-    mov ecx, TH_NAME_LEN - 1
-.copy:
-    lodsb
-    test al, al
-    jz .named
-    stosb
-    dec ecx
-    jnz .copy
-.named:
+    call cur_task
+    test rax, rax
+    jz .alone
+    mov rdi, rax
+    call task_hold
+    mov [rbx + TH_TASK], rax
+.alone:
     mov rax, rbx
-    pop r12
     pop rbx
     ret
 
@@ -441,8 +432,6 @@ thread_new:
     mov [rdx + 56], rax
     mov [rdx + 64], rax
     mov dword [rbx + TH_REFS], 2        ; its own, and the caller's handle
-    mov rdi, rbx
-    call thread_link
     mov rax, rbx
 .out:
     pop r14
@@ -514,16 +503,33 @@ sched_now_if_due:
     ret
 
 thread_detach:
-thread_put:                             ; drop a reference; the last frees it
-    lock dec dword [rdi + TH_REFS]
-    jnz .out
-    cmp qword [rdi + TH_STACK], 0
-    je kfree                            ; code that kept its stack: from the heap
+thread_put:                             ; drop a reference
+    jmp obj_put
+
+; thread_destroy(RDI): its last reference went (the destroy of OT_THREAD)
+thread_destroy:
     push rdi
-    mov rdi, [rdi + TH_STACK]
+    mov rax, rdi
+    xor edi, edi
+    xchg rdi, [rax + TH_TASK]
+    test rdi, rdi
+    jz .no_task
+    call task_release
+.no_task:
+    mov rdi, [rsp]
+    cmp dword [rdi + TH_STATE], TS_NEW
+    jne .unlinked                       ; one that ran is off the list once reaped
+    call obj_unlink
+.unlinked:
+    mov rax, [rdi + TH_STACK]
+    test rax, rax
+    jnz .mapped
+    pop rdi
+    jmp kfree                           ; code that kept its stack: from the heap
+.mapped:
+    mov rdi, rax
     call thread_unmap
     pop rdi
-.out:
     ret
 
 ; thread_mapping -> RAX = a thread's mapping: its stack, then sched_tsize
@@ -599,19 +605,13 @@ thread_unmap:
 thread_join:
     push rbx
     mov rbx, rdi
-    mov rax, [gs:PC_CURRENT]
-    mov [rbx + TH_JOINER], rax
-    mfence                              ; against thread_exit's DEAD, then joiner
-.wait:
-    cmp dword [rbx + TH_STATE], TS_DEAD
-    je .dead
-    call thread_park
-    jmp .wait
-.dead:
-    push qword [rbx + TH_EXIT]
+    lea rdi, [rbx + TH_WQ]
+    lea rsi, [rbx + TH_ENDED]
+    xor edx, edx
+    call wq_wait
+    mov rax, [rbx + TH_EXIT]
     mov rdi, rbx
     call thread_put
-    pop rax
     pop rbx
     ret
 
@@ -620,12 +620,9 @@ thread_exit:
     mov rbx, [gs:PC_CURRENT]
     mov [rbx + TH_EXIT], rdi
     mov dword [rbx + TH_STATE], TS_DEAD
-    mfence
-    mov rdi, [rbx + TH_JOINER]
-    test rdi, rdi
-    jz .alone
-    call thread_unpark
-.alone:
+    mov dword [rbx + TH_ENDED], 1
+    lea rdi, [rbx + TH_WQ]              ; whoever waits for it
+    call wq_wake
     lea rdi, [zombie_lock]
     call spin_lock
     mov rax, [zombies]
@@ -837,64 +834,6 @@ thread_sleep_until:
     pop rbx
     ret
 
-; thread_link(RDI) / thread_unlink(RDI): the list of every thread
-thread_link:
-    push rax
-    pushfq
-    cli
-    push rdi
-    lea rdi, [threads_lock]
-    call spin_lock
-    pop rdi
-    mov rax, [thread_list]
-    mov [rdi + TH_ALL_NEXT], rax
-    mov qword [rdi + TH_ALL_PREV], 0
-    test rax, rax
-    jz .first
-    mov [rax + TH_ALL_PREV], rdi
-.first:
-    mov [thread_list], rdi
-    inc qword [thread_count]
-    push rdi
-    lea rdi, [threads_lock]
-    call spin_unlock
-    pop rdi
-    popfq
-    pop rax
-    ret
-
-thread_unlink:
-    push rax
-    push rcx
-    pushfq
-    cli
-    push rdi
-    lea rdi, [threads_lock]
-    call spin_lock
-    pop rdi
-    mov rax, [rdi + TH_ALL_NEXT]
-    mov rcx, [rdi + TH_ALL_PREV]
-    test rax, rax
-    jz .no_next
-    mov [rax + TH_ALL_PREV], rcx
-.no_next:
-    test rcx, rcx
-    jz .head
-    mov [rcx + TH_ALL_NEXT], rax
-    jmp .linked
-.head:
-    mov [thread_list], rax
-.linked:
-    dec qword [thread_count]
-    push rdi
-    lea rdi, [threads_lock]
-    call spin_unlock
-    pop rdi
-    popfq
-    pop rcx
-    pop rax
-    ret
-
 ; sched_reap: free what dead threads left, once no CPU is on their stacks.
 ; Not from interrupt handlers, nor with a spinlock held.
 sched_reap:
@@ -925,8 +864,14 @@ sched_reap:
     test rbx, rbx
     jz .out                             ; only ones still being left
     mov rdi, rbx
-    call thread_unlink
+    call obj_unlink
     inc qword [threads_ended]
+    xor edi, edi                        ; it acts for its task no more
+    xchg rdi, [rbx + TH_TASK]
+    test rdi, rdi
+    jz .no_task
+    call task_release
+.no_task:
     mov rdi, rbx
     call thread_put
     jmp .next
@@ -2011,7 +1956,6 @@ str_sched_oom:  db 'Out of memory for the scheduler', 0
 
 section .data
 align 8
-thread_next_id: dq 1
 sched_ready:    db 0
 sched_xsave:    db 0                    ; XSAVE, else FXSAVE
 sched_tsc_deadline: db 0
@@ -2019,8 +1963,6 @@ sched_tsc_deadline: db 0
 section .bss
 alignb 8
 main_thread:    resq 1
-thread_list:    resq 1
-thread_count:   resq 1
 threads_ended:  resq 1
 zombies:        resq 1
 sched_slice:    resq 1                  ; TSC ticks
@@ -2035,6 +1977,5 @@ sched_np:       resq 1                  ; online CPUs the scheduler takes for P-
 sched_ne:       resq 1                  ; and for E-cores
 lapic_per_ms:   resq 1
 sched_area:     resd 1                  ; bytes of SIMD state
-threads_lock:   resd 1
 stack_lock:     resd 1
 zombie_lock:    resd 1

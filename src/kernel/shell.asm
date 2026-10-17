@@ -530,6 +530,7 @@ commands:
     COMMAND 'cpus',     cmd_cpus,     'each logical CPU: kind, clock, heat, work'
     COMMAND 'mem',      cmd_mem,      'mem [test | <hex address>]: memory by type and use, a self-test, or what is at an address'
     COMMAND 'threads',  cmd_threads,  'threads [test | spin <n> [perf|eff|any] [s]]: each CPU and thread, a self-test of the scheduler, or load to watch'
+    COMMAND 'objects',  cmd_objects,  'objects [test | audit | <task id>]: objects and tasks, the handles a task holds, the audit ring, or a self-test of capabilities'
     COMMAND 'pci',      cmd_pci,      'PCI Express functions'
     COMMAND 'acpi',     cmd_acpi,     'firmware ACPI tables'
     COMMAND 'usb',      usb_list,     'USB devices, hubs and what drives them'

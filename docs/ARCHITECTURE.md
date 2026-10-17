@@ -64,7 +64,7 @@ loader reads: magic `AXIOMKRN`, entry point, file size, memory size.
 | 7 | `acpi.asm`, `smbios.asm` | MADT (CPUs, I/O APICs, overrides), MCFG, FADT, `_S5_`; board, BIOS and memory strings |
 | 8 | `pmm.asm` | Reclaim boot-services memory |
 | 9 | `apic.asm` | x2APIC through MSRs, else xAPIC MMIO; 8259s masked; I/O APIC entries masked |
-| 10 | `sched.asm` | The scheduler: the code running from here on is the thread `main`; the timer is the scheduler's |
+| 10 | `object.asm`, `sched.asm` | The task `kernel`, which everything at boot acts for; the scheduler: the code running from here on is the thread `main`; the timer is the scheduler's |
 | 11 | `smp.asm` | Start every other thread (below), then `sched_topology`: each CPU's kind and SMT sibling |
 | 12 | `pci.asm` | Enumerate through ECAM, else ports CF8/CFC |
 | 13 | `kbd.asm`, `usb.asm` | PS/2 keyboard on IRQ 1; xHCI controllers and whatever is plugged in at boot (later devices arrive through hot-plug in the main loop) |
@@ -151,14 +151,18 @@ or idles.
   starting a thread touches no page tables and ending one sends no
   shootdown. `thread_new(entry, arg, name)` and `thread_start`, or
   `thread_spawn` with a class; `thread_join`, `thread_detach`,
-  `thread_exit`, `thread_yield`, `thread_sleep_us`. A thread holds two
-  references, its own and its creator's handle; an ended one waits on a list
-  until no CPU is on its stack, and the idle loops and `thread_new` free it.
+  `thread_exit`, `thread_yield`, `thread_sleep_us`. A thread is an object
+  (`OT_THREAD`, below) acting for a task (`TH_TASK`), its creator's unless
+  `thread_set_task` says otherwise. It holds two references, its own and its
+  creator's handle; an ended one waits on a list until no CPU is on its
+  stack, and the idle loops and `thread_new` free it.
 - **Park and unpark** are the one way to wait: `thread_park` and
   `thread_park_until(deadline)` sleep until a `thread_unpark` or the
   deadline, and an unpark that comes first is kept, so the next park returns
-  at once. Sleeping, joining, the job workers and the main loop are built on
-  them. `thread_unpark` works from interrupt handlers.
+  at once. Sleeping, the job workers, the main loop and wait queues
+  (`wq_wait(queue, flag, deadline)`, `wq_wake`, which joining and events
+  use) are built on them. `thread_unpark` and `wq_wake` work from interrupt
+  handlers.
 - **A switch** (`sched_switch`) pushes the callee-saved registers, saves the
   SIMD state with XSAVE (of everything XCR0 enables; the area is sized from
   each component, since some hypervisors understate the total) or FXSAVE,
@@ -204,6 +208,62 @@ or idles.
   out, P/E placement (pretending where there is one kind of core) and that
   nothing is left over. `threads spin <n> [perf|eff|any] [s]` puts load on
   to watch; `panic thread` overflows a thread's stack.
+
+## Objects and capabilities: `object.asm`, `kobj.asm`, `objtest.asm`
+
+- **Everything the kernel hands out is an object**: a task, a thread, an
+  event, a block of memory. Each begins with the same header (`OB_*`): its
+  type, a reference count, an id never reused, a name, the task that made
+  it, and how many capabilities point at it. `obj_types` describes each
+  type (its destroy function, the names of its rights) and keeps its live
+  objects on a list, counted, with how many were ever made. `obj_get` and
+  `obj_put`; the last `obj_put` calls the type's destroy.
+- **A task** (`TK_*`) is what acts: a handle table, the task that made it,
+  how many threads act for it, and how many handle operations it made and
+  how many were refused. Each thread holds its task, and lets go when it is
+  reaped, so a task lives while it has threads or someone holds it; when it
+  ends, every handle it still holds is closed.
+- **A task acts only through capabilities**, held in its handle table. A
+  handle is a slot's index and that slot's generation (`HS_*`): it means
+  nothing in another task's table, and once closed it means nothing in its
+  own, even when the slot is used again. A capability (`CAP_*`) says what
+  may be done (`RT_*`: dup, give and info for every type, and each type's
+  own, such as an event's signal and wait or memory's read and write), until
+  when (a TSC deadline), and for memory, which bytes (a window).
+- **Deriving**: `handle_dup(h, rights, expiry)` makes a capability with the
+  same rights or fewer and an expiry no later; `handle_window(h, offset,
+  length, rights)` one to part of a memory object's window, never wider.
+  Both need `RT_DUP`. `handle_give(h, task)` moves a capability into another
+  task's table (it needs `RT_GIVE`, and `RT_TASK_HANDLES` on the task).
+- **Revoking**: each capability is in the tree of the one it came from, in
+  whatever task it went to. `handle_revoke(h)` takes back every capability
+  derived from `h`; each revoked handle answers `E_REVOKED` until its holder
+  closes it. Closing a capability moves those derived from it up to its
+  parent, so a revoke from higher up still reaches them.
+- **Using**: `handle_get(h, type, rights)` finds, checks (type, rights,
+  expiry) and holds the object; the operations are built on it:
+  `h_task_new`, `h_task_spawn` (a thread acting for a task), `h_thread_wait`,
+  `h_event_new`, `h_event_signal`, `h_event_reset`, `h_event_wait`,
+  `h_mem_new`, `h_mem_read`, `h_mem_write`. They are what system calls will
+  be. Every refusal is an `E_*` (negative), and `err_text` says it in words.
+- **The audit ring**: whatever changes the capabilities (made, derived,
+  given, closed, revoked, a task's last ones closed as it ends) and every
+  refusal goes into a ring of the last 256, with the task, the handle, the
+  object, the rights and the result.
+- **Locks**: one lock, `cap_lock`, taken with interrupts off, covers every
+  handle table and capability tree; each type's list has its own. Nothing is
+  freed with either held: an operation takes out what it removes, and drops
+  the references after.
+- `objects` lists each type (live, made) and each task (who made it, its
+  threads, handles, operations and refusals); `objects <task id>` the
+  handles a task holds (type, object, rights, expiry, what each was derived
+  from, revoked ones); `objects audit` the last 32 records. `objects test`
+  checks an event's handles (fewer rights; closed, reused, forged and
+  mistyped handles), a task of its own given narrowed handles and then
+  revoked, its refusals counted and audited, a handle that expires, windows
+  on memory, threads on every CPU deriving and closing handles while what
+  they derive from is revoked, the cost of a signal by handle and of a dup
+  and close, and that nothing is left over.
 
 ## Processors: `smp.asm`
 
@@ -597,7 +657,11 @@ from `_S5_`) for power-off, then QEMU's port 0x604.
 - `KLOG "fmt", args...` logs to serial and, once the console exists, to the
   screen; `SPRINTF buf, "fmt", args...` formats into memory. Arguments are
   64-bit registers, immediates or `qword [mem]`.
-- Structures are `equ` offsets (`PC_*`, `TH_*`, `PE_*`, `XC_*`, `DV_*`,
-  `NV_*`, `DK_*`, `VO_*`, `VF_*`).
+- Structures are `equ` offsets (`PC_*`, `TH_*`, `OB_*`, `TK_*`, `CAP_*`,
+  `HS_*`, `EV_*`, `MO_*`, `PE_*`, `XC_*`, `DV_*`, `NV_*`, `DK_*`, `VO_*`,
+  `VF_*`).
+- Errors are `E_*`, small negative numbers. The kernel's pointers are
+  negative too (the upper half), so a function that returns a pointer or an
+  error is checked with `cmp rax, E_ANY` and `jae`, not the sign.
 - Self-contained modules are also tested on the host: `tools/test/<module>/`
   assembles the module with a small shim and drives it from C or Python.
