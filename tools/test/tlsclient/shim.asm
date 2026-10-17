@@ -8,7 +8,8 @@
 ;            the carry flag, preserving what the Windows x64 ABI requires;
 ;    host_send, host_ops: the client's send function and handlers, which
 ;            pass each event on to host.c (c_send, c_ready, c_data,
-;            c_closed, c_fail) with the Windows ABI.
+;            c_closed, c_fail) with the Windows ABI, the session first;
+;    tls_layout: TLS_SESSION and the offsets of the fields host.c reads.
 ; =============================================================================
 
 bits 64
@@ -20,8 +21,7 @@ section .data data align=64
 section .bss bss align=64
 
 global tls_start, tls_input, tls_write, tls_close, tls_abort, tls_error_text
-global tls_state, tls_error, tls_alert, tls_certs, tls_cert_bytes, tls_sigalg
-global tls_cert_err, tls_verified, x509_extra, x509_anchor, x509_depth, tl_have_key
+global x509_extra, tls_layout
 global kc, host_send, host_ops, tl_text
 extern c_send, c_ready, c_data, c_closed, c_fail
 
@@ -81,10 +81,14 @@ kc:
     pop rbx
     ret
 
-; const char *tl_text(int error), Windows ABI
+; const char *tl_text(int error, const void *session), Windows ABI
 tl_text:
+    push rdi
     mov eax, ecx
-    jmp tls_error_text
+    mov rdi, rdx
+    call tls_error_text
+    pop rdi
+    ret
 
 ; Into C: RSP aligned, shadow space; RSI, RDI and the callee-saved
 ; registers survive the Windows ABI, XMM6-15 too.
@@ -98,9 +102,11 @@ tl_text:
     pop rbp
 %endmacro
 
-; send(RSI = bytes, EDX = how many) -> CF
+; send(RDI = the session, RSI = bytes, EDX = how many) -> CF
 host_send:
-    mov rcx, rsi
+    mov r8d, edx
+    mov rdx, rsi
+    mov rcx, rdi
     TO_C c_send
     test eax, eax
     jz .ok
@@ -111,23 +117,30 @@ host_send:
     ret
 
 host_ready:
+    mov rcx, rdi
     TO_C c_ready
     ret
 
 host_data:
-    mov rcx, rsi
+    mov r8d, edx
+    mov rdx, rsi
+    mov rcx, rdi
     TO_C c_data
     ret
 
 host_closed:
+    mov rcx, rdi
     TO_C c_closed
     ret
 
 host_fail:
-    mov ecx, eax
+    mov edx, eax
+    mov rcx, rdi
     TO_C c_fail
     ret
 
 section .rodata
 align 8
 host_ops:       dq host_ready, host_data, host_closed, host_fail
+tls_layout:     dq TLS_SESSION, TLS_STATE, TLS_ERROR, TLS_ALERT, TLS_CERTS, TLS_CERT_BYTES
+                dq TLS_SIGALG, TLS_CERT_ERR, TLS_VERIFIED, TLS_HAVE_KEY, TLS_ANCHOR, TLS_DEPTH

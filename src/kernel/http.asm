@@ -347,7 +347,10 @@ http_hangup:
     jz .out
     cmp byte [http_tls], 0
     je .tcp
+    push rdi
+    lea rdi, [http_ts]
     call tls_close                      ; (sent through http_conn)
+    pop rdi
 .tcp:
     mov qword [http_conn], 0
     mov qword [http_app], 0
@@ -372,6 +375,7 @@ http_cancel:
     push r11
     mov rdi, [http_conn]
     call tcp_abort
+    lea rdi, [http_ts]
     call tls_abort
     cmp byte [http_quiet], 0
     jne .client_first
@@ -413,6 +417,7 @@ http_open:
     KLOG "http: the request is too big to send"
     jmp http_drop
 .tls:
+    lea rdi, [http_ts]
     call tls_write
     jnc .out
     KLOG "https: the request would not go out"
@@ -444,6 +449,7 @@ http_drop:
     jz .out
     mov qword [http_conn], 0
     call tcp_abort
+    lea rdi, [http_ts]
     call tls_abort
     jmp http_lost
 .out:
@@ -467,14 +473,15 @@ http_t_open:
     mov r9d, [rtc_sec]
     call x509_unix
     pop rdi
-    mov r8, rax
-    movzx ecx, byte [http_insecure]
-    lea rdi, [http_host]
-    lea rsi, [http_tls_send]
-    lea rdx, [http_tls_ops]
+    mov r9, rax
+    movzx r8d, byte [http_insecure]
+    lea rdi, [http_ts]
+    lea rsi, [http_host]
+    lea rdx, [http_tls_send]
+    lea rcx, [http_tls_ops]
     call tls_start
     jnc .out
-    mov eax, [tls_error]
+    mov eax, [rdi + TLS_ERROR]
     call tls_error_text
     KLOG "https: %s", rax
     jmp http_drop
@@ -487,6 +494,7 @@ http_t_data:
     cmp byte [http_tls], 0
     je http_app_data
     mov edx, edx
+    lea rdi, [http_ts]
     jmp tls_input
 .out:
     ret
@@ -504,21 +512,29 @@ http_t_fin:
     je http_fin
     cmp rdi, [http_conn]
     jne .out
-    cmp dword [tls_state], TL_OPEN
+    cmp dword [http_ts + TLS_STATE], TL_OPEN
     jne .early
     cmp byte [http_quiet], 0            ; (a quiet client knows if it is whole)
     jne .quiet
     KLOG "https: the server closed without close_notify (the answer may be cut short)"
 .quiet:
-    call tls_abort
+    call http_tls_abort
     call tcp_close
     jmp http_end
 .early:
     KLOG "https: the server closed the connection during the TLS handshake"
-    call tls_abort
+    call http_tls_abort
     call tcp_close
     jmp http_lost
 .out:
+    ret
+
+; http_tls_abort: the session forgotten. Preserves all but RAX.
+http_tls_abort:
+    push rdi
+    lea rdi, [http_ts]
+    call tls_abort
+    pop rdi
     ret
 
 ; send(RSI, EDX) -> CF if TCP's buffer could not take it all
@@ -531,21 +547,22 @@ http_tls_send:
     ret
 
 http_tls_ready:
-    mov eax, [tls_certs]
-    mov ecx, [tls_cert_bytes]
-    cmp dword [tls_verified], 0
+    mov eax, [http_ts + TLS_CERTS]
+    mov ecx, [http_ts + TLS_CERT_BYTES]
+    cmp dword [http_ts + TLS_VERIFIED], 0
     je .unchecked
     cmp byte [http_quiet], 0
     jne http_open
-    mov edx, [x509_depth]
+    mov edx, [http_ts + TLS_DEPTH]
     lea rsi, [http_host]
-    KLOG "https: TLS 1.3, AES-128-GCM, X25519; certificate for %s checked: %u intermediate(s), trusted root %s", rsi, rdx, qword [x509_anchor]
+    KLOG "https: TLS 1.3, AES-128-GCM, X25519; certificate for %s checked: %u intermediate(s), trusted root %s", rsi, rdx, qword [http_ts + TLS_ANCHOR]
     jmp http_open
 .unchecked:
     KLOG "https: TLS 1.3, AES-128-GCM, X25519; %u certificate(s), %b, NOT checked (-k): this may not be the real server", rax, rcx
     jmp http_open
 
 http_tls_closed:                        ; the server's close_notify: the end
+    lea rdi, [http_ts]
     call tls_close
     mov rdi, [http_conn]
     call tcp_close
@@ -554,10 +571,11 @@ http_tls_closed:                        ; the server's close_notify: the end
 ; EAX = what went wrong
 http_tls_fail:
     mov ecx, eax
+    lea rdi, [http_ts]
     call tls_error_text
     cmp ecx, TLE_ALERT
     jne .say
-    mov ecx, [tls_alert]
+    mov ecx, [http_ts + TLS_ALERT]
     KLOG "https: the server sent alert %u and gave up", rcx
     jmp .drop
 .say:
@@ -611,7 +629,7 @@ http_gone:
     cmp rdi, [http_conn]
     jne .out
     mov qword [http_conn], 0
-    call tls_abort
+    call http_tls_abort
     mov eax, [http_port]
     cmp esi, TCP_REFUSED
     je .refused
@@ -807,3 +825,5 @@ http_file:      resb 256
 http_req:       resb 1024
 http_text:      resb HTTP_LINE + 8
 http_buf:       resb HTTP_MAX
+alignb 16
+http_ts:        resb TLS_SESSION            ; its TLS session, for https

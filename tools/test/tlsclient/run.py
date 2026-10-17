@@ -114,9 +114,25 @@ def make_certs(d):
 # ---- the client, through the DLL ---------------------------------------------
 
 
+class Session:
+    """The DLL, with the session h_select picks chosen before every call."""
+
+    def __init__(self, dll, i):
+        self._dll, self._i = dll, i
+
+    def __getattr__(self, name):
+        f = getattr(self._dll, name)
+
+        def call(*a):
+            self._dll.h_select(self._i)
+            return f(*a)
+        return call
+
+
 class Client:
-    def __init__(self, dll):
-        self.d = dll
+    def __init__(self, dll, i=0):
+        self.d = Session(dll, i)
+        dll.h_session_size.restype = ctypes.c_uint64
         dll.h_start.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_uint64]
         dll.h_set_extra.argtypes = [ctypes.c_void_p]
         dll.h_anchor.restype = ctypes.c_char_p
@@ -303,6 +319,105 @@ def full_session(cl, rng, certs, chain, key, host, chunks, label, sigalg=None, n
     result(not problems, f"{label}: {certs_n} certificate(s), {cert_bytes} bytes, checked, signed "
            f"with {alg:#06x}, {len(body)} bytes in, pieces '{chunks}'" +
            ("" if not problems else ": " + "; ".join(problems)))
+
+
+def interleaved(dll, rng, certs):
+    """Four sessions at once, a few bytes of one then of another, so that one's
+    Certificate lands between another's Certificate and CertificateVerify, and
+    their records cross; then data each way on all four, and every close."""
+    kinds = [("rsa-chain.pem", "rsa.key", 0x0804), ("ec-chain.pem", "ec.key", 0x0403),
+             ("big-chain.pem", "rsa.key", 0x0804), ("ec-chain.pem", "ec.key", 0x0403)]
+    n = min(len(kinds), dll.h_sessions())
+    cls = [Client(dll, i) for i in range(n)]
+    svs = [Server(server_ctx(certs / c, certs / k)) for c, k, _ in kinds[:n]]
+    pend = [b""] * n
+
+    def turns(limit, done):
+        for _ in range(limit):
+            for i in rng.sample(range(n), n):
+                cl, sv = cls[i], svs[i]
+                b = cl.out()
+                if b:
+                    sv.inc.write(b)
+                sv.step()
+                pend[i] += sv.outg.read()
+                if pend[i]:
+                    k = rng.choice([1, 3, 17, 100, 700, 3000])
+                    cl.d.h_input(pend[i][:k], len(pend[i][:k]))
+                    pend[i] = pend[i][k:]
+            if done():
+                return True
+        return False
+
+    problems = []
+    # first, exactly that: A's Certificate in, then all of B's handshake,
+    # then A's CertificateVerify (signed by A's RSA key, B's being ECDSA)
+    a, b, sa, sb = cls[0], cls[1], svs[0], svs[1]
+    a.start("axiom.test")
+    b.start("axiom.test")
+    sa.inc.write(a.out())
+    sa.step()
+    fa = sa.outg.read()
+    k = 0
+    while k < len(fa) and a.d.h_state() != 4:  # TL_WAIT_CV
+        a.d.h_input(fa[k:k + 1], 1)
+        k += 1
+    held = a.d.h_state() == 4
+    pump(b, sb, rng, "whole")
+    a.d.h_input(fa[k:], len(fa) - k)
+    pump(a, sa, rng, "whole")
+    if not held:
+        problems.append("A never waited for CertificateVerify")
+    for i, cl in ((0, a), (1, b)):
+        if not cl.d.h_events() & EV_READY:
+            problems.append(f"crossed handshakes, session {i}: {cl.fail_text()}")
+        cl.d.h_abort()
+    svs[0] = Server(server_ctx(certs / kinds[0][0], certs / kinds[0][1]))
+    svs[1] = Server(server_ctx(certs / kinds[1][0], certs / kinds[1][1]))
+    for cl in cls:
+        if cl.start("axiom.test"):
+            problems.append("tls_start failed")
+    ready = turns(20000, lambda: all(cl.d.h_events() & EV_READY for cl in cls)
+                  and all(sv.done for sv in svs) and not any(pend))
+    for i, cl in enumerate(cls):
+        ev = cl.d.h_events()
+        if ev & EV_FAIL or not ev & EV_READY:
+            problems.append(f"session {i}: events {ev}" + (f", {cl.fail_text()}" if ev & EV_FAIL else ""))
+            continue
+        if cl.info()[2] != kinds[i][2]:
+            problems.append(f"session {i}: signed with {cl.info()[2]:#06x}, want {kinds[i][2]:#06x}")
+        if cl.checked()[:2] != (1, "Axiom Test CA"):
+            problems.append(f"session {i}: certificate {cl.checked()}")
+    if ready and not problems:
+        reqs = [rng.randbytes(rng.randrange(100, 30000)) for _ in range(n)]
+        bodies = [rng.randbytes(rng.randrange(20000, 120000)) for _ in range(n)]
+        for i in range(n):
+            if cls[i].d.h_write(reqs[i], len(reqs[i])):
+                problems.append(f"session {i}: tls_write refused")
+            for j in range(0, len(bodies[i]), 16000):
+                svs[i].obj.write(bodies[i][j:j + 16000])
+        turns(20000, lambda: not any(pend) and not any(cl.d.h_out_len() for cl in cls)
+              and not any(sv.outg.pending for sv in svs))
+        for i in range(n):
+            got, app = svs[i].read_all(), cls[i].app()
+            if got != reqs[i]:
+                problems.append(f"session {i}: the server read {len(got)} of {len(reqs[i])} bytes")
+            if app != bodies[i]:
+                problems.append(f"session {i}: the client read {len(app)} of {len(bodies[i])} bytes")
+        for i in range(n):
+            cls[i].d.h_close()
+            svs[i].inc.write(cls[i].out())
+            try:
+                svs[i].obj.unwrap()
+            except ssl.SSLError as e:
+                problems.append(f"session {i}: the server did not take our close_notify ({e})")
+            if cls[i].d.h_state() != 0:
+                problems.append(f"session {i}: state {cls[i].d.h_state()} after tls_close")
+    for cl in cls:
+        cl.d.h_abort()
+    result(ready and not problems, f"{n} sessions at once, a few bytes at a time each: handshakes "
+           f"(RSA, ECDSA, a 21-certificate chain), data both ways, closes"
+           + ("" if not problems else ": " + "; ".join(problems[:6])))
 
 
 def expect_failure(cl, rng, ctx, label, want, c2s=None, s2c=None, check_server=None):
@@ -616,6 +731,7 @@ def main():
         cl.d.h_abort()
     cl.d.h_reply_on_ready(None, 0)
     result(bad == 0, f"40 more handshakes, each writing up to 40 KB from READY: {bad} failed")
+    interleaved(cl.d._dll, rng, certs)
 
     print("-- failures")
 

@@ -753,9 +753,15 @@ off. `log` shows the state; `log save`, `log on`, `log off`.
 
 A TLS 1.3 client (RFC 8446) and the crypto under it.
 
-- **The client** (`tls.asm`): one connection at a time, independent of what
-  carries its bytes (a send function in, `tls_input` for what arrives, and
-  four handlers out: READY, DATA, CLOSED, FAIL). It offers only
+- **The client** (`tls.asm`): any number of connections, each a session
+  (`TLS_SESSION`, about 100 KiB: keys, transcript, record and handshake
+  buffers, the server's key and what its chain proved) that the caller owns
+  and names in every call, independent of what carries its bytes (a send
+  function in, `tls_input` for what arrives, and four handlers out: READY,
+  DATA, CLOSED, FAIL, each told which session). Inside, RBP holds the
+  session. The server's key is copied out of `x509.asm` as soon as its
+  chain is checked, so another session's certificate cannot replace it
+  before this one's CertificateVerify. It offers only
   TLS_AES_128_GCM_SHA256 and an X25519 key share, with server name
   indication, a random session id and the change_cipher_spec of RFC 8446
   D.4 for middleboxes. It reassembles records across TCP segments and
@@ -809,7 +815,9 @@ A TLS 1.3 client (RFC 8446) and the crypto under it.
   buffers that deliver bytes in pieces down to one at a time: RSA and ECDSA
   certificates, a 21-certificate chain of 16 KB, no SNI for an address,
   200 KB down, 40 handshakes writing from inside READY, close_notify both
-  ways; a flipped bit, TLS 1.2-only, client-certificate and P-256-only
+  ways; four sessions at once, fed a few bytes of each in turn, one's
+  Certificate made to land between another's Certificate and
+  CertificateVerify, then data both ways on all four; a flipped bit, TLS 1.2-only, client-certificate and P-256-only
   servers, a full connection, a cut-off handshake. A hand-made server
   (`minisrv.py`, on the pure-Python references) covers what OpenSSL will not
   do on request: a wrong Finished, KeyUpdate with and without a request,
