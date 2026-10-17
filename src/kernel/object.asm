@@ -1405,12 +1405,14 @@ str_e_full:     db 'the handle table is full', 0
 str_e_timeout:  db 'timed out', 0
 str_e_arg:      db 'a bad argument', 0
 str_e_canceled: db 'canceled', 0
+str_e_killed:   db 'killed', 0
+str_e_fault:    db 'a fault in ring 3', 0
 str_e_unknown:  db 'an unknown error', 0
 
 align 8
 err_names:      dq str_e_ok, str_e_badh, str_e_type, str_e_rights, str_e_expired
                 dq str_e_revoked, str_e_range, str_e_nomem, str_e_full, str_e_timeout, str_e_arg
-                dq str_e_canceled
+                dq str_e_canceled, str_e_killed, str_e_fault
 rt_names_none:  dq str_rt_dup, str_rt_give, str_rt_info, 0, 0, 0, 0, 0
                 dq 0, 0, 0, 0, 0, 0, 0, 0
 rt_names_task:  dq str_rt_dup, str_rt_give, str_rt_info, 0, 0, 0, 0, 0
@@ -1423,6 +1425,8 @@ rt_names_memory: dq str_rt_dup, str_rt_give, str_rt_info, 0, 0, 0, 0, 0
                 dq str_rt_read, str_rt_write, 0, 0, 0, 0, 0, 0
 rt_names_ring:  dq str_rt_dup, str_rt_give, str_rt_info, 0, 0, 0, 0, 0
                 dq str_rt_enter, 0, 0, 0, 0, 0, 0, 0
+rt_names_console: dq str_rt_dup, str_rt_give, str_rt_info, 0, 0, 0, 0, 0
+                dq str_rt_write, 0, 0, 0, 0, 0, 0, 0
 
 section .data
 align 8
@@ -1434,6 +1438,7 @@ ty_thread:      dq str_ot_thread, thread_destroy, 0, 0, 0, 0, rt_names_thread, 0
 ty_event:       dq str_ot_event, obj_free, 0, 0, 0, 0, rt_names_event, 0
 ty_memory:      dq str_ot_memory, mem_destroy, 0, 0, 0, 0, rt_names_memory, 0
 ty_ring:        dq str_ot_ring, ring_destroy, 0, 0, 0, 0, rt_names_ring, ring_orphan
+ty_console:     dq str_ot_console, obj_free, 0, 0, 0, 0, rt_names_console, 0
 
 thread_list     equ ty_thread + TY_LIST
 thread_count    equ ty_thread + TY_LIVE

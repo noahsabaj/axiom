@@ -319,6 +319,62 @@ or idles.
   requests waiting, a ring per CPU under load, the cost of an entry, and
   that nothing is left over.
 
+## Ring 3: `user.asm`, `src/user/`
+
+- **A program is a task with page tables of its own.** `run` reads
+  `/EFI/AXIOM/<NAME>.AXE` from the boot stick (or the volume chosen): a flat
+  file assembled at `USER_IMAGE` (0x400000), its header first (`AXE_*`:
+  'AXIOMEX1', the entry, and where code, constants, data and zeroes end,
+  each section on pages of its own). The loader checks the header, makes a
+  task and an address space, and maps the code read-only and executable,
+  the constants read-only, the data and zeroes writable and not executable,
+  a 64 KiB stack under `USER_STACK_TOP` with nothing below it, and a
+  read-only start block at `USER_START` (`SB_*`: handles to the task's ring,
+  its memory and the console, where the ring is, the TSC rate, the
+  arguments). The first thread starts at the entry with RDI = the start
+  block, every other register 0.
+- **Every set of page tables shares the kernel's upper half**: a new PML4
+  copies entries 256 to 511 of the kernel's, which never change after boot.
+  The lower half is the task's: user pages are never global. Blocks of
+  memory a task maps (`SYS_MAP`) go from `USER_MAPS` up, a guard page after
+  each, and are the memory object's own pages, so the kernel and the task
+  see the same bytes; a mapping holds a reference to its object until the
+  task goes. `sched_switch` loads the next thread's tables (the kernel's for
+  a kernel thread) before it lets go of the one before, so tables are freed
+  only once no CPU can be on them, and sets the TSS's RSP0 and the per-CPU
+  SYSCALL stack to the next thread's kernel stack.
+- **System calls** (`SYS_*`) come in by `SYSCALL` at `syscall_entry`: SWAPGS,
+  onto the thread's kernel stack, a frame laid out as an interrupt's
+  (`FR_*`, vector `VEC_SYSCALL`), interrupts back on, and out by `SYSRET`.
+  Arguments in RDI, RSI, RDX and R10; RAX and RDX back; RCX and R11 lost;
+  everything else kept. They are only what a ring cannot do: enter it, make
+  rings, memory, events and threads, map memory, yield, exit. The rest is an
+  entry on a ring: a program writes to the console with `RO_WRITE` (a
+  handle to the console, `OT_CONSOLE`, with `RT_CON_WRITE`, and text in a
+  block of memory). The kernel never touches a program's pages at their
+  user addresses, and SMAP would stop it if it did; FSGSBASE is off, since
+  the FS and GS bases are not kept for each thread.
+- **A fault in ring 3 ends the task, not the machine.** `exception_dispatch`
+  sends every exception from ring 3 (but NMI and machine check) to
+  `user_fault`, which says what it was and where (for a page fault, what the
+  access ran into), marks the task killed by a fault and ends the thread.
+  **Killing a task** (`task_kill`) marks it; each of its threads ends the
+  next time it would go back to ring 3 (`user_leave`, on the way out of
+  every system call and every interrupt from ring 3), one parked is woken
+  (`wq_wait_fn` waits no more for a thread whose task is killed), and one
+  running on another CPU gets a reschedule IPI. When a task's first thread
+  ends, the rest are killed; when the last has gone and the last reference
+  with it, its pages, page tables and mappings go too.
+- `run` runs in the background (a thread `run` waits for it, and the main
+  loop says how it ended); ctrl+C kills it. `user` counts programs and their
+  pages. `user test` runs TEST.AXE (which checks the start block, its ring,
+  registers kept across calls, refusals, events, a thread of its own, four
+  more on a shared counter, a timeout, 64 KiB copied by the kernel, its own
+  sections, a second ring, the console's refusals, and SIMD registers kept
+  across yields), FAULT.AXE with each kind of fault, and SPIN.AXE spinning,
+  parked in its ring, calling the kernel, and with a thread that faults,
+  each killed and timed; then that nothing is left over.
+
 ## Processors: `smp.asm`
 
 - The MADT gives the APIC IDs. The BSP is moved to index 0.
@@ -348,10 +404,12 @@ xHCI and `0x23` network cards (MSI-X or MSI to the BSP, set up by `pci_msi`),
 reschedule, `0xFF` spurious. Every stub saves all general registers and calls
 the handler registered with `irq_register`; after a device's (`0x20` to
 `0x2F`) it unparks the main loop. The common path sends the EOI, then
-switches threads if the scheduler asked. Exceptions go to `panic`, which
-stops the other CPUs and paints a full report (registers, CR2, CR3,
-segments, the thread, and for a page fault what it ran into) on screen and
-serial.
+switches threads if the scheduler asked. From ring 3, the stub SWAPGSes in
+and out, and on the way out a thread whose task is being killed ends
+instead. Exceptions from ring 3 end the task (Ring 3, above); those in the
+kernel go to `panic`, which stops the other CPUs and paints a full report
+(registers, CR2, CR3, segments, the thread, and for a page fault what it ran
+into) on screen and serial.
 
 ## USB: `usb.asm`, `usbdev.asm`, `usbhub.asm`, `hid.asm`, `usbmsc.asm`, `pointer.asm`
 
@@ -714,8 +772,12 @@ from `_S5_`) for power-off, then QEMU's port 0x604.
   screen; `SPRINTF buf, "fmt", args...` formats into memory. Arguments are
   64-bit registers, immediates or `qword [mem]`.
 - Structures are `equ` offsets (`PC_*`, `TH_*`, `OB_*`, `TK_*`, `CAP_*`,
-  `HS_*`, `EV_*`, `MO_*`, `RG_*`, `RA_*`, `SQ_*`, `CQ_*`, `RQ_*`, `TM_*`, `PE_*`, `XC_*`, `DV_*`, `NV_*`, `DK_*`, `VO_*`,
-  `VF_*`).
+  `HS_*`, `EV_*`, `MO_*`, `RG_*`, `RA_*`, `SQ_*`, `CQ_*`, `RQ_*`, `TM_*`, `AS_*`, `AXE_*`,
+  `SB_*`, `PE_*`, `XC_*`, `DV_*`, `NV_*`, `DK_*`, `VO_*`, `VF_*`). Programs include
+  `defs.inc` too: it is their ABI.
+- No code a system call or an interrupt reaches uses SIMD, so neither saves
+  a program's SIMD registers; the scheduler keeps each thread's. SIMD stays
+  in code the shell runs (crypto, the Mandelbrot, tests).
 - Errors are `E_*`, small negative numbers. The kernel's pointers are
   negative too (the upper half), so a function that returns a pointer or an
   error is checked with `cmp rax, E_ANY` and `jae`, not the sign.

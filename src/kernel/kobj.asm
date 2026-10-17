@@ -80,6 +80,11 @@ task_destroy:
     push r12
     mov r12, rdi
     call cap_drop_all
+    mov rdi, [r12 + TK_AS]              ; its pages and page tables (user.asm)
+    test rdi, rdi
+    jz .no_as
+    call as_destroy
+.no_as:
     mov rdi, [r12 + TK_SLOTS]
     call kfree
     mov rdi, [r12 + TK_PARENT]
@@ -324,11 +329,15 @@ wq_wait_fn:
     lea rdi, [r12 + WQ_LOCK]
     call spin_unlock
     popfq
+    call user_killed                    ; a thread of a task being killed
+    test eax, eax                       ; waits no more
+    jnz .timeout
     test r14, r14
     jz .again
     RDTSC64
     cmp rax, r14
     jb .again
+.timeout:
     xor eax, eax
     jmp .out
 .set:

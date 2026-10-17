@@ -173,6 +173,7 @@ shell_key:
 .cancel:
     mov byte [sh_wait], 0               ; (the prompt comes back below)
     call net_cancel                     ; a ping, a lookup or a fetch stops
+    call user_cancel                    ; and a program
     mov dword [sh_len], 0
     lea rdi, [str_ctrl_c]
     call kputs
@@ -532,6 +533,8 @@ commands:
     COMMAND 'threads',  cmd_threads,  'threads [test | spin <n> [perf|eff|any] [s]]: each CPU and thread, a self-test of the scheduler, or load to watch'
     COMMAND 'objects',  cmd_objects,  'objects [test | audit | <task id>]: objects and tasks, the handles a task holds, the audit ring, or a self-test of capabilities'
     COMMAND 'rings',    cmd_rings,    'rings [test]: each ring, its entries and completions, and the thread that finishes requests; or a self-test'
+    COMMAND 'run',      cmd_run,      'run <program> [arguments]: /EFI/AXIOM/<PROGRAM>.AXE in ring 3; ctrl+C stops it'
+    COMMAND 'user',     cmd_user,     'user [test]: programs run, their pages; or a self-test of ring 3'
     COMMAND 'pci',      cmd_pci,      'PCI Express functions'
     COMMAND 'acpi',     cmd_acpi,     'firmware ACPI tables'
     COMMAND 'usb',      usb_list,     'USB devices, hubs and what drives them'

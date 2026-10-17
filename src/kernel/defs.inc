@@ -54,6 +54,9 @@ PC_BALANCE_AT   equ 408                 ; TSC: look for a better core, 0 = no ne
 PC_PUSH_WHO     equ 416                 ; the thread PC_PUSH_TO is for
 PC_WANTS        equ 424                 ; the kind of core the running thread wants, if not this
 PC_CUR_VR       equ 432                 ; the running thread's vruntime when last counted
+PC_KSTACK       equ 440                 ; the running thread's kernel stack, for SYSCALL
+PC_USER_RSP     equ 448                 ; its RSP in ring 3, on the way in
+PC_CR3          equ 456                 ; the page tables loaded here, 0 = not known
 PC_SIZE         equ 512
 
 CPU_KIND_UNKNOWN equ 0
@@ -77,7 +80,8 @@ OT_THREAD       equ 2
 OT_EVENT        equ 3
 OT_MEMORY       equ 4
 OT_RING         equ 5
-OT_TYPES        equ 6                   ; with 0, none
+OT_CONSOLE      equ 6                   ; the screen and the serial log (user.asm)
+OT_TYPES        equ 7                   ; with 0, none
 
 ; what a capability allows (RT_*): three for any object, the rest by type
 RT_DUP          equ 1 << 0              ; derive more from it
@@ -91,6 +95,7 @@ RT_EV_WAIT      equ 1 << 9              ; wait for it
 RT_MEM_READ     equ 1 << 8              ; memory: read it
 RT_MEM_WRITE    equ 1 << 9              ; write it
 RT_RING_ENTER   equ 1 << 8              ; a ring: submit to it, wait on it
+RT_CON_WRITE    equ 1 << 8              ; the console: write lines to it
 RT_ALL          equ 0xFFFF
 
 ; what handle operations return when they fail
@@ -105,7 +110,9 @@ E_FULL          equ -8                  ; the handle table is full
 E_TIMEOUT       equ -9
 E_ARG           equ -10
 E_CANCELED      equ -11
-E_COUNT         equ 12                  ; with 0, none
+E_KILLED        equ -12                 ; a thread whose task was killed
+E_FAULT         equ -13                 ; one that faulted in ring 3
+E_COUNT         equ 14                  ; with 0, none
 E_ANY           equ -4096               ; what returns a pointer or an E_*: an
                                         ; error is RAX >= E_ANY, unsigned (the
                                         ; kernel's pointers are negative too)
@@ -144,6 +151,10 @@ TH_WQ           equ 232                 ; WQ_SIZE: those waiting for it to end
 TH_HINT         equ 248                 ; -1, or the CPU to start on (tests)
 TH_LAST         equ 256                 ; the CPU it last ran on, -1 if none
 TH_TASK         equ 264                 ; the task it acts for (a reference)
+TH_CR3          equ 272                 ; its task's page tables, 0 = the kernel's
+TH_UENTRY       equ 280                 ; TF_USER: where it starts in ring 3
+TH_USTACK       equ 288                 ; its RSP there
+TH_UARG         equ 296                 ; and its RDI
 TH_SIZE         equ 320
 
 ; a wait queue (kobj.asm): threads waiting for a flag
@@ -168,6 +179,8 @@ TK_OPS          equ 96                  ; handle operations it made
 TK_DENIED       equ 104                 ; of those, refused
 TK_ENDED        equ 112                 ; dword, bit 0: no thread and no handle
                                         ; to it were left, and its handles went
+TK_KILL         equ 116                 ; dword, bit 0: killed; bit 1: by a fault
+TK_AS           equ 120                 ; its address space (user.asm), 0 if none
 TK_SIZE         equ 128
 
 ; a slot of a handle table; a handle is (HS_GEN << 16) | its index, never 0
@@ -274,7 +287,9 @@ RO_CLOSE        equ 8                   ; handle
 RO_GIVE         equ 9                   ; handle, handle2 = a task
 RO_REVOKE       equ 10                  ; handle
 RO_CANCEL       equ 11                  ; a0: the data of requests to cancel
-RO_COUNT        equ 12
+RO_WRITE        equ 12                  ; handle = the console, handle2 + a0: a1
+                                        ; bytes of text -> the bytes
+RO_COUNT        equ 13
 
 TS_NEW          equ 0
 TS_READY        equ 1
@@ -289,6 +304,7 @@ THC_EFF         equ 2                   ; wants an E-core
 TF_IDLE         equ 1
 TF_MAIN         equ 2
 TF_WORKER       equ 4
+TF_USER         equ 8                   ; runs in ring 3 (user.asm)
 
 ; 64-bit TSS
 TSS_RSP0        equ 4
@@ -301,6 +317,8 @@ TSS_LIMIT       equ 103
 ; GDT selectors
 SEL_KCODE       equ 0x08
 SEL_KDATA       equ 0x10
+SEL_UDATA       equ 0x18 | 3
+SEL_UCODE       equ 0x20 | 3
 SEL_TSS0        equ 0x28                ; CPU n uses SEL_TSS0 + 16 * n
 
 ; interrupt vectors
@@ -312,6 +330,7 @@ VEC_WAKE        equ 0x40
 VEC_TLB         equ 0x41
 VEC_RESCHED     equ 0x42
 VEC_SPURIOUS    equ 0xFF
+VEC_SYSCALL     equ 0x100               ; not a vector: a frame SYSCALL built
 
 ; interrupt frame built by isr_common (offsets from the frame pointer)
 FR_R15          equ 0
@@ -350,8 +369,51 @@ MSR_PM_ENABLE   equ 0x770
 MSR_HWP_CAPS    equ 0x771
 MSR_HWP_REQUEST equ 0x774
 MSR_EFER        equ 0xC0000080
+MSR_STAR        equ 0xC0000081
+MSR_LSTAR       equ 0xC0000082
+MSR_FMASK       equ 0xC0000084
 MSR_GS_BASE     equ 0xC0000101
 MSR_KGS_BASE    equ 0xC0000102
+
+; ring 3 (user.asm): what a program sees. Programs include this file.
+USER_START      equ 0x200000            ; the start block, read-only
+USER_IMAGE      equ 0x400000            ; the program, its header first
+USER_IMAGE_MAX  equ 16 << 20
+USER_MAPS       equ 0x100000000000      ; blocks of memory it maps, a guard page after each
+USER_STACK_TOP  equ 0x7FF000000000      ; its first thread's stack is below
+USER_STACK_SIZE equ 0x10000
+USER_TOP        equ 0x800000000000      ; the end of the lower half
+
+; a program's header, at USER_IMAGE (the start of its file)
+AXE_MAGIC       equ 0                   ; 'AXIOMEX1'
+AXE_ENTRY       equ 8
+AXE_TEXT_END    equ 16                  ; code from USER_IMAGE to here
+AXE_RODATA_END  equ 24                  ; constants from there to here
+AXE_DATA_END    equ 32                  ; data from there to here: the end of the file
+AXE_BSS_END     equ 40                  ; and zeroes from there to here
+AXE_HDR         equ 48
+
+; the start block, at USER_START; the first thread starts with RDI = it
+SB_RING         equ 0                   ; dword: a handle to the task's ring
+SB_RING_MEM     equ 4                   ; dword: to the ring's memory
+SB_CONSOLE      equ 8                   ; dword: to the console
+SB_RING_VA      equ 16                  ; where the ring's memory is mapped
+SB_TSC_PER_US   equ 24                  ; for deadlines
+SB_ARGS_LEN     equ 32                  ; dword
+SB_ARGS         equ 64                  ; the arguments it was run with, NUL-ended
+SB_ARGS_MAX     equ 4096 - SB_ARGS - 1
+
+; system calls: SYSCALL with RAX = the number and the arguments in RDI, RSI,
+; RDX, R10; the result in RAX (and RDX), RCX and R11 lost, the rest kept
+SYS_EXIT        equ 0                   ; (code): this thread ends
+SYS_RING_ENTER  equ 1                   ; (ring, take, wait for, TSC deadline) -> taken
+SYS_RING_NEW    equ 2                   ; (entries) -> RAX = a ring, RDX = its memory
+SYS_MEM_NEW     equ 3                   ; (bytes) -> zeroed memory
+SYS_MAP         equ 4                   ; (memory) -> where it is mapped now
+SYS_EVENT_NEW   equ 5                   ; -> an event
+SYS_THREAD_NEW  equ 6                   ; (entry, RSP, RDI) -> a thread, started
+SYS_YIELD       equ 7
+SYS_COUNT       equ 8
 
 ; UEFI memory types
 MT_RESERVED     equ 0

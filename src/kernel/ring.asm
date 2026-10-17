@@ -835,6 +835,13 @@ ring_exec:
     xor edx, edx
     call ring_cancel
     jmp .out
+.write:
+    mov edi, [rbx + SQ_HANDLE]
+    mov esi, [rbx + SQ_HANDLE2]
+    mov rdx, [rbx + SQ_A0]
+    mov rcx, [rbx + SQ_A1]
+    call h_con_write
+    jmp .out
 .bad:
     mov rax, E_ARG                      ; one it does not know
 .out:
@@ -1310,7 +1317,8 @@ align 8
 ro_exec:        dq ring_exec.nop, ring_exec.signal, ring_exec.reset, ring_exec.bad
                 dq ring_exec.bad, ring_exec.bad, ring_exec.copy, ring_exec.dup
                 dq ring_exec.close, ring_exec.give, ring_exec.revoke, ring_exec.cancel
-ro_async:       db 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0   ; which wait: RO_WAIT, RO_JOIN, RO_TIMEOUT
+                dq ring_exec.write
+ro_async:       db 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0 ; which wait: RO_WAIT, RO_JOIN, RO_TIMEOUT
 
 section .bss
 alignb 8

@@ -1116,6 +1116,16 @@ sched_switch:
 .fxsave:
     fxsave64 [r8]
 .saved:
+    mov rax, [rsi + TH_CR3]             ; the next one's tables, before this one
+    test rax, rax                       ; lets go of its own (they may go then)
+    jnz .tables
+    mov rax, [vmm_cr3]
+.tables:
+    cmp rax, [gs:PC_CR3]
+    je .same_tables
+    mov cr3, rax
+    mov [gs:PC_CR3], rax
+.same_tables:
     mfence                              ; all of it seen before another CPU takes it
     mov dword [rdi + TH_ONCPU], 0       ; from here on, hands off this stack
 .wait:
@@ -1126,6 +1136,9 @@ sched_switch:
 .take:
     mov dword [rsi + TH_ONCPU], 1
     mov [gs:PC_CURRENT], rsi
+    mov rax, [rsi + TH_STACK_TOP]       ; where ring 3 comes back in
+    mov [gs:PC_KSTACK], rax
+    mov [gs:PC_TSS + TSS_RSP0], rax
     mov r8, [rsi + TH_XSAVE]
     cmp byte [sched_xsave], 0
     je .fxrstor

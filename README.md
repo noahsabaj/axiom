@@ -2,7 +2,7 @@
 
 An operating system written entirely in x86-64 assembly, booting straight from
 UEFI onto the hardware that is actually present. No C, no libc, no GRUB, no
-borrowed kernel: about forty-nine thousand lines of NASM, top to bottom.
+borrowed kernel: about fifty-one thousand lines of NASM, top to bottom.
 
 Why it exists and where it is going: [docs/VISION.md](docs/VISION.md).
 How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
@@ -41,7 +41,7 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   and PSS) and ECDSA on P-256 and P-384. The crypto is checked against the published vectors at
   every boot; `crypto` repeats the check and times each.
 - A shell over a USB keyboard, a PS/2 keyboard or the serial port. Commands:
-  `help info cpus mem threads objects rings pci acpi usb disks vol ls cd cat cp write mkdir
+  `help info cpus mem threads objects rings run user pci acpi usb disks vol ls cd cat cp write mkdir
   rm date net ip dhcp ping host arp http ask claude tcp crypto log demo bench
   uptime echo clear panic reboot poweroff`.
 - **A log on the boot stick**: everything Axiom prints, the commands typed
@@ -79,6 +79,14 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   happen. Entries can be linked into chains and canceled, and a full
   completion queue holds entries back rather than losing one. `rings` shows
   each ring and what waits; `rings test` checks it all.
+- **Programs in ring 3**: `run <program> [arguments]` loads
+  `/EFI/AXIOM/<PROGRAM>.AXE` from the boot stick into a task with page
+  tables of its own (code read-only, data not executable, a guarded stack)
+  and runs it on any CPU. A program reaches the kernel by `SYSCALL`, and
+  for most things through its ring, the console included. A fault in a
+  program ends that program, says what it ran into, and nothing else
+  notices; ctrl+C kills one. `hello`, `test`, `fault` and `spin` come with
+  it (`src/user/`); `user test` runs them all, with a fault of every kind.
 - ACPI (MADT, MCFG, FADT, the DSDT's `_S5_`), SMBIOS, PCI Express enumeration,
   x2APIC (falling back to xAPIC), I/O APIC, TSC-deadline timer, and a panic
   screen that stops every other CPU.
@@ -91,8 +99,8 @@ Needs [NASM](https://nasm.us) 2.15+ and Python 3 on the PATH.
 python tools/build.py
 ```
 
-That writes `build/esp/EFI/BOOT/BOOTX64.EFI` (about 280 KB, the kernel is
-embedded inside it). `python tools/build.py --max 1920x1080` caps the display
+That writes `build/esp/EFI/BOOT/BOOTX64.EFI` (about 500 KB, the kernel is
+embedded inside it), and the programs, `build/esp/EFI/AXIOM/*.AXE`. `python tools/build.py --max 1920x1080` caps the display
 mode if you'd rather have bigger text.
 
 ## Run in QEMU
@@ -226,7 +234,7 @@ Tested target: HP Victus 15L (i7-14700F, 64 GB, RTX 4060 Ti), AMI UEFI.
    for sticks up to 32 GB; for a bigger one, make a 32 GB partition first
    (Disk Management) or use a tool such as Rufus.
 2. Copy `build/esp/EFI` to the root of the stick, so that the stick contains
-   `\EFI\BOOT\BOOTX64.EFI`.
+   `\EFI\BOOT\BOOTX64.EFI` (and the programs, in `\EFI\AXIOM`).
 3. Make sure **Secure Boot is off** in the firmware setup (Axiom isn't signed).
    On the Victus it already is.
 4. Plug in the stick, power on and tap **F9** for the boot menu. Pick the USB
@@ -263,6 +271,9 @@ Things worth knowing:
   booted; then `ask <question>`. The file is plain text on the stick, so keep
   the stick to yourself, or type the key instead. Each question is billed to
   that key; `claude model <name>` picks a cheaper model.
+- `run hello` runs a program in ring 3; `user test` checks ring 3 on every
+  CPU, faults included, and `run spin 28` puts a thread on each one until
+  ctrl+C.
 - Keyboards and mice work directly or through hubs (the Keychron's receiver
   included). Bluetooth isn't supported yet, so a Bluetooth-only mouse won't
   move the cursor.
@@ -276,6 +287,7 @@ Things worth knowing:
 ```
 src/boot/uefi.asm       the loader: a hand-built PE32+ UEFI application
 src/kernel/*.asm        the kernel, one flat image at 0xFFFFFFFF80000000
+src/user/               programs for ring 3 (axe.inc: their header and runtime)
 src/include/            structures shared by the two
 tools/build.py          assemble everything
 tools/run.py            boot in QEMU; type keys, move the pointer, take screenshots
@@ -296,7 +308,8 @@ tools/test/             host-side tests for self-contained modules (tls: the
                         the heap, and each kind of fault; threads: the
                         scheduler on 8 CPUs, on one, and under TCG;
                         objects: handles and capabilities, likewise;
-                        rings: async rings, likewise); all.py runs them
+                        rings: async rings, likewise; user: ring 3,
+                        from a stick image, likewise); all.py runs them
                         all at once, and qemu.py boots side by side
 tools/mkfont.py         rasterize the console font into src/kernel/gen/
 docs/                   vision and architecture

@@ -68,6 +68,10 @@ isr_stubs:
 %endrep
 
 isr_common:
+    test byte [rsp + 24], 3             ; from ring 3: the kernel's GS
+    jz .kernel_gs
+    swapgs
+.kernel_gs:
     push rax
     push rbx
     push rcx
@@ -110,6 +114,10 @@ isr_common:
 .exception:
     call exception_dispatch
 .return:
+    test byte [rbp + FR_CS], 3
+    jz .restore
+    call user_leave                     ; a task being killed goes no further
+.restore:
     mov rsp, rbp
     pop r15
     pop r14
@@ -127,6 +135,10 @@ isr_common:
     pop rbx
     pop rax
     add rsp, 16                         ; vector and error code
+    test byte [rsp + 8], 3
+    jz .iret
+    swapgs
+.iret:
     iretq
 
 ; -----------------------------------------------------------------------------
@@ -134,6 +146,14 @@ isr_common:
 ; -----------------------------------------------------------------------------
 exception_dispatch:
     mov rax, [rdi + FR_VECTOR]
+    test byte [rdi + FR_CS], 3
+    jz .kernel
+    cmp eax, 2                          ; from ring 3: an NMI is as ever,
+    je .not_gp
+    cmp eax, 18                         ; a machine check is the machine's,
+    je .fatal
+    jmp user_fault                      ; and the rest end the task
+.kernel:
     cmp eax, 13
     jne .not_gp
     mov rdx, [rdi + FR_RIP]             ; #GP from a probing MSR access?

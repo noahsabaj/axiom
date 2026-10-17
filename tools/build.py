@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Build Axiom: kernel.bin, then BOOTX64.EFI with the kernel embedded.
+"""Build Axiom: kernel.bin, then BOOTX64.EFI with the kernel embedded, and
+the programs in src/user, each to EFI/AXIOM/<NAME>.AXE beside it.
 
     python tools/build.py              build into build/esp/EFI/BOOT/BOOTX64.EFI
     python tools/build.py --max 1920x1080   cap the display mode the loader picks
@@ -48,10 +49,20 @@ def main():
           "-I", "src/boot/", "-I", "src/include/", "-I", "build/",
           "-o", str((boot / "BOOTX64.EFI").relative_to(ROOT)), "src/boot/uefi.asm"])
 
+    programs = BUILD / "esp" / "EFI" / "AXIOM"
+    programs.mkdir(parents=True, exist_ok=True)
+    made = []
+    for src in sorted((ROOT / "src" / "user").glob("*.asm")):
+        out = programs / f"{src.stem.upper()}.AXE"
+        nasm(["-f", "bin", "-I", "src/kernel/", "-I", "src/user/",
+              "-o", str(out.relative_to(ROOT)), str(src.relative_to(ROOT))])
+        made.append(f"{out.name} {out.stat().st_size:,}")
+
     kernel = (BUILD / "kernel.bin").stat().st_size
     efi = (boot / "BOOTX64.EFI").stat().st_size
     print(f"kernel.bin   {kernel:>9,} bytes")
     print(f"BOOTX64.EFI  {efi:>9,} bytes  -> {boot / 'BOOTX64.EFI'}")
+    print(f"programs     {', '.join(made)} -> {programs}")
 
 
 if __name__ == "__main__":

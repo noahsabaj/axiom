@@ -56,6 +56,7 @@ section .text
 %include "kobj.asm"
 %include "ring.asm"
 %include "sched.asm"
+%include "user.asm"
 %include "pci.asm"
 %include "kbd.asm"
 %include "usb.asm"

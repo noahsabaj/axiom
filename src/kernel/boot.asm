@@ -96,6 +96,7 @@ kernel_main:
     lea rbx, [percpu]
     call cpu_identify_local
     call obj_boot                       ; the task 'kernel'
+    call user_boot                      ; the console, for programs
     call sched_init                     ; from here on, this is the thread 'main'
     call async_boot                     ; the thread 'async': timers, rings
     call smp_start
@@ -139,6 +140,7 @@ main_loop:
     call net_service
     call log_service
     call pointer_service
+    call user_service
 .input:
     call kbd_getc
     test eax, eax
@@ -177,6 +179,8 @@ main_loop:
     cmp byte [usb_pending], 0
     jne .awake
     cmp byte [net_pending], 0
+    jne .awake
+    cmp byte [user_pending], 0
     jne .awake
     mov rax, [next_refresh]             ; the next thing we have to do
     cmp byte [demo_on], 0
