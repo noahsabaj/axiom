@@ -69,13 +69,13 @@ OW_SIZE         equ 32
     call ob_why
     lea rsi, [%%what]
     mov rdi, %1
-    KLOG "objects test: %s: %d%s, not %d%s", rsi, rcx, r8, rdi, rax
+    KLOG "%s: %s: %d%s, not %d%s", qword [test_name], rsi, rcx, r8, rdi, rax
     pop r8
     pop rdi
     pop rsi
     pop rcx
     pop rax
-    inc qword [ob_fails]
+    inc qword [test_fails]
 %%ok:
 %endmacro
 
@@ -92,11 +92,11 @@ OW_SIZE         equ 32
     lea rsi, [%%what]
     mov rdi, rax
     call err_text
-    KLOG "objects test: %s: %s", rsi, rax
+    KLOG "%s: %s: %s", qword [test_name], rsi, rax
     pop rdi
     pop rsi
     pop rax
-    inc qword [ob_fails]
+    inc qword [test_fails]
 %%ok:
 %endmacro
 
@@ -539,7 +539,9 @@ objects_audit:
 ; -----------------------------------------------------------------------------
 objects_test:
     push rbx
-    mov qword [ob_fails], 0
+    mov qword [test_fails], 0
+    lea rax, [str_ob_name]
+    mov [test_name], rax
     call sched_reap
     call ob_counts
     lea rsi, [ob_now]
@@ -553,12 +555,12 @@ objects_test:
     call ob_stress
     call ob_speed
     call ob_leaks
-    cmp qword [ob_fails], 0
+    cmp qword [test_fails], 0
     jne .failed
     KLOG "objects test: passed"
     jmp .out
 .failed:
-    KLOG "objects test: FAILED (%u)", qword [ob_fails]
+    KLOG "objects test: FAILED (%u)", qword [test_fails]
 .out:
     pop rbx
     ret
@@ -1337,12 +1339,13 @@ ob_leaks:
     ret
 .leak:
     KLOG "objects test: not all of it came back"
-    inc qword [ob_fails]
+    inc qword [test_fails]
     ret
 
 section .rodata
 str_ob_test:    db 'test', 0
 str_ob_none:    db 0
+str_ob_name:    db 'objects test', 0
 str_ob_audit:   db 'audit', 0
 str_ob_ev:      db 'test', 0
 str_ob_agent:   db 'agent', 0
@@ -1367,7 +1370,8 @@ ao_names:       dq str_ao_none, str_ao_make, str_ao_dup, str_ao_window, str_ao_g
 
 section .bss
 alignb 8
-ob_fails:       resq 1
+test_fails:     resq 1                  ; of the self-test running
+test_name:      resq 1                  ; and what it is called
 ob_base:        resq 8
 ob_now:         resq 8
 ob_ag:          resb AG_SIZE

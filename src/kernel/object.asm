@@ -20,6 +20,10 @@
 ;  moves those derived from it up to its parent, so a revoke still reaches
 ;  them.
 ;
+;  When the last capability to an object goes, its type hears of it
+;  (TY_ORPHAN): a ring cancels what still waits on it, and a task with no
+;  thread left ends.
+;
 ;  Each task counts its handle operations and the refusals among them.
 ;  Whatever changes the capabilities (made, derived, given, closed, revoked,
 ;  a task's last ones closed when it ends) and every refusal goes into an
@@ -57,6 +61,7 @@ TY_LIVE         equ 24
 TY_MADE         equ 32
 TY_LOCK         equ 40                  ; dword
 TY_RIGHTS       equ 48                  ; the names of its rights, 16 of them
+TY_ORPHAN       equ 56                  ; (RDI) when its last capability goes, or 0
 TY_SIZE         equ 64
 
 ; an audit record
@@ -322,6 +327,34 @@ obj_put:
     xor edi, edi
     lea rsi, [str_obj_under]
     jmp panic
+
+; obj_orphaned(RDI): its last capability went; its type's TY_ORPHAN, if it
+; has one. No lock held. Preserves all.
+obj_orphaned:
+    push rax
+    call obj_type
+    cmp qword [rax + TY_ORPHAN], 0
+    je .none
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    call [rax + TY_ORPHAN]
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+.none:
+    pop rax
+    ret
 
 ; obj_free(RDI): off its list, back to the heap (a type's destroy, or the
 ; end of one)
@@ -1141,11 +1174,16 @@ handle_close:
     call cap_unlink                     ; those derived from it move up
     mov rdx, [rbx + CAP_OBJ]
     lock dec dword [rdx + OB_CAPS]
+    setz byte [rbx + CAP_LAST]
     mov eax, [rbx + CAP_SLOT]
     call ht_release
     AUDIT AO_CLOSE, 0, rdx, r13, qword [rbx + CAP_RIGHTS], 0
     CAP_UNLOCK
     mov rdi, [rbx + CAP_OBJ]
+    cmp byte [rbx + CAP_LAST], 0
+    je .put
+    call obj_orphaned
+.put:
     call obj_put
     mov rdi, rbx
     call kfree
@@ -1194,6 +1232,7 @@ cap_drop_all:
     call cap_unlink
     mov rdx, [rdi + CAP_OBJ]
     lock dec dword [rdx + OB_CAPS]
+    setz byte [rdi + CAP_LAST]
     mov [rdi + CAP_PARENT], r13
     mov r13, rdi
     inc ebx
@@ -1210,6 +1249,10 @@ cap_drop_all:
     test r13, r13
     jz .out
     mov rdi, [r13 + CAP_OBJ]
+    cmp byte [r13 + CAP_LAST], 0
+    je .drop
+    call obj_orphaned
+.drop:
     call obj_put
     mov rdi, r13
     mov r13, [r13 + CAP_PARENT]
@@ -1337,6 +1380,7 @@ str_ot_task:    db 'task', 0
 str_ot_thread:  db 'thread', 0
 str_ot_event:   db 'event', 0
 str_ot_memory:  db 'memory', 0
+str_ot_ring:    db 'ring', 0
 str_rt_all:     db 'all', 0
 str_rt_none:    db 'none', 0
 str_rt_dup:     db 'dup', 0
@@ -1348,6 +1392,7 @@ str_rt_wait:    db 'wait', 0
 str_rt_signal:  db 'signal', 0
 str_rt_read:    db 'read', 0
 str_rt_write:   db 'write', 0
+str_rt_enter:   db 'enter', 0
 str_e_ok:       db 'ok', 0
 str_e_badh:     db 'no such handle', 0
 str_e_type:     db 'the wrong type', 0
@@ -1359,11 +1404,13 @@ str_e_nomem:    db 'out of memory', 0
 str_e_full:     db 'the handle table is full', 0
 str_e_timeout:  db 'timed out', 0
 str_e_arg:      db 'a bad argument', 0
+str_e_canceled: db 'canceled', 0
 str_e_unknown:  db 'an unknown error', 0
 
 align 8
 err_names:      dq str_e_ok, str_e_badh, str_e_type, str_e_rights, str_e_expired
                 dq str_e_revoked, str_e_range, str_e_nomem, str_e_full, str_e_timeout, str_e_arg
+                dq str_e_canceled
 rt_names_none:  dq str_rt_dup, str_rt_give, str_rt_info, 0, 0, 0, 0, 0
                 dq 0, 0, 0, 0, 0, 0, 0, 0
 rt_names_task:  dq str_rt_dup, str_rt_give, str_rt_info, 0, 0, 0, 0, 0
@@ -1374,16 +1421,19 @@ rt_names_event: dq str_rt_dup, str_rt_give, str_rt_info, 0, 0, 0, 0, 0
                 dq str_rt_signal, str_rt_wait, 0, 0, 0, 0, 0, 0
 rt_names_memory: dq str_rt_dup, str_rt_give, str_rt_info, 0, 0, 0, 0, 0
                 dq str_rt_read, str_rt_write, 0, 0, 0, 0, 0, 0
+rt_names_ring:  dq str_rt_dup, str_rt_give, str_rt_info, 0, 0, 0, 0, 0
+                dq str_rt_enter, 0, 0, 0, 0, 0, 0, 0
 
 section .data
 align 8
 obj_next_id:    dq 1
 obj_types:                              ; TY_SIZE each, by OT_*
                 dq str_ot_none, 0, 0, 0, 0, 0, rt_names_none, 0
-ty_task:        dq str_ot_task, task_destroy, 0, 0, 0, 0, rt_names_task, 0
+ty_task:        dq str_ot_task, task_destroy, 0, 0, 0, 0, rt_names_task, task_orphan
 ty_thread:      dq str_ot_thread, thread_destroy, 0, 0, 0, 0, rt_names_thread, 0
 ty_event:       dq str_ot_event, obj_free, 0, 0, 0, 0, rt_names_event, 0
 ty_memory:      dq str_ot_memory, mem_destroy, 0, 0, 0, 0, rt_names_memory, 0
+ty_ring:        dq str_ot_ring, ring_destroy, 0, 0, 0, 0, rt_names_ring, ring_orphan
 
 thread_list     equ ty_thread + TY_LIST
 thread_count    equ ty_thread + TY_LIVE

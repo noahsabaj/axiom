@@ -76,7 +76,8 @@ OT_TASK         equ 1
 OT_THREAD       equ 2
 OT_EVENT        equ 3
 OT_MEMORY       equ 4
-OT_TYPES        equ 5                   ; with 0, none
+OT_RING         equ 5
+OT_TYPES        equ 6                   ; with 0, none
 
 ; what a capability allows (RT_*): three for any object, the rest by type
 RT_DUP          equ 1 << 0              ; derive more from it
@@ -89,6 +90,7 @@ RT_EV_SIGNAL    equ 1 << 8              ; an event: signal or reset it
 RT_EV_WAIT      equ 1 << 9              ; wait for it
 RT_MEM_READ     equ 1 << 8              ; memory: read it
 RT_MEM_WRITE    equ 1 << 9              ; write it
+RT_RING_ENTER   equ 1 << 8              ; a ring: submit to it, wait on it
 RT_ALL          equ 0xFFFF
 
 ; what handle operations return when they fail
@@ -102,7 +104,8 @@ E_NOMEM         equ -7
 E_FULL          equ -8                  ; the handle table is full
 E_TIMEOUT       equ -9
 E_ARG           equ -10
-E_COUNT         equ 11                  ; with 0, none
+E_CANCELED      equ -11
+E_COUNT         equ 12                  ; with 0, none
 E_ANY           equ -4096               ; what returns a pointer or an E_*: an
                                         ; error is RAX >= E_ANY, unsigned (the
                                         ; kernel's pointers are negative too)
@@ -147,9 +150,12 @@ TH_SIZE         equ 320
 WQ_LOCK         equ 0                   ; dword
 WQ_HEAD         equ 8                   ; waiters, each on its thread's stack
 WQ_SIZE         equ 16
-EW_THREAD       equ 0
+EW_THREAD       equ 0                   ; the thread to unpark, or EW_FN's
 EW_NEXT         equ 8
-EW_SIZE         equ 16
+EW_FN           equ 16                  ; 0, or what to call instead (RDI =
+                                        ; the entry; its queue's lock held,
+                                        ; interrupts off, from anywhere)
+EW_SIZE         equ 24
 
 ; a task (kobj.asm), an object: who acts, and the capabilities it holds
 TK_SLOTS        equ 64                  ; its handle table, HS_SIZE bytes a slot
@@ -160,6 +166,8 @@ TK_THREADS      equ 84                  ; dword: threads acting for it
 TK_PARENT       equ 88                  ; the task that made it (a reference)
 TK_OPS          equ 96                  ; handle operations it made
 TK_DENIED       equ 104                 ; of those, refused
+TK_ENDED        equ 112                 ; dword, bit 0: no thread and no handle
+                                        ; to it were left, and its handles went
 TK_SIZE         equ 128
 
 ; a slot of a handle table; a handle is (HS_GEN << 16) | its index, never 0
@@ -183,6 +191,7 @@ CAP_CHILD       equ 40                  ; the first derived from it
 CAP_SIBLING     equ 48                  ; the next derived from its parent
 CAP_OFF         equ 56                  ; memory: the window it allows
 CAP_LEN         equ 64
+CAP_LAST        equ 72                  ; byte: closing it left its object none
 CAP_SIZE        equ 80
 
 ; an event (kobj.asm), an object
@@ -195,6 +204,77 @@ EV_SIZE         equ 96
 MO_BASE         equ 64                  ; its pages, in the vm region
 MO_BYTES        equ 72
 MO_SIZE         equ 80
+
+; a ring (ring.asm), an object: a submission queue and a completion queue
+; in a block of memory its task shares with the kernel
+RG_AREA         equ 64                  ; the memory (a reference)
+RG_BASE         equ 72                  ; where it is
+RG_SQ_BASE      equ 80                  ; its submission entries
+RG_CQ_BASE      equ 88                  ; its completions
+RG_SQN          equ 96                  ; dword: entries, a power of two
+RG_CQN          equ 100                 ; dword: completions, twice as many
+RG_SQ_HEAD      equ 104                 ; dword: entries taken
+RG_CQ_TAIL      equ 108                 ; dword: completions written
+RG_PROMISED     equ 112                 ; dword: completions owed or written
+RG_FLAGS        equ 116                 ; dword: RGF_* bits
+RG_LOCK         equ 120                 ; dword
+RG_LIVE         equ 124                 ; dword: its requests waiting
+RG_PENDING      equ 128                 ; those requests
+RG_WQ           equ 136                 ; WQ_SIZE: threads waiting for completions
+RG_SUBMITTED    equ 152                 ; entries taken, ever
+RG_COMPLETED    equ 160
+RG_ASYNC        equ 168                 ; entries that waited
+RG_CANCELED     equ 176
+RG_SIZE         equ 192
+RGF_SUBMIT      equ 0                   ; a thread is taking entries
+RGF_ORPHAN      equ 1                   ; no handle to it is left
+
+; a ring's memory: first the indices, each written by one side only
+RA_SQ_TAIL      equ 0                   ; dword: entries written, by the task
+RA_CQ_HEAD      equ 4                   ; dword: completions read, by the task
+RA_SQ_HEAD      equ 64                  ; dword: entries taken, by the kernel
+RA_CQ_TAIL      equ 68                  ; dword: completions written, by the kernel
+RA_SQ_ENTRIES   equ 128                 ; dword
+RA_CQ_ENTRIES   equ 132                 ; dword
+RA_SQ_OFF       equ 136                 ; dword: where the entries are
+RA_CQ_OFF       equ 140                 ; dword: where the completions are
+RA_TSC_PER_US   equ 144                 ; for deadlines
+RA_HDR          equ 256
+
+; a submission entry
+SQ_OP           equ 0                   ; byte RO_*
+SQ_FLAGS        equ 1                   ; byte SQF_*
+SQ_HANDLE       equ 4                   ; dword
+SQ_DATA         equ 8                   ; the task's own, back in its completion
+SQ_A0           equ 16
+SQ_A1           equ 24
+SQ_A2           equ 32
+SQ_HANDLE2      equ 40                  ; dword
+SQ_DEADLINE     equ 48                  ; TSC, 0 = none
+SQ_SIZE         equ 64
+SQF_LINK        equ 1                   ; the next starts once this one succeeds
+
+; a completion
+CQ_DATA         equ 0
+CQ_RESULT       equ 8                   ; what it returned, or E_*
+CQ_VALUE        equ 16                  ; RO_JOIN: what the thread returned
+CQ_OP           equ 24                  ; dword RO_*
+CQ_SIZE         equ 32
+
+; what an entry asks for
+RO_NOP          equ 0
+RO_SIGNAL       equ 1                   ; handle: an event
+RO_RESET        equ 2                   ; handle
+RO_WAIT         equ 3                   ; handle, deadline: once it is signalled
+RO_JOIN         equ 4                   ; handle, deadline: once a thread ended
+RO_TIMEOUT      equ 5                   ; deadline: once it comes
+RO_COPY         equ 6                   ; handle + a0 -> handle2 + a1, a2 bytes
+RO_DUP          equ 7                   ; handle, a0 = rights, a1 = expiry
+RO_CLOSE        equ 8                   ; handle
+RO_GIVE         equ 9                   ; handle, handle2 = a task
+RO_REVOKE       equ 10                  ; handle
+RO_CANCEL       equ 11                  ; a0: the data of requests to cancel
+RO_COUNT        equ 12
 
 TS_NEW          equ 0
 TS_READY        equ 1

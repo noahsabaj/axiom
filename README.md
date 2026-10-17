@@ -2,7 +2,7 @@
 
 An operating system written entirely in x86-64 assembly, booting straight from
 UEFI onto the hardware that is actually present. No C, no libc, no GRUB, no
-borrowed kernel: about forty-six thousand lines of NASM, top to bottom.
+borrowed kernel: about forty-nine thousand lines of NASM, top to bottom.
 
 Why it exists and where it is going: [docs/VISION.md](docs/VISION.md).
 How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
@@ -41,7 +41,7 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   and PSS) and ECDSA on P-256 and P-384. The crypto is checked against the published vectors at
   every boot; `crypto` repeats the check and times each.
 - A shell over a USB keyboard, a PS/2 keyboard or the serial port. Commands:
-  `help info cpus mem threads objects pci acpi usb disks vol ls cd cat cp write mkdir
+  `help info cpus mem threads objects rings pci acpi usb disks vol ls cd cat cp write mkdir
   rm date net ip dhcp ping host arp http ask claude tcp crypto log demo bench
   uptime echo clear panic reboot poweroff`.
 - **A log on the boot stick**: everything Axiom prints, the commands typed
@@ -72,6 +72,13 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   change and every refusal goes into an audit ring. `objects` shows each
   type and task, `objects <task>` its handles, `objects audit` the ring, and
   `objects test` checks it all.
+- **Async rings**: a task asks for many things at once through a submission
+  and a completion queue in memory it shares with the kernel, one call for
+  any number of them. Waiting for an event, a thread or a time blocks
+  nothing: the completion is written when it happens, from whatever made it
+  happen. Entries can be linked into chains and canceled, and a full
+  completion queue holds entries back rather than losing one. `rings` shows
+  each ring and what waits; `rings test` checks it all.
 - ACPI (MADT, MCFG, FADT, the DSDT's `_S5_`), SMBIOS, PCI Express enumeration,
   x2APIC (falling back to xAPIC), I/O APIC, TSC-deadline timer, and a panic
   screen that stops every other CPU.
@@ -273,7 +280,8 @@ tools/test/             host-side tests for self-contained modules (tls: the
                         page tables, W^X, guard pages, the vm region and
                         the heap, and each kind of fault; threads: the
                         scheduler on 8 CPUs, on one, and under TCG;
-                        objects: handles and capabilities, likewise)
+                        objects: handles and capabilities, likewise;
+                        rings: async rings, likewise)
 tools/mkfont.py         rasterize the console font into src/kernel/gen/
 docs/                   vision and architecture
 ```

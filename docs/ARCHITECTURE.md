@@ -64,7 +64,7 @@ loader reads: magic `AXIOMKRN`, entry point, file size, memory size.
 | 7 | `acpi.asm`, `smbios.asm` | MADT (CPUs, I/O APICs, overrides), MCFG, FADT, `_S5_`; board, BIOS and memory strings |
 | 8 | `pmm.asm` | Reclaim boot-services memory |
 | 9 | `apic.asm` | x2APIC through MSRs, else xAPIC MMIO; 8259s masked; I/O APIC entries masked |
-| 10 | `object.asm`, `sched.asm` | The task `kernel`, which everything at boot acts for; the scheduler: the code running from here on is the thread `main`; the timer is the scheduler's |
+| 10 | `object.asm`, `sched.asm`, `ring.asm` | The task `kernel`, which everything at boot acts for; the scheduler: the code running from here on is the thread `main`; the timer is the scheduler's; `async_boot`: the timers' heap and the thread `async` |
 | 11 | `smp.asm` | Start every other thread (below), then `sched_topology`: each CPU's kind and SMT sibling |
 | 12 | `pci.asm` | Enumerate through ECAM, else ports CF8/CFC |
 | 13 | `kbd.asm`, `usb.asm` | PS/2 keyboard on IRQ 1; xHCI controllers and whatever is plugged in at boot (later devices arrive through hot-plug in the main loop) |
@@ -162,7 +162,10 @@ or idles.
   at once. Sleeping, the job workers, the main loop and wait queues
   (`wq_wait(queue, flag, deadline)`, `wq_wake`, which joining and events
   use) are built on them. `thread_unpark` and `wq_wake` work from interrupt
-  handlers.
+  handlers. An entry on a wait queue can also be a function rather than a
+  thread (`wq_add`, `wq_remove`, `EW_FN`): `wq_wake` calls it, from
+  whatever woke the queue, which is how a ring's waits complete with
+  nobody blocked on them.
 - **A switch** (`sched_switch`) pushes the callee-saved registers, saves the
   SIMD state with XSAVE (of everything XCR0 enables; the area is sized from
   each component, since some hypervisors understate the total) or FXSAVE,
@@ -212,17 +215,20 @@ or idles.
 ## Objects and capabilities: `object.asm`, `kobj.asm`, `objtest.asm`
 
 - **Everything the kernel hands out is an object**: a task, a thread, an
-  event, a block of memory. Each begins with the same header (`OB_*`): its
+  event, a block of memory, a ring (below). Each begins with the same header (`OB_*`): its
   type, a reference count, an id never reused, a name, the task that made
   it, and how many capabilities point at it. `obj_types` describes each
-  type (its destroy function, the names of its rights) and keeps its live
+  type (its destroy function, the names of its rights, and what to do
+  when the last capability to one goes, `TY_ORPHAN`) and keeps its live
   objects on a list, counted, with how many were ever made. `obj_get` and
   `obj_put`; the last `obj_put` calls the type's destroy.
 - **A task** (`TK_*`) is what acts: a handle table, the task that made it,
   how many threads act for it, and how many handle operations it made and
   how many were refused. Each thread holds its task, and lets go when it is
-  reaped, so a task lives while it has threads or someone holds it; when it
-  ends, every handle it still holds is closed.
+  reaped, so a task lives while it has threads or someone holds it. It
+  ends (`task_end`, once) when it has no threads and no capability points at
+  it: every handle it still holds is closed, which lets go of whatever its
+  rings still waited for, and of the references those held to it.
 - **A task acts only through capabilities**, held in its handle table. A
   handle is a slot's index and that slot's generation (`HS_*`): it means
   nothing in another task's table, and once closed it means nothing in its
@@ -244,8 +250,9 @@ or idles.
   expiry) and holds the object; the operations are built on it:
   `h_task_new`, `h_task_spawn` (a thread acting for a task), `h_thread_wait`,
   `h_event_new`, `h_event_signal`, `h_event_reset`, `h_event_wait`,
-  `h_mem_new`, `h_mem_read`, `h_mem_write`. They are what system calls will
-  be. Every refusal is an `E_*` (negative), and `err_text` says it in words.
+  `h_mem_new`, `h_mem_read`, `h_mem_write`, `h_mem_copy` (between two
+  blocks, each through its handle's window). They are what system calls
+  will be, and what a ring's entries do. Every refusal is an `E_*` (negative), and `err_text` says it in words.
 - **The audit ring**: whatever changes the capabilities (made, derived,
   given, closed, revoked, a task's last ones closed as it ends) and every
   refusal goes into a ring of the last 256, with the task, the handle, the
@@ -264,6 +271,53 @@ or idles.
   on memory, threads on every CPU deriving and closing handles while what
   they derive from is revoked, the cost of a signal by handle and of a dup
   and close, and that nothing is left over.
+
+## Rings: `ring.asm`, `ringtest.asm`
+
+- **A ring is how a task asks for many things at once.** `h_ring_new(n)`
+  makes a ring and a block of memory it shares with the kernel (`RA_*`): a
+  header, n submission entries (`SQ_*`, 64 bytes: an operation, flags, a
+  handle, the task's own data, arguments, a deadline) and 2n completions
+  (`CQ_*`, 32 bytes: the data back, a result, a value). The task writes
+  entries and moves the submission tail; `h_ring_enter(ring, take, wait,
+  deadline)` takes up to `take` of them, does each, and waits until `wait`
+  completions are there to read, or the deadline. The task reads them and
+  moves the completion head. The kernel trusts nothing in that memory: a
+  tail too far ahead is refused, a head past the tail takes nothing.
+- **Operations** (`RO_*`): nop, signal, reset, dup, close, give, revoke,
+  copy (memory to memory), cancel, and three that wait: an event (`RO_WAIT`),
+  a thread's end (`RO_JOIN`) and a time (`RO_TIMEOUT`). Those that wait
+  block nothing: each becomes a request (`RQ_*`), on the object's wait queue
+  as a function and, with a deadline, on a timer; whatever wakes it (another
+  thread, an interrupt handler, the timer) writes its completion, and the
+  task finds it on its next enter, or is woken if it waits in one.
+- **Linked entries** (`SQF_LINK`) run in order, each once the one before it
+  succeeded, up to 16 in a chain; when one fails or times out, the rest
+  complete `E_CANCELED`. `RO_CANCEL` takes back requests still waiting that
+  carry a given data.
+- **Every entry taken gets exactly one completion**, and an entry is taken
+  only when its whole chain's completions have a place: the ring counts
+  those owed or written (`RG_PROMISED`) against the task's head, so a full
+  completion queue leaves entries in the submission queue instead of losing
+  completions.
+- **The thread `async`** finishes requests once they have completed (off
+  their queue and timer, references dropped) and does what was linked after
+  them, acting for the task that asked. It also runs the kernel's timers
+  (`timer_add`, `timer_cancel`: a heap by TSC deadline, each timer's
+  function called on that thread).
+- **A request arms without races**: it goes from arming to pending, and a
+  wake, timeout or cancel that comes while it arms is kept (`RQS_EARLY`) and
+  acted on once it is armed. Exactly one of them completes it.
+- **When no handle to a ring is left** (its `TY_ORPHAN`), whatever still
+  waits on it is canceled, its timers too, and it is freed once the last
+  request lets go.
+- `rings` lists the rings (entries, completions owed, requests waiting,
+  entries taken, completed, waited and canceled) and the requests and timers
+  in being. `rings test` checks entries done at once, a wait completed from
+  another thread, timeouts in the order of their deadlines, links, cancel,
+  join, copies, a full completion queue, a corrupt ring, a ring closed with
+  requests waiting, a ring per CPU under load, the cost of an entry, and
+  that nothing is left over.
 
 ## Processors: `smp.asm`
 
@@ -658,7 +712,7 @@ from `_S5_`) for power-off, then QEMU's port 0x604.
   screen; `SPRINTF buf, "fmt", args...` formats into memory. Arguments are
   64-bit registers, immediates or `qword [mem]`.
 - Structures are `equ` offsets (`PC_*`, `TH_*`, `OB_*`, `TK_*`, `CAP_*`,
-  `HS_*`, `EV_*`, `MO_*`, `PE_*`, `XC_*`, `DV_*`, `NV_*`, `DK_*`, `VO_*`,
+  `HS_*`, `EV_*`, `MO_*`, `RG_*`, `RA_*`, `SQ_*`, `CQ_*`, `RQ_*`, `TM_*`, `PE_*`, `XC_*`, `DV_*`, `NV_*`, `DK_*`, `VO_*`,
   `VF_*`).
 - Errors are `E_*`, small negative numbers. The kernel's pointers are
   negative too (the upper half), so a function that returns a pointer or an

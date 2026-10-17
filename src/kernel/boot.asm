@@ -97,6 +97,7 @@ kernel_main:
     call cpu_identify_local
     call obj_boot                       ; the task 'kernel'
     call sched_init                     ; from here on, this is the thread 'main'
+    call async_boot                     ; the thread 'async': timers, rings
     call smp_start
     call sched_topology
     mov eax, [cpus_online]

@@ -3,8 +3,9 @@
 ;  operations on them by handle
 ;
 ;  A task is who acts: it holds a handle table, and threads act for it. It
-;  ends when nothing refers to it any more (no handle to it, no thread acting
-;  for it), and then every handle it held is closed.
+;  ends once no thread acts for it and no handle to it is left: every handle
+;  it held is closed then (task_end), though what still refers to it (a
+;  request waiting on a ring) keeps the object until it lets go.
 ;
 ;  An event is a flag threads wait for: signalled, it stays so until reset,
 ;  and every thread waiting wakes. A block of memory is pages of its own; a
@@ -27,6 +28,9 @@
 ;      (needs RT_MEM_READ; inside the window)
 ;    h_mem_write(EDI, RSI = offset, RDX = from, RCX = bytes) -> RAX = bytes
 ;      (needs RT_MEM_WRITE)
+;    h_mem_copy(EDI = from, RSI = offset, EDX = to, RCX = offset, R8 =
+;      bytes) -> RAX = bytes (needs RT_MEM_READ on one, RT_MEM_WRITE on the
+;      other)
 ; =============================================================================
 
 MEM_MAX         equ 64 << 20            ; the largest block of memory
@@ -96,7 +100,31 @@ task_hold:
 
 task_release:
     lock dec dword [rdi + TK_THREADS]
+    jnz obj_put
+    cmp dword [rdi + OB_CAPS], 0
+    jne obj_put
+    call task_end                       ; its last thread, and no handle to it
     jmp obj_put
+
+; task_orphan(RDI): the last handle to a task went (its TY_ORPHAN)
+task_orphan:
+    cmp dword [rdi + TK_THREADS], 0
+    je task_end
+    ret
+
+; task_end(RDI): no thread acts for it, and no handle to it is left: every
+; handle it holds is closed, once. No lock held. Preserves all.
+task_end:
+    lock bts dword [rdi + TK_ENDED], 0
+    jc .out
+    push rax
+    push r12
+    mov r12, rdi
+    call cap_drop_all
+    pop r12
+    pop rax
+.out:
+    ret
 
 ; thread_set_task(RDI = a thread not yet started, RSI = the task it is to
 ; act for). Preserves all.
@@ -225,27 +253,48 @@ h_thread_wait:
 ; wq_wait(RDI = queue, RSI = a dword flag, RDX = TSC deadline or 0) -> RAX
 ; = 1 once the flag is set, 0 if the deadline passed first
 wq_wait:
+    mov rcx, rdx
+    mov rdx, rsi
+    lea rsi, [wq_flag]
+    jmp wq_wait_fn
+
+wq_flag:                                ; RDI = a dword flag -> EAX = it
+    mov eax, [rdi]
+    ret
+
+; wq_wait_fn(RDI = queue, RSI = a test, RDX = its argument, RCX = TSC
+; deadline or 0) -> RAX = 1 once the test (RDI = the argument -> EAX nonzero
+; when done; the queue's lock held, so it must be quick and preserve all
+; but RAX) passes, 0 if the deadline came first. Whoever makes it pass
+; wakes the queue.
+wq_wait_fn:
     push rbx
     push r12
     push r13
     push r14
+    push r15
     sub rsp, EW_SIZE                    ; this thread's place on the queue
     mov r12, rdi
-    mov r13, rsi
-    mov r14, rdx
+    mov r15, rsi
+    mov r13, rdx
+    mov r14, rcx
 .again:
     pushfq
     cli
     lea rdi, [r12 + WQ_LOCK]
     call spin_lock
-    cmp dword [r13], 0
-    jne .set
+    mov rdi, r13
+    call r15
+    test eax, eax
+    jnz .set
     mov rax, [gs:PC_CURRENT]
     mov [rsp + 8 + EW_THREAD], rax      ; past the flags just pushed
+    mov qword [rsp + 8 + EW_FN], 0
     mov rax, [r12 + WQ_HEAD]
     mov [rsp + 8 + EW_NEXT], rax
     lea rax, [rsp + 8]
     mov [r12 + WQ_HEAD], rax
+    lea rdi, [r12 + WQ_LOCK]
     call spin_unlock
     popfq
     mov rdi, r14
@@ -268,8 +317,11 @@ wq_wait:
     mov rdx, [rdx + EW_NEXT]
     mov [rcx], rdx
 .off:
-    cmp dword [r13], 0
-    jne .set
+    mov rdi, r13
+    call r15
+    test eax, eax
+    jnz .set
+    lea rdi, [r12 + WQ_LOCK]
     call spin_unlock
     popfq
     test r14, r14
@@ -280,23 +332,92 @@ wq_wait:
     xor eax, eax
     jmp .out
 .set:
+    lea rdi, [r12 + WQ_LOCK]
     call spin_unlock
     popfq
     mov eax, 1
 .out:
     add rsp, EW_SIZE
+    pop r15
     pop r14
     pop r13
     pop r12
     pop rbx
     ret
 
-; wq_wake(RDI = queue): every thread waiting on it. From anywhere, an
-; interrupt handler too. Preserves all.
+; wq_add(RDI = queue, RSI = an entry, EW_THREAD and EW_FN set, RDX = a dword
+; flag) -> RAX = 1 if the flag was set already (and the entry not added),
+; else 0: on the queue. Preserves others.
+wq_add:
+    push rdi
+    pushfq
+    cli
+    push rdi
+    lea rdi, [rdi + WQ_LOCK]
+    call spin_lock
+    pop rdi
+    mov eax, 1
+    cmp dword [rdx], 0
+    jne .unlock
+    mov rax, [rdi + WQ_HEAD]
+    mov [rsi + EW_NEXT], rax
+    mov [rdi + WQ_HEAD], rsi
+    xor eax, eax
+.unlock:
+    lea rdi, [rdi + WQ_LOCK]
+    call spin_unlock
+    popfq
+    pop rdi
+    ret
+
+; wq_remove(RDI = queue, RSI = an entry) -> RAX = 1 if it was on the queue,
+; else 0. Once it returns, no wake is calling the entry's EW_FN. Preserves
+; others.
+wq_remove:
+    push rcx
+    push rdx
+    push rdi
+    pushfq
+    cli
+    push rdi
+    lea rdi, [rdi + WQ_LOCK]
+    call spin_lock
+    pop rdi
+    lea rcx, [rdi + WQ_HEAD]
+    xor eax, eax
+.find:
+    mov rdx, [rcx]
+    test rdx, rdx
+    jz .done
+    cmp rdx, rsi
+    je .unlink
+    lea rcx, [rdx + EW_NEXT]
+    jmp .find
+.unlink:
+    mov rdx, [rdx + EW_NEXT]
+    mov [rcx], rdx
+    mov eax, 1
+.done:
+    lea rdi, [rdi + WQ_LOCK]
+    call spin_unlock
+    popfq
+    pop rdi
+    pop rdx
+    pop rcx
+    ret
+
+; wq_wake(RDI = queue): every thread waiting on it unparked, every EW_FN
+; called. From anywhere, an interrupt handler too. Preserves all.
 wq_wake:
     push rax
-    push rdi
+    push rcx
+    push rdx
     push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
     pushfq
     cli
     mov rsi, rdi
@@ -307,16 +428,32 @@ wq_wake:
 .wake:
     test rax, rax
     jz .woken
-    mov rdi, [rax + EW_THREAD]
+    mov rdi, rax
     mov rax, [rax + EW_NEXT]            ; before it can go
+    cmp qword [rdi + EW_FN], 0
+    jne .call
+    mov rdi, [rdi + EW_THREAD]
     call thread_unpark
+    jmp .wake
+.call:
+    push rax
+    push rsi
+    call [rdi + EW_FN]
+    pop rsi
+    pop rax
     jmp .wake
 .woken:
     lea rdi, [rsi + WQ_LOCK]
     call spin_unlock
     popfq
-    pop rsi
+    pop r11
+    pop r10
+    pop r9
+    pop r8
     pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
     pop rax
     ret
 
@@ -477,6 +614,78 @@ h_mem_new:
     mov rax, E_NOMEM
 .out:
     jmp op_done
+
+h_mem_copy:
+    push rbx
+    push rbp
+    push r12
+    push r13
+    push r14
+    push r15
+    mov r12, rsi                        ; where in the first
+    mov r13d, edx                       ; the second
+    mov r14, rcx                        ; where in it
+    mov r15, r8                         ; bytes
+    mov esi, OT_MEMORY
+    mov edx, RT_MEM_READ
+    call handle_get
+    cmp rax, E_ANY
+    jae .out
+    mov rbx, rax
+    mov rax, E_RANGE                    ; inside its window
+    sub rcx, r12
+    jb .put_from
+    cmp r15, rcx
+    ja .put_from
+    add r12, rdx                        ; from its first byte
+    mov edi, r13d
+    mov esi, OT_MEMORY
+    mov edx, RT_MEM_WRITE
+    call handle_get
+    cmp rax, E_ANY
+    jae .put_from
+    mov rbp, rax
+    mov rax, E_RANGE
+    sub rcx, r14
+    jb .put_to
+    cmp r15, rcx
+    ja .put_to
+    add r14, rdx
+    mov rsi, [rbx + MO_BASE]
+    add rsi, r12
+    mov rdi, [rbp + MO_BASE]
+    add rdi, r14
+    mov rcx, r15
+    cmp rdi, rsi                        ; overlapping, the end first
+    jbe .forward
+    lea rax, [rsi + rcx]
+    cmp rdi, rax
+    jae .forward
+.backward:
+    test rcx, rcx
+    jz .copied
+    dec rcx
+    mov al, [rsi + rcx]
+    mov [rdi + rcx], al
+    jmp .backward
+.forward:
+    rep movsb
+.copied:
+    mov rax, r15
+.put_to:
+    mov rdi, rbp
+    call obj_put
+.put_from:
+    mov rdi, rbx
+    call obj_put
+.out:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbp
+    pop rbx
+    ret
 
 h_mem_read:
     push rbx
