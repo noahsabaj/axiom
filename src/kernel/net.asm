@@ -243,6 +243,7 @@ net_service:
     call ping_tick
     call tcp_tick
     call tcp_echo_tick
+    call hd_tick
     pop r12
     pop rbx
 .out:

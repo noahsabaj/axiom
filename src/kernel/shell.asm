@@ -560,6 +560,7 @@ commands:
     COMMAND 'http',     cmd_http,     'http [-k] <[https://]host[:port][/path]> [file]: fetch a page; -k: no certificate check'
     COMMAND 'ask',      cmd_ask,      'ask <question>: ask Claude; the conversation goes on'
     COMMAND 'claude',   cmd_claude,   'claude [key <key>|model <name>|server <url> [-k]|new]: settings for ask'
+    COMMAND 'httpd',    cmd_httpd,    'httpd <port>: serve the current volume over HTTP, read only; httpd stop'
     COMMAND 'tcp',      cmd_tcp,      'TCP connections; tcp echo <port>, tcp stop <port>'
     COMMAND 'sockets',  cmd_sockets,  'what programs have open on the network'
     COMMAND 'crypto',   cmd_crypto,   'check the TLS crypto against its test vectors, and time it'

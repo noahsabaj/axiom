@@ -38,7 +38,9 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   It writes to QEMU's test drive alone; any other store is read-only.
 - **Ethernet** on Realtek RTL8111/8168 chips (the Victus's): DHCP, ARP, IPv4,
   ICMP, UDP, DNS and **TCP**. `ping` and `host` work by name, and `http`
-  fetches a web page, over **TLS 1.3** for `https://`, or saves it to a file.
+  fetches a web page over HTTP/1.1 (chunked bodies, the connection kept for
+  the next request), over **TLS 1.3** for `https://`, or saves it to a file;
+  `httpd <port>` serves the current volume, read only, to browsers.
   The server's certificate chain is checked against 136 built-in trusted
   roots, its name and dates too; `http -k` fetches without checking, and
   says so.
@@ -54,7 +56,7 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   every boot; `crypto` repeats the check and times each.
 - A shell over a USB keyboard, a PS/2 keyboard or the serial port. Commands:
   `help info cpus mem threads objects rings run user pci acpi iommu usb disks nvme store vol ls cd cat cp
-  write mkdir rm date net ip dhcp ping host arp http ask claude tcp crypto log demo bench
+  write mkdir rm date net ip dhcp ping host arp http httpd ask claude tcp crypto log demo bench
   uptime echo clear panic reboot poweroff`.
 - **A log on the boot stick**: everything Axiom prints, the commands typed
   and any panic report go into `AXIOM.LOG` on the USB stick it booted from,
@@ -334,7 +336,9 @@ tools/test/             host-side tests for self-contained modules (tls: the
                         server side and its window, through 'tcp echo',
                         from clients on the host; net: sockets for ring
                         3, through NET.AXE, against servers, a DNS
-                        server and clients on the host); all.py runs them
+                        server and clients on the host; http: the HTTP/1.1
+                        client against servers on the host, and httpd
+                        against clients there); all.py runs them
                         all at once, and qemu.py boots side by side
 tools/mkfont.py         rasterize the console font into src/kernel/gen/
 docs/                   vision and architecture

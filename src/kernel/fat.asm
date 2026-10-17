@@ -1008,13 +1008,19 @@ fat_enter:
     clc
     jmp .out
 .missing:
+    cmp byte [fat_hush], 0
+    jne .missing_hushed
     lea rax, [fat_comp]
     KLOG "no directory '%s'", rax
+.missing_hushed:
     stc
     jmp .out
 .not_dir:
+    cmp byte [fat_hush], 0
+    jne .not_dir_hushed
     lea rax, [fat_comp]
     KLOG "'%s' is not a directory", rax
+.not_dir_hushed:
     stc
 .out:
     pop rsi
@@ -1066,7 +1072,10 @@ fat_parent:
     clc
     jmp .out
 .long:
+    cmp byte [fat_hush], 0
+    jne .long_hushed
     KLOG "a name in that path is too long"
+.long_hushed:
     stc
 .out:
     pop rsi
@@ -1089,8 +1098,11 @@ fat_resolve:
     jnc .out
     cmp byte [fat_ioerr], 0
     jne .io
+    cmp byte [fat_hush], 0
+    jne .hushed
     lea rax, [fat_comp]
     KLOG "nothing called '%s' there", rax
+.hushed:
     stc
     jmp .out
 .io:
@@ -2627,6 +2639,7 @@ sc_sec:         resq 1
 sc_dirty:       resb 1
 fat_dirtied:    resb 1                  ; something was written since the last sync
 fat_ioerr:      resb 1
+fat_hush:       resb 1                  ; a path not there is not said (httpd)
 fat_sum:        resb 1
 alignb 8
 de_vol:         resq 1                  ; dir_entry's last walk

@@ -12,8 +12,8 @@
 ;  The conversation is kept in memory (CL_HIST bytes; the oldest exchanges
 ;  go first when it is full) and sent whole each time, as the API wants.
 ;  What comes back is undone in layers, a byte at a time, so that it may
-;  arrive cut anywhere: the HTTP/1.1 headers, the chunks, lines of events,
-;  and each event's JSON (json.asm).
+;  arrive cut anywhere: http.asm takes the HTTP apart (the headers, the
+;  chunks), and here, lines of events and each event's JSON (json.asm).
 ;
 ;  Handlers keep RBX, RBP and R12-R15, as http.asm's clients must. Scratch
 ;  in .bss: main loop only.
@@ -21,7 +21,6 @@
 
 CL_HIST         equ 80 * 1024           ; the conversation: [role][u32 bytes][UTF-8]...
 CL_BODY         equ 100 * 1024          ; the request's JSON
-CL_HEAD         equ 8192                ; the answer's headers
 CL_LINE         equ 65536               ; one line of events
 CL_ERR          equ 16384               ; an answer that is not events
 CL_TEXT         equ 65536               ; one piece of the answer, decoded
@@ -38,13 +37,6 @@ CR_ASSISTANT    equ 2
 CP_HEAD         equ 0
 CP_BODY         equ 1
 CP_DONE         equ 2
-
-; and in the chunks
-CK_SIZE         equ 0
-CK_EXT          equ 1
-CK_DATA         equ 2
-CK_CRLF         equ 3
-CK_TRAILER      equ 4
 
 section .text
 
@@ -649,10 +641,10 @@ cl_request:
     mov ecx, [http_port]
     cmp ecx, [http_defport]
     jne .port
-    SPRINTF cl_req, `POST %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: Axiom/0.1\r\nx-api-key: %s\r\nanthropic-version: 2023-06-01\r\ncontent-type: application/json\r\naccept: text/event-stream\r\ncontent-length: %u\r\nConnection: close\r\n\r\n`, rsi, rdx, r8, r9
+    SPRINTF cl_req, `POST %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: Axiom/0.1\r\nx-api-key: %s\r\nanthropic-version: 2023-06-01\r\ncontent-type: application/json\r\naccept: text/event-stream\r\ncontent-length: %u\r\n\r\n`, rsi, rdx, r8, r9
     jmp .body
 .port:
-    SPRINTF cl_req, `POST %s HTTP/1.1\r\nHost: %s:%u\r\nUser-Agent: Axiom/0.1\r\nx-api-key: %s\r\nanthropic-version: 2023-06-01\r\ncontent-type: application/json\r\naccept: text/event-stream\r\ncontent-length: %u\r\nConnection: close\r\n\r\n`, rsi, rdx, rcx, r8, r9
+    SPRINTF cl_req, `POST %s HTTP/1.1\r\nHost: %s:%u\r\nUser-Agent: Axiom/0.1\r\nx-api-key: %s\r\nanthropic-version: 2023-06-01\r\ncontent-type: application/json\r\naccept: text/event-stream\r\ncontent-length: %u\r\n\r\n`, rsi, rdx, rcx, r8, r9
 .body:
     mov [cl_reqhead], rax
     lea rdi, [cl_req]
@@ -664,26 +656,37 @@ cl_request:
     lea rdx, [rax + r9]
     ret
 
-; cl_data(RSI = bytes of the answer, EDX = how many)
+; cl_head(EAX = the status, RSI = the headers): events, if all is well
+cl_head:
+    mov [cl_status], eax
+    mov byte [cl_phase], CP_BODY
+    cmp eax, 200
+    jne .out                            ; an error, in JSON: kept whole
+    lea rdi, [str_h_type]
+    call http_header
+    jc .out
+    lea rdi, [str_cl_events]
+    call http_line_has
+    jc .out
+    mov byte [cl_sse], 1
+.out:
+    ret
+
+; cl_data(RSI = bytes of the body, EDX = how many)
 cl_data:
     push rbx
     mov ebx, edx
 .next:
     test ebx, ebx
     jz .end
-    cmp byte [cl_phase], CP_DONE
-    je .end
+    cmp byte [cl_phase], CP_BODY
+    jne .end
     lodsb
     dec ebx
-    call cl_byte
+    call cl_content
     jmp .next
 .end:
     call cl_view_flush
-    cmp byte [cl_phase], CP_DONE
-    jne .out
-    call http_hangup                    ; all there: no need to wait for the close
-    call cl_finish
-.out:
     pop rbx
     ret
 
@@ -704,22 +707,19 @@ cl_end_text:
 .out:
     ret
 
-; cl_done: the server closed
+; cl_done(EAX = 0 if the body is whole): the answer has ended
 cl_done:
+    push rax
     call cl_end_text
+    pop rax
     cmp byte [cl_phase], CP_DONE
     je cl_finish
-    cmp byte [cl_phase], CP_HEAD
-    jne .body
-    KLOG "ask: the server closed without answering"
-    mov byte [cl_failed], 1
-    jmp cl_finish
-.body:
     cmp byte [cl_sse], 0
-    jne .cut
-    call cl_body_end                    ; an answer that ends at the close
+    jne .events
+    call cl_body_end                    ; an error, in JSON
     jmp cl_finish
-.cut:
+.events:
+    call cl_body_end                    ; (a last line with no end)
     cmp byte [cl_complete], 0
     jne cl_finish
     mov byte [cl_failed], 1
@@ -787,255 +787,8 @@ cl_finish:
     jmp shell_resume
 
 ; -----------------------------------------------------------------------------
-;  The answer, a byte at a time (AL). Keep RBX, RSI.
+;  The body, a byte at a time (AL). Keep RBX, RSI.
 ; -----------------------------------------------------------------------------
-
-cl_byte:
-    cmp byte [cl_phase], CP_HEAD
-    je cl_head_byte
-    cmp byte [cl_phase], CP_BODY
-    je cl_body_byte
-    ret
-
-cl_head_byte:
-    mov rcx, [cl_hdlen]
-    cmp rcx, CL_HEAD - 1
-    jae .too_long
-    lea rdx, [cl_head]
-    mov [rdx + rcx], al
-    inc rcx
-    mov [cl_hdlen], rcx
-    cmp al, 10
-    jne .out
-    cmp rcx, 2                          ; LF LF, or LF CR LF: the end
-    jb .out
-    cmp byte [rdx + rcx - 2], 10
-    je cl_headers
-    cmp rcx, 3
-    jb .out
-    cmp byte [rdx + rcx - 2], 13
-    jne .out
-    cmp byte [rdx + rcx - 3], 10
-    je cl_headers
-.out:
-    ret
-.too_long:
-    KLOG "ask: the answer's headers do not end"
-    mov byte [cl_failed], 1
-    mov byte [cl_phase], CP_DONE
-    ret
-
-; cl_headers: the status, and how the body comes
-cl_headers:
-    push rsi
-    lea rsi, [cl_head]
-    mov rdx, [cl_hdlen]
-    mov byte [rsi + rdx], 0
-    lea rdi, [str_cl_http1]
-    call http_prefix
-    jc .not_http
-.version:                               ; HTTP/1.x NNN
-    mov al, [rsi]
-    cmp al, ' '
-    je .status
-    cmp al, 10
-    jbe .not_http
-    inc rsi
-    jmp .version
-.status:
-    inc rsi
-    xor eax, eax
-    mov ecx, 3
-.digit:
-    movzx edx, byte [rsi]
-    sub edx, '0'
-    cmp edx, 9
-    ja .not_http
-    imul eax, eax, 10
-    add eax, edx
-    inc rsi
-    dec ecx
-    jnz .digit
-    mov [cl_status], eax
-.line:                                  ; each header line
-    mov al, [rsi]
-    test al, al
-    jz .end
-    inc rsi
-    cmp al, 10
-    jne .line
-    lea rdi, [str_cl_h_te]
-    call http_prefix
-    jc .type
-    lea rdi, [str_cl_chunked]
-    call cl_line_has
-    jc .line
-    mov byte [cl_chunked], 1
-    jmp .line
-.type:
-    lea rdi, [str_h_type]
-    call http_prefix
-    jc .length
-    lea rdi, [str_cl_events]
-    call cl_line_has
-    jc .line
-    mov byte [cl_sse], 1
-    jmp .line
-.length:
-    lea rdi, [str_cl_h_len]
-    call http_prefix
-    jc .line
-.space:
-    cmp byte [rsi], ' '
-    jne .number
-    inc rsi
-    jmp .space
-.number:
-    xor eax, eax
-.ldigit:
-    movzx edx, byte [rsi]
-    sub edx, '0'
-    cmp edx, 9
-    ja .length_end
-    imul rax, rax, 10
-    add rax, rdx
-    inc rsi
-    jmp .ldigit
-.length_end:
-    mov [cl_clen], rax
-    jmp .line
-.end:
-    cmp dword [cl_status], 200
-    je .ok
-    mov byte [cl_sse], 0                ; an error, in JSON: kept whole
-.ok:
-    mov byte [cl_phase], CP_BODY
-    cmp byte [cl_chunked], 0
-    jne .out
-    cmp qword [cl_clen], 0
-    jne .out
-    call cl_body_end                    ; Content-Length: 0
-    jmp .out
-.not_http:
-    KLOG "ask: the server does not answer in HTTP"
-    mov byte [cl_failed], 1
-    mov byte [cl_phase], CP_DONE
-.out:
-    pop rsi
-    ret
-
-; cl_line_has(RSI = in a line, RDI = lowercase text) -> CF unless the text
-; is in the rest of the line, in any case. Preserves all.
-cl_line_has:
-    push rsi
-.at:
-    mov al, [rsi]
-    test al, al
-    jz .no
-    cmp al, 10
-    je .no
-    call http_prefix
-    jnc .yes
-    inc rsi
-    jmp .at
-.yes:
-    pop rsi
-    clc
-    ret
-.no:
-    pop rsi
-    stc
-    ret
-
-cl_body_byte:
-    cmp byte [cl_chunked], 0
-    jne .chunked
-    call cl_content
-    inc qword [cl_got]
-    mov rax, [cl_got]
-    cmp rax, [cl_clen]                  ; (-1 when none was given)
-    jae cl_body_end
-    ret
-.chunked:
-    movzx ecx, byte [cl_ck]
-    cmp ecx, CK_DATA
-    je .data
-    cmp ecx, CK_SIZE
-    je .size
-    cmp ecx, CK_EXT
-    je .ext
-    cmp ecx, CK_CRLF
-    je .crlf
-    cmp al, 10                          ; CK_TRAILER: up to an empty line
-    je .trailer_line
-    cmp al, 13
-    je .out
-    inc dword [cl_trail]
-    ret
-.trailer_line:
-    cmp dword [cl_trail], 0
-    je cl_body_end
-    mov dword [cl_trail], 0
-    ret
-.size:
-    cmp al, 10
-    je .size_end
-    cmp al, 13
-    je .out
-    cmp al, ';'
-    je .to_ext
-    cmp al, ' '
-    je .to_ext
-    movzx edx, al
-    or edx, 0x20
-    sub edx, '0'
-    cmp edx, 9
-    jbe .hex
-    sub edx, 'a' - '0'
-    cmp edx, 5
-    ja .broken
-    add edx, 10
-.hex:
-    mov rax, [cl_cksize]
-    shr rax, 28                         ; a chunk over 4 GiB: not real
-    jnz .broken
-    mov rax, [cl_cksize]
-    shl rax, 4
-    or rax, rdx
-    mov [cl_cksize], rax
-    ret
-.to_ext:
-    mov byte [cl_ck], CK_EXT
-    ret
-.ext:
-    cmp al, 10
-    jne .out
-.size_end:
-    cmp qword [cl_cksize], 0
-    je .last
-    mov byte [cl_ck], CK_DATA
-    ret
-.last:
-    mov byte [cl_ck], CK_TRAILER
-    mov dword [cl_trail], 0
-    ret
-.data:
-    call cl_content
-    dec qword [cl_cksize]
-    jnz .out
-    mov byte [cl_ck], CK_CRLF
-    ret
-.crlf:
-    cmp al, 10
-    jne .out
-    mov byte [cl_ck], CK_SIZE
-    ret
-.broken:
-    KLOG "ask: the answer's chunks are broken"
-    mov byte [cl_failed], 1
-    mov byte [cl_phase], CP_DONE
-.out:
-    ret
 
 ; cl_body_end: the body is all there
 cl_body_end:
@@ -1254,7 +1007,7 @@ cl_error:
     KLOG "ask: the API key was refused ('claude key <key>' sets another)"
     jmp .out
 .raw:
-    lea rdi, [cl_head]                  ; the status line, and the start of the body
+    lea rdi, [http_head]                ; the status line, and the start of the body
     xor eax, eax
 .status_line:
     cmp byte [rdi + rax], 13
@@ -1505,7 +1258,6 @@ cl_reset:
     mov ecx, cl_state_end - cl_state
     xor eax, eax
     rep stosb
-    mov qword [cl_clen], -1
     RDTSC64
     mov [cl_t0], rax
     pop rcx
@@ -1525,10 +1277,6 @@ str_cl_default:     db 'https://api.anthropic.com', 0
 str_cl_path:        db '/v1/messages', 0
 str_cl_keyname:     db 'CLAUDE.KEY', 0
 str_cl_keypath:     db '/CLAUDE.KEY', 0
-str_cl_http1:       db 'http/1.', 0
-str_cl_h_te:        db 'transfer-encoding:', 0
-str_cl_h_len:       db 'content-length:', 0
-str_cl_chunked:     db 'chunked', 0
 str_cl_events:      db 'text/event-stream', 0
 str_cl_data:        db 'data:', 0
 str_cl_type:        db 'type', 0
@@ -1565,7 +1313,7 @@ str_cl_system:      db "You are Claude, talking with the user through Axiom, a s
                     db "scroll back, so keep answers short unless asked for more.", 0
 
 align 8
-cl_client:          dq cl_request, cl_data, cl_done, cl_lost
+cl_client:          dq cl_request, cl_head, cl_data, cl_done, cl_lost
 
 section .data
 cl_model:           db 'claude-opus-5-5', 0
@@ -1577,10 +1325,6 @@ section .bss
 alignb 8
 cl_state:                               ; zeroed for each answer
 cl_t0:              resq 1
-cl_hdlen:           resq 1
-cl_clen:            resq 1              ; Content-Length, -1 for none
-cl_got:             resq 1
-cl_cksize:          resq 1
 cl_linelen:         resq 1
 cl_errlen:          resq 1
 cl_rlen:            resq 1
@@ -1591,11 +1335,8 @@ cl_vcol:            resq 1
 cl_vlen:            resq 1
 cl_u8:              resq 1              ; utf8_step's
 cl_status:          resd 1
-cl_trail:           resd 1
 cl_wlen:            resd 1
 cl_phase:           resb 1
-cl_ck:              resb 1
-cl_chunked:         resb 1
 cl_sse:             resb 1
 cl_spoke:           resb 1
 cl_complete:        resb 1
@@ -1619,7 +1360,6 @@ cl_emsg:            resb 408
 cl_word:            resb CL_WORD
 cl_logline:         resb CL_LOGLINE + 8
 cl_view:            resb CL_VIEW
-cl_head:            resb CL_HEAD
 cl_err:             resb CL_ERR + 8
 cl_line:            resb CL_LINE
 cl_text:            resb CL_TEXT

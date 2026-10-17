@@ -745,18 +745,46 @@ off. `log` shows the state; `log save`, `log on`, `log off`.
   window, and listeners; `tcp echo <port>` sends back whatever comes to that
   port, through a 16 KiB window, consuming only what TCP's send buffer has
   taken (`tcp stop <port>` ends it).
-- **HTTP** (`http.asm`): one request at a time for a client, a table of
-  four handlers (the request, data, done, lost), so that `http` and `ask`
-  share the connection, TLS and failure handling. `http_hangup` lets a
-  client close as soon as it has what it wants. `http <host[:port][/path]>
-  [file]` is its own client: one GET over HTTP/1.0 (so no chunks, and the
-  server's close ends the body).
-  Up to 1 MiB of the answer is kept; then the status line, `Content-Type`
-  and `Location`, and the first 20 lines of the body, or the body goes to a
-  file on the current volume. `https://` goes over `tls.asm` (below), port
-  443 unless given: the TCP handlers pass bytes to `tls_input`, and the TLS
-  handlers hand the plaintext to the same code. A TCP FIN without a
-  close_notify first is reported (the answer may be cut short).
+- **HTTP** (`http.asm`): HTTP/1.1, one request at a time for a client, a
+  table of five handlers (the request, the headers, data, done, lost), so
+  that `http` and `ask` share the connection, TLS, failure handling and the
+  taking apart of the answer, a byte at a time so that it may arrive cut
+  anywhere: the status line and headers (8 KiB at most; 1xx answers passed
+  over), then a body of `Content-Length` bytes, in chunks (extensions and
+  trailers passed over), or up to the close, as the headers say, none
+  after 204 and 304. Done says whether the body was whole. When it is and
+  the server allows (HTTP/1.1 unless `Connection: close`; 1.0 only with
+  `keep-alive`, and never for a body ended by the close), the connection
+  is kept, one at most, for 30 s: the next request to the same host, port
+  and scheme goes on it with no new handshake, and a kept one that closes
+  meanwhile is forgotten. If it closes just as it is used, before anything
+  comes back, the request goes again, once, on a new connection.
+  `http_hangup` lets a client close as soon as it has what it wants.
+  `http <host[:port][/path]> [file]` is its own client: a GET. Up to 1 MiB
+  of the answer is kept; then the status line, `Content-Type`, `Location`
+  and `Transfer-Encoding`, and the first 20 lines of the body, or the body
+  goes to a file on the current volume. `https://` goes over `tls.asm`
+  (below), port 443 unless given: the TCP handlers pass bytes to
+  `tls_input`, and the TLS handlers hand the plaintext to the same code. A
+  TCP FIN without a close_notify first is reported when the close is what
+  ends the body (it may be cut short).
+- **Server** (`httpd.asm`): `httpd <port>` serves the current volume, read
+  only, until `httpd stop`; `httpd` says what it has done. GET and HEAD; a
+  file with its length and a type from its extension, read whole into
+  memory first (8 MiB at most, the main loop waiting on the drive); a
+  directory with its `index.html`, or a listing of it in HTML, and one
+  asked for without its last `/` is sent there first (301), so the
+  listing's links work. Paths have `%XX` undone and may not climb out with
+  `..`. Connections are kept as HTTP/1.1 has them (1.0 only with
+  `keep-alive`), closed after 30 s unused; requests sent together are
+  answered in order. Each connection's requests come through a window of
+  4 KiB (`tcp_flow`), consumed as they are answered, so a client cannot
+  send faster than it is served; a request's body is passed over (405 for
+  any method but GET and HEAD). Answers go out as TCP's send buffer takes
+  them, the rest after each round of the network (`hd_tick`). Bad
+  requests get 400, 414, 431, 501 (a body in chunks) or 505, and the
+  connection is closed. Every request is logged: who, what, the status and
+  the body's size.
 - **Sockets** (`socket.asm`): the network for ring 3, by capability. `run`
   gives each program one on the whole network (`OT_NET`, `SB_NET`);
   `RO_NET_SUB` makes narrower ones, on a host, every host under a name
@@ -783,7 +811,7 @@ off. `log` shows the state; `log save`, `log on`, `log off`.
   copying without it. `sockets` lists them. NET.AXE (`src/user/net.asm`)
   is a client and server for it: `net get`, `net echo`, `net serve`, and
   `net test` (41 checks).
-- Shell: `net`, `ip`, `dhcp`, `ping`, `host`, `arp`, `tcp`, `http`, `sockets`.
+- Shell: `net`, `ip`, `dhcp`, `ping`, `host`, `arp`, `tcp`, `http`, `httpd`, `sockets`.
 - Tested in QEMU with `tools/run.py --nic rtl8139`: DHCP, ping and DNS
   through QEMU's user network, and two Axiom VMs joined by a socket pinging
   each other, with every frame's checksums checked in the dump
@@ -804,6 +832,17 @@ off. `log` shows the state; `log save`, `log on`, `log off`.
   eight connections echoing 200 KB each at once, four TLS sessions 100 KB
   each, eight by name through a DNS server of its own and a name that does
   not exist, three clients for `net serve`, and no socket left at the end.
+  `tools/test/http/run.py` runs `http` against servers on the host: bodies
+  by length, in chunks of random sizes sent in random pieces, up to the
+  close, none, after a 100 Continue; the connection kept and used again
+  (over TLS too), the retry when a kept one closes as it is used, a server
+  saying `Connection: close`, one closing while idle, a body cut short,
+  broken chunks; each body saved on the stick and compared afterwards, the
+  host counting which requests came on which connection. Then `httpd`
+  against clients on the host: files compared with `build/esp`, HEAD, 404,
+  301, a listing, an `index.html`, `%20`, a POST passed over on a
+  connection that goes on, three requests sent together, HTTP/1.0 closed
+  or kept, five kinds of bad request, eight clients at once.
   The RTL8168 code paths (G-family takeover, PHY, MSI) run only on
   real hardware. Not yet: IPv6, other NICs.
 
@@ -936,22 +975,23 @@ A TLS 1.3 client (RFC 8446) and the crypto under it.
 
 `ask <question>` talks to Claude through the Messages API.
 
-- **The request**: `POST /v1/messages` over HTTP/1.1 with `x-api-key`,
-  `anthropic-version: 2023-06-01` and `Connection: close`; the JSON body
+- **The request**: `POST /v1/messages` over HTTP/1.1 with `x-api-key` and
+  `anthropic-version: 2023-06-01`, on the connection kept from the last
+  question when there is one (no new TLS handshake); the JSON body
   holds the model (`claude-opus-5-5` unless `claude model` says otherwise),
   `max_tokens` 4096, `stream: true`, a system prompt saying the console shows
   plain text only, and the whole conversation, which is kept in memory (80
   KiB, the oldest exchanges dropped first) and sent each time. A question
   that gets no answer leaves it again; a partial answer stays.
 - **The answer** is undone a byte at a time, so it may arrive cut anywhere:
-  the headers (status, `Transfer-Encoding: chunked`, `Content-Type:
-  text/event-stream`, `Content-Length`), the chunks, lines of server-sent
-  events, and each event's JSON. `content_block_delta` text is shown as it
-  comes; thinking and other blocks are not; `message_start` and
-  `message_delta` give the token counts and the stop reason; at
-  `message_stop` Axiom hangs up without waiting for the server's close. An
-  `error` event, or a body that is not events (401, 400, 529...), is said
-  with the API's own message.
+  `http.asm` takes the HTTP apart (the status, headers and chunks); here,
+  `Content-Type: text/event-stream` with a 200 says events come, then
+  lines of server-sent events, and each event's JSON. `content_block_delta`
+  text is shown as it comes; thinking and other blocks are not;
+  `message_start` and `message_delta` give the token counts and the stop
+  reason, `message_stop` the end. An `error` event, or a body that is not
+  events (401, 400, 529...), is said with the API's own message; a body
+  that ends before `message_stop` is said to be cut short.
 - **On the screen** the answer is wrapped at word boundaries, tracking the
   console's column; its UTF-8 is decoded (`text.asm`) and each code point
   drawn as the font has it (ASCII, or one of its 39 symbols: bullets,
