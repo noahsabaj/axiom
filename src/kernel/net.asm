@@ -246,7 +246,7 @@ net_service:
     pop r12
     pop rbx
 .out:
-    ret
+    jmp sk_tick                         ; programs' sockets, interface or not
 
 ; net_deadline(RAX = a TSC deadline) -> RAX = the earlier of it and the next
 ; thing the network has to do. Called with interrupts off. Preserves others.
@@ -1061,8 +1061,8 @@ udp_input:
     sub ecx, 8
     cmp eax, 68
     je dhcp_input
-    cmp eax, [dns_port]
-    je dns_input
+    cmp eax, 49152                      ; where DNS questions go from
+    jae dns_input
 .out:
     ret
 

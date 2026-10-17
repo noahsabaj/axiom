@@ -22,6 +22,29 @@ DHCP_TRIES      equ 5
 DHCP_MAX_LEASE  equ 30 * 86400          ; longer leases are renewed sooner
 
 DNS_TRIES       equ 3
+DNS_SLOTS       equ 8                   ; lookups at once
+
+; a lookup
+DQ_STATE        equ 0                   ; dword: 1 while its question is out
+DQ_THEN         equ 4                   ; dword: 0 print, 1 ping, 2 http, DQ_SOCKET
+DQ_USER         equ 8                   ; the socket, for DQ_SOCKET
+DQ_NEXT         equ 16                  ; TSC: ask again, or give up
+DQ_TRIES        equ 24                  ; dword
+DQ_SERVER       equ 28                  ; dword: whom it asked
+DQ_PORT         equ 32                  ; dword: from which port
+DQ_ID           equ 36                  ; word
+DQ_NAME         equ 40                  ; NUL-ended
+DQ_SIZE         equ 296
+DQ_SOCKET       equ 3
+
+; why a lookup ended without an address
+DNS_NOSERVER    equ 1                   ; no DNS server is known
+DNS_BADNAME     equ 2                   ; not a host name
+DNS_BUSY        equ 3                   ; too many lookups at once
+DNS_NOHOST      equ 4                   ; no such name
+DNS_NOADDR      equ 5                   ; it has no IPv4 address
+DNS_REFUSED     equ 6                   ; the server could not answer
+DNS_NOANSWER    equ 7                   ; no answer from the server
 PING_DATA       equ 56                  ; bytes after the ICMP header
 
 section .text
@@ -36,11 +59,20 @@ net_link_up:
 
 ; net_cancel: ctrl+C at the prompt. Preserves all.
 net_cancel:
-    cmp dword [dns_state], 0
-    je .ping
-    mov dword [dns_state], 0
-    mov qword [dns_next], 0
+    push rbx
+    push rcx
+    lea rbx, [dns_slots]                ; the shell's lookup
+    mov ecx, DNS_SLOTS
+.slot:
+    cmp dword [rbx + DQ_STATE], 0
+    je .next
+    cmp dword [rbx + DQ_THEN], DQ_SOCKET
+    je .next
+    mov dword [rbx + DQ_STATE], 0
+    call dns_arm
     KLOG "host: stopped"
+    cmp dword [rbx + DQ_THEN], 2
+    jne .next
     push rax
     push rcx
     push rdx
@@ -50,7 +82,7 @@ net_cancel:
     push r9
     push r10
     push r11
-    call dns_failed
+    call http_dns_failed
     pop r11
     pop r10
     pop r9
@@ -60,19 +92,14 @@ net_cancel:
     pop rdx
     pop rcx
     pop rax
-.ping:
+.next:
+    add rbx, DQ_SIZE
+    dec ecx
+    jnz .slot
+    pop rcx
+    pop rbx
     call http_cancel
     jmp ping_end
-
-; dns_failed: the lookup ended without an address (said why); whoever was
-; waiting for it hears so
-dns_failed:
-    cmp dword [dns_then], 2
-    jne .out
-    mov dword [dns_then], 0
-    jmp http_dns_failed
-.out:
-    ret
 
 ; -----------------------------------------------------------------------------
 ;  DHCP
@@ -490,24 +517,38 @@ dhcp_tick:
     jmp dhcp_start
 
 ; -----------------------------------------------------------------------------
-;  DNS: one A lookup at a time
+;  DNS: A lookups, DNS_SLOTS at once, each from a port and with an id of
+;  its own, the answer taken only from the server asked. The shell's
+;  (DQ_THEN 0 print the address, 1 ping it, 2 fetch from it) one at a time,
+;  a new one in place of the last; a socket's (DQ_SOCKET) its own, the
+;  answer to sock_dns_done(RDI = the socket, EAX = the address) or
+;  sock_dns_failed(RDI, ESI = why: DNS_*)
 ; -----------------------------------------------------------------------------
 
-; dns_lookup(RSI = name, EDX = 0 print the address, 1 ping it, 2 fetch from
-; it over HTTP). Says why if it cannot start.
+; dns_lookup(RSI = name, EDX = DQ_THEN, RCX = the socket for DQ_SOCKET) ->
+; CF if it cannot start, EAX = why (DNS_NOSERVER, DNS_BADNAME, DNS_BUSY);
+; the shell's say so. Preserves others.
 dns_lookup:
+    push rbx
     push rcx
     push rdx
     push rsi
     push rdi
     push r8
+    push r9
     mov r8, rsi
+    mov r9d, edx
+    mov eax, DNS_NOSERVER
+    cmp dword [net_dns], 0
+    je .refused
+    call dns_slot                       ; RBX = where it goes
+    mov eax, DNS_BUSY
+    jc .refused
+    mov [rbx + DQ_THEN], r9d
+    mov [rbx + DQ_USER], rcx
     mov eax, [net_dns]
-    test eax, eax
-    jz .no_server
-    mov [dns_server], eax
-    mov [dns_then], edx
-    lea rdi, [dns_name]                 ; letters, digits, '-' and '_' in
+    mov [rbx + DQ_SERVER], eax
+    lea rdi, [rbx + DQ_NAME]            ; letters, digits, '-' and '_' in
     xor ecx, ecx                        ; labels of 63 at most, 253 in all
     xor edx, edx
 .char:
@@ -550,43 +591,147 @@ dns_lookup:
     jz .bad
     mov byte [rdi], 0
     call net_random
-    mov [dns_id], ax
+    mov [rbx + DQ_ID], ax
     shr eax, 16
     and eax, 0x3FFF
-    add eax, 49152                      ; a port of our own
-    mov [dns_port], eax
-    mov dword [dns_tries], 1
-    mov dword [dns_state], 1
+    add eax, 49152                      ; a port of its own
+    mov [rbx + DQ_PORT], eax
+    mov dword [rbx + DQ_TRIES], 1
+    mov dword [rbx + DQ_STATE], 1
     call dns_send
     call net_clock
     add rax, [net_second]
     add rax, [net_second]
-    mov [dns_next], rax
+    mov [rbx + DQ_NEXT], rax
+    call dns_arm
     clc
     jmp .out
-.no_server:
-    KLOG "host: no DNS server (DHCP named none; 'ip' can set one)"
-    stc
-    jmp .out
 .bad:
+    mov dword [rbx + DQ_STATE], 0       ; (a shell's in its place is gone too)
+    call dns_arm
+    mov eax, DNS_BADNAME
+.refused:
+    cmp r9d, DQ_SOCKET
+    je .failed
+    push rax
+    cmp eax, DNS_NOSERVER
+    jne .not_server
+    KLOG "host: no DNS server (DHCP named none; 'ip' can set one)"
+    jmp .said
+.not_server:
+    cmp eax, DNS_BADNAME
+    jne .busy
     KLOG "host: '%s' is not a host name", r8
+    jmp .said
+.busy:
+    KLOG "host: too many lookups at once"
+.said:
+    pop rax
+.failed:
     stc
 .out:
+    pop r9
     pop r8
     pop rdi
     pop rsi
     pop rdx
     pop rcx
+    pop rbx
     ret
 
-; dns_send: the question, to the server. Preserves all but RAX.
+; dns_slot(EDX = DQ_THEN) -> RBX = a slot for it: the shell's where its last
+; is, if that is still out; else a free one. CF if none. Preserves others.
+dns_slot:
+    push rcx
+    lea rbx, [dns_slots]
+    mov ecx, DNS_SLOTS
+    cmp edx, DQ_SOCKET
+    je .free
+.shell:
+    cmp dword [rbx + DQ_STATE], 0
+    je .shell_next
+    cmp dword [rbx + DQ_THEN], DQ_SOCKET
+    jb .found
+.shell_next:
+    add rbx, DQ_SIZE
+    dec ecx
+    jnz .shell
+    lea rbx, [dns_slots]
+    mov ecx, DNS_SLOTS
+.free:
+    cmp dword [rbx + DQ_STATE], 0
+    je .found
+    add rbx, DQ_SIZE
+    dec ecx
+    jnz .free
+    pop rcx
+    stc
+    ret
+.found:
+    pop rcx
+    clc
+    ret
+
+; dns_arm: dns_next, the soonest of the slots' next tries, or 0 if none is
+; out. Preserves all.
+dns_arm:
+    push rax
+    push rcx
+    push rdx
+    lea rax, [dns_slots]
+    mov ecx, DNS_SLOTS
+    xor edx, edx
+.slot:
+    cmp dword [rax + DQ_STATE], 0
+    je .next
+    test rdx, rdx
+    jz .take
+    cmp [rax + DQ_NEXT], rdx
+    jae .next
+.take:
+    mov rdx, [rax + DQ_NEXT]
+.next:
+    add rax, DQ_SIZE
+    dec ecx
+    jnz .slot
+    mov [dns_next], rdx
+    pop rdx
+    pop rcx
+    pop rax
+    ret
+
+; dns_forget(RDI = a socket): its lookup, if one is out, forgotten without a
+; word. Preserves all.
+dns_forget:
+    push rax
+    push rcx
+    lea rax, [dns_slots]
+    mov ecx, DNS_SLOTS
+.slot:
+    cmp dword [rax + DQ_STATE], 0
+    je .next
+    cmp dword [rax + DQ_THEN], DQ_SOCKET
+    jne .next
+    cmp [rax + DQ_USER], rdi
+    jne .next
+    mov dword [rax + DQ_STATE], 0
+.next:
+    add rax, DQ_SIZE
+    dec ecx
+    jnz .slot
+    call dns_arm
+    pop rcx
+    pop rax
+    ret
+
+; dns_send(RBX = a slot): its question, to its server. Preserves all but RAX.
 dns_send:
     push rcx
     push rdx
     push rsi
     push rdi
     lea rdi, [net_frame + UDP_PAYLOAD]
-    mov ax, [dns_id]
+    mov ax, [rbx + DQ_ID]
     mov [rdi], ax
     mov word [rdi + 2], 0x0001          ; recursion desired
     mov word [rdi + 4], 0x0100          ; one question
@@ -594,7 +739,7 @@ dns_send:
     mov [rdi + 6], eax                  ; no answers, authorities, additions
     mov [rdi + 10], ax
     add rdi, 12
-    lea rsi, [dns_name]
+    lea rsi, [rbx + DQ_NAME]
 .label:
     mov rdx, rdi                        ; its length goes here
     inc rdi
@@ -622,8 +767,8 @@ dns_send:
     lea rax, [net_frame + UDP_PAYLOAD]
     sub rdi, rax
     mov ecx, edi
-    mov edi, [dns_server]
-    mov esi, [dns_port]
+    mov edi, [rbx + DQ_SERVER]
+    mov esi, [rbx + DQ_PORT]
     mov edx, 53
     call udp_send
     pop rdi
@@ -632,32 +777,49 @@ dns_send:
     pop rcx
     ret
 
-; dns_input(RBX, RSI = message, ECX = bytes, EDX = sender): from udp_input
+; dns_input(RBX, RSI = message, ECX = bytes, EDX = sender, EAX = the port it
+; came to): from udp_input, for every port a question may have gone from
 dns_input:
-    cmp dword [dns_state], 0
-    je .out
     cmp ecx, 12
     jb .out
-    mov ax, [rsi]
-    cmp ax, [dns_id]
-    jne .out
-    test byte [rsi + 2], 0x80           ; an answer
-    jz .out
+    push rbx
     push r12
     push r13
+    lea rbx, [dns_slots]                ; whose answer
+    mov r8d, DNS_SLOTS
+.find:
+    cmp dword [rbx + DQ_STATE], 0
+    je .next
+    cmp [rbx + DQ_PORT], eax
+    jne .next
+    cmp [rbx + DQ_SERVER], edx
+    jne .next
+    mov r9w, [rsi]
+    cmp r9w, [rbx + DQ_ID]
+    je .found
+.next:
+    add rbx, DQ_SIZE
+    dec r8d
+    jnz .find
+    jmp .done
+.found:
+    test byte [rsi + 2], 0x80           ; an answer
+    jz .done
     lea r12, [rsi + rcx]                ; the end
     mov r13, rsi
-    mov dword [dns_state], 0
-    mov qword [dns_next], 0
-    movzx eax, byte [rsi + 3]
+    mov dword [rbx + DQ_STATE], 0
+    call dns_arm
+    movzx eax, byte [r13 + 3]
     and eax, 15
+    mov esi, DNS_NOHOST
     cmp eax, 3
-    je .nxdomain
+    je .failed
+    mov esi, DNS_REFUSED
     test eax, eax
     jnz .failed
-    movzx ecx, word [rsi + 4]           ; the questions, repeated
+    movzx ecx, word [r13 + 4]           ; the questions, repeated
     xchg cl, ch
-    lea rdi, [rsi + 12]
+    lea rdi, [r13 + 12]
 .question:
     test ecx, ecx
     jz .answers
@@ -687,27 +849,20 @@ dns_input:
     cmp edx, 4
     jne .skip
     mov eax, [rdi + 10]
-    pop r13
-    pop r12
-    jmp dns_done
+    call dns_done
+    jmp .done
 .skip:
     lea rdi, [rdi + rdx + 10]
     dec ecx
     jmp .answer
-.nxdomain:
-    lea rax, [dns_name]
-    KLOG "host: %s does not exist", rax
-    jmp .end
-.failed:
-    KLOG "host: the DNS server could not answer (code %u)", rax
-    jmp .end
 .none:
-    lea rax, [dns_name]
-    KLOG "host: %s has no IPv4 address", rax
-.end:
+    mov esi, DNS_NOADDR
+.failed:
+    call dns_failed                     ; EAX = the server's code
+.done:
     pop r13
     pop r12
-    jmp dns_failed
+    pop rbx
 .out:
     ret
 
@@ -744,37 +899,90 @@ dns_skip_name:
     pop rax
     ret
 
-; dns_done(EAX = the address found)
+; dns_done(RBX = the slot, its lookup over; EAX = the address found)
 dns_done:
-    cmp dword [dns_then], 1
+    mov ecx, [rbx + DQ_THEN]
+    cmp ecx, DQ_SOCKET
+    je .socket
+    cmp ecx, 1
     je ping_begin
-    cmp dword [dns_then], 2
+    cmp ecx, 2
     je http_begin
-    lea rdx, [dns_name]
+    lea rdx, [rbx + DQ_NAME]
     KLOG "%s is %I", rdx, rax
     ret
+.socket:
+    mov rdi, [rbx + DQ_USER]
+    jmp sock_dns_done
 
-; dns_tick: ask again every 2 s, three times
+; dns_failed(RBX = the slot, its lookup over; ESI = why, DNS_*; EAX = the
+; server's code for DNS_REFUSED): the shell's say so; whoever waited hears
+dns_failed:
+    cmp dword [rbx + DQ_THEN], DQ_SOCKET
+    je .socket
+    lea rdx, [rbx + DQ_NAME]
+    cmp esi, DNS_NOHOST
+    jne .refused
+    KLOG "host: %s does not exist", rdx
+    jmp .then
+.refused:
+    cmp esi, DNS_REFUSED
+    jne .silent
+    KLOG "host: the DNS server could not answer (code %u)", rax
+    jmp .then
+.silent:
+    cmp esi, DNS_NOANSWER
+    jne .no_address
+    mov eax, [rbx + DQ_SERVER]
+    KLOG "host: no answer from the DNS server %I", rax
+    jmp .then
+.no_address:
+    KLOG "host: %s has no IPv4 address", rdx
+.then:
+    cmp dword [rbx + DQ_THEN], 2
+    je http_dns_failed
+    ret
+.socket:
+    mov rdi, [rbx + DQ_USER]
+    jmp sock_dns_failed
+
+; dns_tick: each question unanswered asked again every 2 s, three times
 dns_tick:
     mov rax, [dns_next]
     test rax, rax
     jz .out
     cmp rax, [net_now]
     ja .out
-    cmp dword [dns_tries], DNS_TRIES
+    push rbx
+    push r12
+    lea rbx, [dns_slots]
+    mov r12d, DNS_SLOTS
+.slot:
+    cmp dword [rbx + DQ_STATE], 0
+    je .next
+    mov rax, [rbx + DQ_NEXT]
+    cmp rax, [net_now]
+    ja .next
+    cmp dword [rbx + DQ_TRIES], DNS_TRIES
     jae .give_up
-    inc dword [dns_tries]
+    inc dword [rbx + DQ_TRIES]
     call dns_send
     mov rax, [net_second]
     add rax, rax
     add rax, [net_now]
-    mov [dns_next], rax
-    ret
+    mov [rbx + DQ_NEXT], rax
+    jmp .next
 .give_up:
-    mov dword [dns_state], 0
-    mov qword [dns_next], 0
-    KLOG "host: no answer from the DNS server %I", qword [dns_server]
-    jmp dns_failed
+    mov dword [rbx + DQ_STATE], 0
+    mov esi, DNS_NOANSWER
+    call dns_failed
+.next:
+    add rbx, DQ_SIZE
+    dec r12d
+    jnz .slot
+    call dns_arm
+    pop r12
+    pop rbx
 .out:
     ret
 
@@ -1418,21 +1626,16 @@ dh_o_router:    resd 1
 dh_o_dns:       resd 1
 dh_o_lease:     resd 1
 dh_o_server:    resd 1
-dns_state:      resd 1                  ; 1 while a question is out
-dns_tries:      resd 1
-dns_then:       resd 1                  ; 0 print the answer, 1 ping it, 2 http
-dns_server:     resd 1
-dns_port:       resd 1
 ping_active:    resd 1
 ping_count:     resd 1
 ping_seq:       resd 1                  ; requests sent
 ping_got:       resd 1                  ; replies
 ping_waiting:   resd 1                  ; the last request is unanswered
 ping_ip:        resd 1
-dns_id:         resw 1
 ping_id:        resw 1
 net_static:     resb 1                  ; the address was set by hand
 lease_buf:      resb 32
 gw_text:        resb 16
 dns_text:       resb 16
-dns_name:       resb 256
+alignb 8
+dns_slots:      resb DNS_SLOTS * DQ_SIZE

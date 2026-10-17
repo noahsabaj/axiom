@@ -1681,6 +1681,8 @@ user_load:
     mov rdi, r15
     call st_program
     mov [rbp + SB_STORE], eax
+    call sk_program                     ; and the network
+    mov [rbp + SB_NET], eax
 .no_store:
     xor eax, eax
     mov esi, [rsp + 8 + 40]             ; and what it is given

@@ -553,6 +553,8 @@ ring_arm:
     jae .out                            ; refused (and counted) once
     cmp rax, OT_CHANNEL
     je .channel
+    cmp rax, OT_SOCKET
+    je .socket
     mov esi, OT_EVENT
     mov edx, RT_EV_WAIT
     call handle_get
@@ -581,6 +583,28 @@ ring_arm:
     mov r13, rax
     lea r14, [r13 + CH_READY]
     lea rax, [r13 + CH_WQ]
+    jmp .queue
+.socket:                                ; a0 = 0: something to receive; 1: room to send
+    mov rax, E_ARG
+    mov rcx, [rbx + RQ_SQE + SQ_A0]
+    cmp rcx, 1
+    ja .out
+    mov edx, RT_SK_RECV
+    test rcx, rcx
+    jz .sk_get
+    mov edx, RT_SK_SEND
+.sk_get:
+    mov esi, OT_SOCKET
+    call handle_get
+    cmp rax, E_ANY
+    jae .out
+    mov r13, rax
+    lea r14, [r13 + SK_RREADY]
+    lea rax, [r13 + SK_RWQ]
+    cmp qword [rbx + RQ_SQE + SQ_A0], 0
+    je .queue
+    lea r14, [r13 + SK_WREADY]
+    lea rax, [r13 + SK_WWQ]
 .queue:
     mov [rbx + RQ_WQ], rax
     jmp .arm
@@ -860,19 +884,37 @@ ring_exec:
     mov rcx, [rbx + SQ_A1]
     call h_con_write
     jmp .out
-.send:
+.send:                                  ; a channel's end, or a socket
+    mov edi, [rbx + SQ_HANDLE]
+    call handle_info
+    cmp rax, E_ANY
+    jae .out                            ; refused (and counted) once
     mov edi, [rbx + SQ_HANDLE]
     mov esi, [rbx + SQ_HANDLE2]
     mov rdx, [rbx + SQ_A0]
     mov rcx, [rbx + SQ_A1]
+    cmp rax, OT_SOCKET
+    je .sk_send
     call h_ch_send
+    jmp .out
+.sk_send:
+    call h_sk_send
     jmp .out
 .recv:
     mov edi, [rbx + SQ_HANDLE]
+    call handle_info
+    cmp rax, E_ANY
+    jae .out
+    mov edi, [rbx + SQ_HANDLE]
     mov esi, [rbx + SQ_HANDLE2]
     mov rdx, [rbx + SQ_A0]
     mov rcx, [rbx + SQ_A1]
+    cmp rax, OT_SOCKET
+    je .sk_recv
     call h_ch_recv
+    jmp .out
+.sk_recv:
+    call h_sk_recv
     jmp .out
 .kill:
     mov edi, [rbx + SQ_HANDLE]
@@ -929,6 +971,39 @@ ring_exec:
     mov rdx, [rbx + SQ_A0]
     mov rcx, [rbx + SQ_A1]
     call h_st_list
+    jmp .out
+.net_connect:
+    mov edi, [rbx + SQ_HANDLE]
+    mov esi, [rbx + SQ_HANDLE2]
+    mov rdx, [rbx + SQ_A0]
+    mov rcx, [rbx + SQ_A1]
+    mov r8, [rbx + SQ_A2]
+    call h_net_connect
+    jmp .out
+.net_listen:
+    mov edi, [rbx + SQ_HANDLE]
+    mov rsi, [rbx + SQ_A0]
+    call h_net_listen
+    jmp .out
+.net_accept:
+    mov edi, [rbx + SQ_HANDLE]
+    call h_net_accept
+    jmp .out
+.net_status:
+    mov edi, [rbx + SQ_HANDLE]
+    call h_net_status
+    jmp .out
+.net_shut:
+    mov edi, [rbx + SQ_HANDLE]
+    call h_net_shut
+    jmp .out
+.net_sub:
+    mov edi, [rbx + SQ_HANDLE]
+    mov esi, [rbx + SQ_HANDLE2]
+    mov rdx, [rbx + SQ_A0]
+    mov rcx, [rbx + SQ_A1]
+    mov r8, [rbx + SQ_A2]
+    call h_net_sub
     jmp .out
 .bad:
     mov rax, E_ARG                      ; one it does not know
@@ -1408,8 +1483,10 @@ ro_exec:        dq ring_exec.nop, ring_exec.signal, ring_exec.reset, ring_exec.b
                 dq ring_exec.write, ring_exec.send, ring_exec.recv, ring_exec.kill
                 dq ring_exec.st_put, ring_exec.st_get, ring_exec.st_del, ring_exec.st_commit
                 dq ring_exec.st_abort, ring_exec.st_sub, ring_exec.st_rollback, ring_exec.st_list
+                dq ring_exec.net_connect, ring_exec.net_listen, ring_exec.net_accept, ring_exec.net_status
+                dq ring_exec.net_shut, ring_exec.net_sub
 ro_async:       db 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 ; which wait: RO_WAIT, RO_JOIN, RO_TIMEOUT
-                db 0, 0, 0, 0, 0, 0, 0, 0
+                db 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
 
 section .bss
 alignb 8

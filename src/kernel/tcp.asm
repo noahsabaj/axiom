@@ -15,7 +15,7 @@
 ;        accept, RCX = the owner's) -> RAX = the listener, CF if the port is
 ;        taken or no listener is free
 ;    tcp_unlisten(RDI = listener): no more; those half open go too
-;    tcp_write, tcp_close, tcp_abort (RDI = connection), as below
+;    tcp_write, tcp_room, tcp_close, tcp_abort (RDI = connection), as below
 ;    tcp_flow(RDI = connection, ESI = bytes, 1 to 65535): from now on the
 ;        window offered is that, less what has been handed over and not yet
 ;        consumed; tcp_consumed(RDI, ESI = bytes) says some was, and an ACK
@@ -110,6 +110,7 @@ TC_HELD         equ 160                 ; dword: handed over, not yet consumed
 TC_RLIMIT       equ 164                 ; dword: tcp_flow's, 0 = none
 TC_ADV          equ 168                 ; dword: the window last offered
 TC_LISTENER     equ 176                 ; what accepted it, or will
+TC_MAX          equ 184                 ; dword: past the furthest ever sent
 TC_SIZE         equ 256
 
 ; a listener
@@ -139,6 +140,7 @@ tcp_connect:
     mov [r12 + TC_UNA], eax
     inc eax
     mov [r12 + TC_NXT], eax
+    mov [r12 + TC_MAX], eax
     mov dword [r12 + TC_MSS], 536
     mov rax, [net_second]
     mov [r12 + TC_RTO], rax
@@ -199,6 +201,24 @@ tcp_write:
     pop rsi
     pop rdx
     pop rcx
+    ret
+
+; tcp_room(RDI = connection) -> EAX = the bytes tcp_write would take now.
+; Preserves others.
+tcp_room:
+    xor eax, eax
+    test dword [rdi + TC_FLAGS], TF_CLOSE
+    jnz .out
+    cmp dword [rdi + TC_STATE], TS_SYN_SENT
+    je .room
+    cmp dword [rdi + TC_STATE], TS_ESTABLISHED
+    je .room
+    cmp dword [rdi + TC_STATE], TS_CLOSE_WAIT
+    jne .out
+.room:
+    mov eax, TCP_SBUF
+    sub eax, [rdi + TC_SLEN]
+.out:
     ret
 
 ; tcp_close(RDI = connection): nothing more to send; a FIN follows the data.
@@ -758,6 +778,7 @@ tcp_output:
     call tcp_segment
     jc .out
     add [r12 + TC_NXT], ecx
+    call tcp_sent
     and dword [r12 + TC_FLAGS], ~TF_ACKNOW
     call tcp_time_it
     call tcp_rtx_idle
@@ -771,6 +792,7 @@ tcp_output:
     call tcp_segment
     jc .out
     inc dword [r12 + TC_NXT]
+    call tcp_sent
     or dword [r12 + TC_FLAGS], TF_FINSENT
     and dword [r12 + TC_FLAGS], ~TF_ACKNOW
     mov eax, TS_FIN_WAIT1
@@ -801,6 +823,17 @@ tcp_output:
     pop rdx
     pop rcx
     pop rbx
+    ret
+
+; tcp_sent(R12): TC_MAX moved up to TC_NXT, if that has passed it (going
+; back to resend leaves it where it was). Preserves all but RAX.
+tcp_sent:
+    mov eax, [r12 + TC_NXT]
+    sub eax, [r12 + TC_MAX]
+    js .out
+    mov eax, [r12 + TC_NXT]
+    mov [r12 + TC_MAX], eax
+.out:
     ret
 
 ; tcp_time_it(R12): time the segment just sent, unless one is being timed.
@@ -1000,6 +1033,7 @@ tcp_timeout:
     mov ecx, 1
     call tcp_segment
     inc dword [r12 + TC_NXT]
+    call tcp_sent
     call tcp_rearm
     jmp .out
 .resend:
@@ -1242,6 +1276,7 @@ tcp_passive:
     mov [r12 + TC_UNA], eax
     inc eax
     mov [r12 + TC_NXT], eax
+    mov [r12 + TC_MAX], eax
     mov eax, [ts_seq]
     inc eax
     mov [r12 + TC_RCV], eax
@@ -1389,8 +1424,18 @@ tcp_arrive:
     jz .same
     js .data                            ; an old one
     mov edx, [ts_ack]
-    sub edx, [r12 + TC_NXT]
+    sub edx, [r12 + TC_MAX]
     jg .too_new
+    mov edx, [ts_ack]
+    sub edx, [r12 + TC_NXT]
+    jle .acked
+    mov edx, [ts_ack]                   ; sent before going back to resend:
+    mov [r12 + TC_NXT], edx             ; taken, so on from there
+    sub edx, [r12 + TC_UNA]
+    cmp edx, [r12 + TC_SLEN]
+    jbe .acked
+    or dword [r12 + TC_FLAGS], TF_FINSENT ; and past the data: our FIN
+.acked:
     call tcp_acked
     cmp dword [r12 + TC_STATE], TS_CLOSED
     je .drop

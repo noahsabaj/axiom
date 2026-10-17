@@ -83,7 +83,9 @@ OT_RING         equ 5
 OT_CONSOLE      equ 6                   ; the screen and the serial log (user.asm)
 OT_CHANNEL      equ 7                   ; one end of a channel (channel.asm)
 OT_STORE        equ 8                   ; names in the store, under a prefix (store.asm)
-OT_TYPES        equ 9                   ; with 0, none
+OT_NET          equ 9                   ; the network, to some hosts and ports (socket.asm)
+OT_SOCKET       equ 10                  ; a connection, or a port listened on (socket.asm)
+OT_TYPES        equ 11                  ; with 0, none
 
 ; what a capability allows (RT_*): three for any object, the rest by type
 RT_DUP          equ 1 << 0              ; derive more from it
@@ -106,6 +108,13 @@ RT_ST_WRITE     equ 1 << 9              ; stage changes, drop them
 RT_ST_COMMIT    equ 1 << 10             ; commit what is staged
 RT_ST_ROLLBACK  equ 1 << 11             ; put its names back as an earlier commit had them
 RT_ST_ALL       equ RT_ST_READ | RT_ST_WRITE | RT_ST_COMMIT | RT_ST_ROLLBACK
+RT_NET_CONNECT  equ 1 << 8              ; the network: connect over plain TCP
+RT_NET_TLS      equ 1 << 9              ; over TLS, the server's certificate checked
+RT_NET_INSECURE equ 1 << 10             ; over TLS, not checked
+RT_NET_LISTEN   equ 1 << 11             ; listen on a port
+RT_NET_ALL      equ RT_NET_CONNECT | RT_NET_TLS | RT_NET_INSECURE | RT_NET_LISTEN
+RT_SK_SEND      equ 1 << 8              ; a socket: send on it, shut it
+RT_SK_RECV      equ 1 << 9              ; receive from it, accept at it, wait to
 RT_ALL          equ 0xFFFF
 
 ; what handle operations return when they fail
@@ -128,7 +137,8 @@ E_CONFLICT      equ -16                 ; the store: the head changed a name sin
 E_NONAME        equ -17                 ; no such name in the store
 E_IO            equ -18                 ; the drive failed
 E_NOSTORE       equ -19                 ; no store, or one that cannot be written
-E_COUNT         equ 20                  ; with 0, none
+E_NET           equ -20                 ; a socket failed: RO_NET_STATUS says why
+E_COUNT         equ 21                  ; with 0, none
 E_ANY           equ -4096               ; what returns a pointer or an E_*: an
                                         ; error is RAX >= E_ANY, unsigned (the
                                         ; kernel's pointers are negative too)
@@ -242,6 +252,48 @@ CH_SENT         equ 112                 ; messages sent from it, ever
 CH_RECEIVED     equ 120                 ; received at it
 CH_SIZE         equ 128
 
+; the network (OT_NET, socket.asm): what one capability to it reaches
+NT_PATTERN      equ 64                  ; 64 bytes: a host, "*.name", or "" for any
+NT_PORT         equ 128                 ; dword, 0 = any
+NT_SIZE         equ 136
+
+; a socket (OT_SOCKET, socket.asm)
+SK_BUF          equ 65536               ; bytes each way, a power of two
+SK_ACCEPT_MAX   equ 8                   ; connections taken, waiting to be accepted
+SK_STATE        equ 64                  ; dword SKS_*
+SK_WHY          equ 68                  ; dword NETW_*
+SK_TLSE         equ 72                  ; dword: TLS's error, for NETW_TLS
+SK_FLAGS        equ 76                  ; dword SKF_*
+SK_RREADY       equ 80                  ; dword: something to receive, or no more ever
+SK_WREADY       equ 84                  ; dword: room to send, or never again
+SK_RWQ          equ 88                  ; WQ_SIZE: requests waiting for SK_RREADY
+SK_WWQ          equ 104                 ; for SK_WREADY
+SK_NEXT         equ 120                 ; on sk_new, then on sk_list
+SK_PREV         equ 128
+SK_TCP          equ 136                 ; the connection, while there is one
+SK_TLS          equ 144                 ; the session, for TLS
+SK_LISTENER     equ 152                 ; tcp.asm's, while listening
+SK_RX           equ 160                 ; SK_BUF: what came, for the program
+SK_RX_HEAD      equ 168                 ; dword
+SK_RX_LEN       equ 172                 ; dword
+SK_TX           equ 176                 ; SK_BUF: what the program sent
+SK_TX_HEAD      equ 184
+SK_TX_LEN       equ 188
+SK_CIN          equ 192                 ; TLS: what came, still encrypted
+SK_CIN_HEAD     equ 200
+SK_CIN_LEN      equ 204
+SK_FREED        equ 208                 ; dword: received, not yet told to TCP
+SK_BUSY         equ 212                 ; dword: bit 0 a send, bit 1 a receive, copying
+SK_IP           equ 216                 ; dword
+SK_PORT         equ 220                 ; dword
+SK_GONE_AT      equ 224                 ; TSC: no handle; reset if not closed by then
+SK_ACN          equ 232                 ; dword: accepted connections waiting
+SK_ACQ          equ 240                 ; SK_ACCEPT_MAX of them, oldest first
+SK_RXBY         equ 304                 ; bytes received, ever
+SK_TXBY         equ 312                 ; sent
+SK_HOST         equ 320                 ; 256 bytes, NUL-ended
+SK_SIZE         equ 576
+
 ; a block of memory (kobj.asm), an object
 MO_BASE         equ 64                  ; its pages, in the vm region
 MO_BYTES        equ 72
@@ -319,10 +371,12 @@ RO_CANCEL       equ 11                  ; a0: the data of requests to cancel
 RO_WRITE        equ 12                  ; handle = the console, handle2 + a0: a1
                                         ; bytes of text -> the bytes
 RO_SEND         equ 13                  ; handle = a channel, handle2 + a0: a1
-                                        ; bytes, a message -> the bytes
+                                        ; bytes, a message -> the bytes; or a
+                                        ; socket: as many as there is room for
 RO_RECV         equ 14                  ; handle, the next message into handle2 +
                                         ; a0, a1 bytes at most -> its bytes, or
-                                        ; E_EMPTY (RO_WAIT on it waits for one)
+                                        ; E_EMPTY (RO_WAIT on it waits for one);
+                                        ; a socket: as many as came, and fit
 RO_KILL         equ 15                  ; handle = a task
 RO_ST_PUT       equ 16                  ; handle = a store, handle2 + a0: a name
                                         ; (a 64-byte field, NUL-ended), handle2 +
@@ -341,7 +395,54 @@ RO_ST_ROLLBACK  equ 22                  ; handle, a0 = a commit's number -> a ne
                                         ; commit: its names as they were then
 RO_ST_LIST      equ 23                  ; handle, into handle2 + a0, a1 bytes at
                                         ; most: its names, NUL-ended -> how many
-RO_COUNT        equ 24
+RO_NET_CONNECT  equ 24                  ; handle = the network, handle2 + a0: a
+                                        ; host (a 256-byte field, NUL-ended: a
+                                        ; name or a dotted quad), a1 = port, a2 =
+                                        ; NETF_* -> a socket, at once (RO_WAIT
+                                        ; with a0 = 1 until it is open)
+RO_NET_LISTEN   equ 25                  ; handle, a0 = port -> a socket listening
+RO_NET_ACCEPT   equ 26                  ; handle = a socket listening -> a socket,
+                                        ; the oldest connection it took, or
+                                        ; E_EMPTY (RO_WAIT on it waits for one)
+RO_NET_STATUS   equ 27                  ; handle = a socket -> SKS_* | NETW_* << 8
+                                        ; | TLS's error << 16
+RO_NET_SHUT     equ 28                  ; handle = a socket: a FIN once what was
+                                        ; sent has gone (plain TCP)
+RO_NET_SUB      equ 29                  ; handle = the network, handle2 + a0: a
+                                        ; host pattern (a 64-byte field: a host,
+                                        ; "*.name" for those under it, "" any),
+                                        ; a1 = a port or 0, a2 = rights -> a
+                                        ; handle reaching no more than both
+RO_COUNT        equ 30
+
+; RO_NET_CONNECT's a2
+NETF_TLS        equ 1
+NETF_INSECURE   equ 2                   ; with NETF_TLS: the certificate not checked
+
+; a socket's state (RO_NET_STATUS)
+SKS_LOOKUP      equ 1                   ; its host is being looked up
+SKS_CONNECT     equ 2
+SKS_HANDSHAKE   equ 3                   ; TLS's
+SKS_OPEN        equ 4
+SKS_ENDED       equ 5                   ; the connection is over, cleanly
+SKS_FAILED      equ 6                   ; NETW_* says why
+SKS_LISTEN      equ 7
+
+; why it failed
+NETW_NOSERVER   equ 1                   ; no DNS server is known
+NETW_BADNAME    equ 2                   ; not a host name
+NETW_BUSY       equ 3                   ; too many lookups at once
+NETW_NOHOST     equ 4                   ; no such host
+NETW_NOADDR     equ 5                   ; it has no IPv4 address
+NETW_DNS        equ 6                   ; the DNS server could not answer
+NETW_NOANSWER   equ 7                   ; no answer from the DNS server
+NETW_DOWN       equ 8                   ; no network, or no address on it
+NETW_NOROUTE    equ 9                   ; no connection free, or no route
+NETW_REFUSED    equ 10
+NETW_RESET      equ 11
+NETW_TIMEOUT    equ 12
+NETW_TLS        equ 13                  ; TLS's error says why
+NETW_INUSE      equ 14                  ; the port is listened on already
 
 TS_NEW          equ 0
 TS_READY        equ 1
@@ -457,6 +558,7 @@ SB_RING_VA      equ 16                  ; where the ring's memory is mapped
 SB_TSC_PER_US   equ 24                  ; for deadlines
 SB_ARGS_LEN     equ 32                  ; dword
 SB_STORE        equ 36                  ; dword: to the store under "name/", or 0
+SB_NET          equ 40                  ; dword: to the network, or 0
 SB_ARGS         equ 64                  ; the arguments it was run with, NUL-ended
 SB_ARGS_MAX     equ 4096 - SB_ARGS - 1
 

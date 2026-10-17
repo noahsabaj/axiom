@@ -88,6 +88,7 @@ section .text
 %include "x509.asm"
 %include "tls.asm"
 %include "http.asm"
+%include "socket.asm"
 %include "json.asm"
 %include "text.asm"
 %include "claude.asm"

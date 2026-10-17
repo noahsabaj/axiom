@@ -332,7 +332,9 @@ tools/test/             host-side tests for self-contained modules (tls: the
                         store, its drive read back by a reader of its own,
                         torn, remounted, damaged and read-only; tcp: the
                         server side and its window, through 'tcp echo',
-                        from clients on the host); all.py runs them
+                        from clients on the host; net: sockets for ring
+                        3, through NET.AXE, against servers, a DNS
+                        server and clients on the host); all.py runs them
                         all at once, and qemu.py boots side by side
 tools/mkfont.py         rasterize the console font into src/kernel/gen/
 docs/                   vision and architecture

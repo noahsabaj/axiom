@@ -332,7 +332,7 @@ or idles.
   the constants read-only, the data and zeroes writable and not executable,
   a 64 KiB stack under `USER_STACK_TOP` with nothing below it, and a
   read-only start block at `USER_START` (`SB_*`: handles to the task's ring,
-  its memory and the console, what the task that started it gave it, where
+  its memory, the console and the network, what the task that started it gave it, where
   the ring is, the TSC rate, the arguments). The first thread starts at the
   entry with RDI = the start block, every other register 0. A file larger
   than `fat_file` (64 KiB) is read whole into a buffer of its own, up to
@@ -679,7 +679,7 @@ when the FAT code's state can't be trusted. USB transfers are polled, so the
 save works with interrupts off. A failed automatic save turns automatic saving
 off. `log` shows the state; `log save`, `log on`, `log off`.
 
-## Network: `rtl8168.asm`, `net.asm`, `tcp.asm`, `netapp.asm`, `http.asm`
+## Network: `rtl8168.asm`, `net.asm`, `tcp.asm`, `netapp.asm`, `http.asm`, `socket.asm`
 
 - **Realtek** (`rtl8168.asm`): the RTL8111/8168 family (the Victus's "Gaming
   GbE", 10EC:8168), and the RTL8139C+ QEMU emulates, whose C+ mode uses the
@@ -700,13 +700,18 @@ off. `log` shows the state; `log save`, `log on`, `log off`.
   second apart). IPv4 checks header checksums, drops fragments, and routes
   through the gateway when the destination is off the subnet. ICMP answers
   echo requests sent to us; UDP checks checksums and hands port 68 to DHCP
-  and the resolver's port to DNS; protocol 6 goes to TCP. Addresses stay in network byte order
+  and ports from 49152 up to DNS; protocol 6 goes to TCP. Addresses stay in network byte order
   throughout (`%I` prints them, `%M` prints a MAC).
 - **Clients** (`netapp.asm`): DHCP (discover, request, renew at half the
-  lease, start over on NAK or link up), an A-record resolver (three tries,
-  2 s apart) and ping (a TSC stamp in each request gives the round trip).
-  Each runs on `net_service`'s timers, so the prompt comes back at once;
-  ctrl+C stops a ping or a lookup.
+  lease, start over on NAK or link up), an A-record resolver and ping (a
+  TSC stamp in each request gives the round trip). The resolver keeps
+  eight lookups at once (`dns_slots`), each from a random port of its own
+  with a random id, both checked along with the server on the answer;
+  three tries, 2 s apart; it reports to the shell or to a socket
+  (`sock_dns_done`, `sock_dns_failed`, with why: no server, a bad name,
+  busy, no such host, no address, refused, no answer). Each runs on
+  `net_service`'s timers, so the prompt comes back at once; ctrl+C stops a
+  ping or the shell's lookups.
 - **TCP** (`tcp.asm`): sixteen connections, each with a 128 KiB send
   buffer. Something in the kernel opens one with a table of four handlers
   (open, data, the other side's FIN, gone and why) and a word of its own
@@ -726,7 +731,12 @@ off. `log` shows the state; `log save`, `log on`, `log off`.
   200 ms to 60 s, eight tries); RFC 5681's slow start and congestion
   avoidance start from a ten-segment window; three duplicate ACKs resend
   the oldest segment at once, and during that recovery each partial ACK
-  resends the next hole (NewReno, RFC 6582). A closed window is probed one byte at a time,
+  resends the next hole (NewReno, RFC 6582). Going back to resend leaves
+  `TC_MAX`, the furthest ever sent, where it was: an ACK up to it is taken
+  and sending goes on from there, and only one beyond it is for something
+  never sent (until this, the ACK for data sent before a timeout was
+  refused, with all that came with it, and each side's ACK drew the other's
+  forever). A closed window is probed one byte at a time,
   and when it opens the probe is resent at once. Segments
   after a gap are dropped and the ACK repeats what is missing; overlapping
   ones are trimmed. A segment for no connection gets a reset. Both closes
@@ -747,7 +757,33 @@ off. `log` shows the state; `log save`, `log on`, `log off`.
   443 unless given: the TCP handlers pass bytes to `tls_input`, and the TLS
   handlers hand the plaintext to the same code. A TCP FIN without a
   close_notify first is reported (the answer may be cut short).
-- Shell: `net`, `ip`, `dhcp`, `ping`, `host`, `arp`, `tcp`, `http`.
+- **Sockets** (`socket.asm`): the network for ring 3, by capability. `run`
+  gives each program one on the whole network (`OT_NET`, `SB_NET`);
+  `RO_NET_SUB` makes narrower ones, on a host, every host under a name
+  (`*.example.com`) or one port, with fewer of the rights `RT_NET_CONNECT`
+  (plain TCP), `RT_NET_TLS` (TLS, the certificate checked),
+  `RT_NET_INSECURE` (TLS, not checked) and `RT_NET_LISTEN`. A socket
+  (`OT_SOCKET`, 32 at once) is a connection or a port listened on, with
+  64 KiB each way in the kernel: `RO_SEND` and `RO_RECV` copy in what fits
+  and out what came, and the main loop (`sk_tick`, from `net_service`)
+  moves bytes between those and TCP, through TLS when asked, TCP's window
+  (`tcp_flow`) being what is free on the way in. `RO_NET_CONNECT` gives
+  the socket at once, the lookup, connection and handshake following;
+  `RO_WAIT` on it waits for room to send (a0 = 1) or something to receive
+  (a0 = 0), or for neither ever to come. `RO_NET_STATUS` says the state
+  (lookup, connect, handshake, open, ended, failed, listening) and why it
+  failed (`NETW_*`: the lookup's reasons, no link, no route, refused,
+  reset, timed out, TLS with its alert, a port in use). `RO_NET_SHUT`
+  sends a FIN once what was sent has gone; `RO_NET_LISTEN` and
+  `RO_NET_ACCEPT` take connections, eight waiting at most. Errors: `E_FULL`
+  and `E_EMPTY` for now, `E_PEER` at the end, `E_NET` on failure. When a
+  socket's last handle goes, what it sent still goes out, then it is
+  closed, or reset after 10 s. The program's side runs on any CPU, under
+  `sk_lock` for state and with one sender and one receiver at a time
+  copying without it. `sockets` lists them. NET.AXE (`src/user/net.asm`)
+  is a client and server for it: `net get`, `net echo`, `net serve`, and
+  `net test` (41 checks).
+- Shell: `net`, `ip`, `dhcp`, `ping`, `host`, `arp`, `tcp`, `http`, `sockets`.
 - Tested in QEMU with `tools/run.py --nic rtl8139`: DHCP, ping and DNS
   through QEMU's user network, and two Axiom VMs joined by a socket pinging
   each other, with every frame's checksums checked in the dump
@@ -763,6 +799,11 @@ off. `log` shows the state; `log save`, `log on`, `log off`.
   through a client with a 4 KiB receive buffer, until the guest's window
   is shut with all 16 KiB held, then all of it back in order; both FINs;
   twelve clients at once; a reset from a port nobody listens on; `tcp stop`.
+  `tools/test/net/run.py` runs NET.AXE against servers on the host: `net
+  test`, plain and TLS requests (the certificate refused when checked),
+  eight connections echoing 200 KB each at once, four TLS sessions 100 KB
+  each, eight by name through a DNS server of its own and a name that does
+  not exist, three clients for `net serve`, and no socket left at the end.
   The RTL8168 code paths (G-family takeover, PHY, MSI) run only on
   real hardware. Not yet: IPv6, other NICs.
 

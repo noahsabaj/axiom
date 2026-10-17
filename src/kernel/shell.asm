@@ -561,6 +561,7 @@ commands:
     COMMAND 'ask',      cmd_ask,      'ask <question>: ask Claude; the conversation goes on'
     COMMAND 'claude',   cmd_claude,   'claude [key <key>|model <name>|server <url> [-k]|new]: settings for ask'
     COMMAND 'tcp',      cmd_tcp,      'TCP connections; tcp echo <port>, tcp stop <port>'
+    COMMAND 'sockets',  cmd_sockets,  'what programs have open on the network'
     COMMAND 'crypto',   cmd_crypto,   'check the TLS crypto against its test vectors, and time it'
     COMMAND 'log',      cmd_log,      'log [save|on|off]: AXIOM.LOG on the boot stick'
     COMMAND 'demo',     cmd_demo,     'pause or resume the Mandelbrot zoom'
