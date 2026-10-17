@@ -356,6 +356,7 @@ VEC_WAKE        equ 0x40
 VEC_TLB         equ 0x41
 VEC_RESCHED     equ 0x42
 VEC_NVME        equ 0x43                ; NVMe completions, each queue to its CPU
+VEC_IOMMU       equ 0x44                ; VT-d faults, to the BSP
 VEC_SPURIOUS    equ 0xFF
 VEC_SYSCALL     equ 0x100               ; not a vector: a frame SYSCALL built
 

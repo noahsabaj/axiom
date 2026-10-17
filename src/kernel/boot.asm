@@ -105,6 +105,7 @@ kernel_main:
     mov ecx, [cpu_count]
     KLOG "smp: %u of %u threads online in %u us", rax, rcx, qword [smp_us]
     call pci_init
+    call iommu_init                     ; before any driver lets a device do DMA
     mov eax, [pci_count]
     KLOG "pci: %u functions", rax
     call kbd_init
@@ -141,6 +142,7 @@ main_loop:
     call log_service
     call pointer_service
     call user_service
+    call iommu_service
 .input:
     call kbd_getc
     test eax, eax
@@ -183,6 +185,9 @@ main_loop:
     cmp byte [user_pending], 0
     jne .awake
     cmp qword [spawn_list], 0           ; a program starting another
+    jne .awake
+    mov rcx, [iommu_fault_count]        ; a device refused, not said yet
+    cmp rcx, [iommu_fault_said]
     jne .awake
     mov rax, [next_refresh]             ; the next thing we have to do
     cmp byte [demo_on], 0

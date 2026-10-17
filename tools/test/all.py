@@ -22,9 +22,9 @@ import time
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 OUT = ROOT / "build" / "test"
 # the slowest first, so they start first
-SUITES = ["claude", "user", "memory", "threads", "objects", "nvme", "rings", "pki", "tls",
-          "tlsclient", "crypto", "heap"]
-QUICK = {"memory", "threads", "objects", "rings", "user", "nvme"}      # those that take --quick
+SUITES = ["claude", "user", "memory", "threads", "objects", "nvme", "iommu", "rings", "pki",
+          "tls", "tlsclient", "crypto", "heap"]
+QUICK = {"memory", "threads", "objects", "rings", "user", "nvme", "iommu"}      # those that take --quick
 
 
 def run(name, quick):

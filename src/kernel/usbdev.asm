@@ -1422,6 +1422,11 @@ usb_teardown:
     cmp r12d, [rbx + DV_NPAGES]
     jae .done
     mov rdi, [rbx + DV_PAGES + r12 * 8]
+    mov rsi, rdi                        ; out of the controllers' reach first
+    mov edx, 4096
+    mov rdi, [usb_domain]
+    call iommu_unmap
+    mov rdi, rsi
     mov esi, 1
     call pmm_free
     inc r12d

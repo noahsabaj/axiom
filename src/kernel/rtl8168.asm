@@ -123,6 +123,15 @@ rtl_probe:
 ; rtl_start(RBX) -> CF if unusable
 rtl_start:
     push r12
+    cmp qword [net_domain], 0           ; its DMA, through the network's domain
+    jne .domain
+    lea rdi, [str_net_domain]
+    call iommu_domain_new
+    mov [net_domain], rax
+.domain:
+    mov rdi, [net_domain]
+    mov esi, [rbx + NI_BDF]
+    call iommu_attach
     mov edi, [rbx + NI_BDF]
     call pci_power_on
     call pci_mem_bar
@@ -403,6 +412,24 @@ rtl_rings:
     inc ecx
     cmp ecx, RT_TXN
     jb .tx
+    mov rdi, [net_domain]               ; all of it within the card's reach
+    mov rsi, [rbx + NI_RX]
+    sub rsi, [phys_base]
+    mov edx, 4096
+    mov ecx, VT_RW
+    call iommu_map
+    jc .fail
+    mov rsi, [rbx + NI_RXBUF]
+    sub rsi, [phys_base]
+    mov edx, RT_RXN * RT_BUF
+    call iommu_map
+    jc .fail
+    mov rsi, [rbx + NI_TXBUF]
+    sub rsi, [phys_base]
+    mov edx, RT_TXN * RT_BUF
+    mov ecx, VT_R
+    call iommu_map
+    jc .fail
     mov dword [rbx + NI_RXI], 0
     mov dword [rbx + NI_TXI], 0
     clc
@@ -736,3 +763,8 @@ str_rtl8139:    db 'Realtek RTL8139C+', 0
 section .data
 align 8
 rtl_ops:        dq rtl_send, rtl_poll, rtl_link, rtl_ack
+str_net_domain: db 'network', 0
+
+section .bss
+alignb 8
+net_domain:     resq 1                  ; every card's DMA domain

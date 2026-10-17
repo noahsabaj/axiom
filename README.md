@@ -2,7 +2,7 @@
 
 An operating system written entirely in x86-64 assembly, booting straight from
 UEFI onto the hardware that is actually present. No C, no libc, no GRUB, no
-borrowed kernel: about fifty-five thousand lines of NASM, top to bottom.
+borrowed kernel: about fifty-seven thousand lines of NASM, top to bottom.
 
 Why it exists and where it is going: [docs/VISION.md](docs/VISION.md).
 How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
@@ -26,6 +26,9 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   MBR partitions, and
   **FAT32** with long names: read, write, copy, make directories, remove.
   Every volume is read-only until you unlock it with `vol <n> rw`.
+- **DMA confined by VT-d**: each driver's devices reach only the memory that
+  driver mapped for them (an NVMe command's buffer only while it is out), and
+  a device no driver claims reaches none (`iommu`, `iommu test`).
 - **Ethernet** on Realtek RTL8111/8168 chips (the Victus's): DHCP, ARP, IPv4,
   ICMP, UDP, DNS and **TCP**. `ping` and `host` work by name, and `http`
   fetches a web page, over **TLS 1.3** for `https://`, or saves it to a file.
@@ -43,7 +46,7 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   and PSS) and ECDSA on P-256 and P-384. The crypto is checked against the published vectors at
   every boot; `crypto` repeats the check and times each.
 - A shell over a USB keyboard, a PS/2 keyboard or the serial port. Commands:
-  `help info cpus mem threads objects rings run user pci acpi usb disks nvme vol ls cd cat cp write mkdir
+  `help info cpus mem threads objects rings run user pci acpi iommu usb disks nvme vol ls cd cat cp write mkdir
   rm date net ip dhcp ping host arp http ask claude tcp crypto log demo bench
   uptime echo clear panic reboot poweroff`.
 - **A log on the boot stick**: everything Axiom prints, the commands typed
@@ -317,7 +320,8 @@ tools/test/             host-side tests for self-contained modules (tls: the
                         rings: async rings, likewise; user: ring 3,
                         from a stick image, likewise; nvme: per-CPU
                         queues on QEMU's NVMe drive, with 1 to 8 CPUs and
-                        fewer queues than CPUs); all.py runs them
+                        fewer queues than CPUs; iommu: VT-d, a device
+                        kept out of memory not its own); all.py runs them
                         all at once, and qemu.py boots side by side
 tools/mkfont.py         rasterize the console font into src/kernel/gen/
 docs/                   vision and architecture

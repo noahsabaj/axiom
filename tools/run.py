@@ -17,7 +17,9 @@ prompt line, not a fixed time (--wait N for that instead). In --script,
 would; 'press TEXT' types it on the keyboard, key by key; 'until TEXT' waits
 for TEXT in the log after the last text typed; 'ended' waits for the guest
 to end QEMU itself (poweroff). When the firmware stalls before it loads
-Axiom, as OVMF now and then does, QEMU is started again.
+Axiom, as OVMF now and then does, QEMU is started again. Every boot has an
+emulated VT-d unit (intel-iommu) all device DMA goes through, unless
+--no-iommu.
 
 QEMU runs on the Windows Hypervisor Platform (WHPX) when it can, many times
 faster than its own CPU emulation (TCG); --accel picks one. The first run
@@ -283,6 +285,8 @@ def main():
                     "variables of its own")
     ap.add_argument("--serial", default="serial.log", help="log name in build/")
     ap.add_argument("--cpu", help="CPU model (default: max; max,-svm,-vmx on WHPX)")
+    ap.add_argument("--no-iommu", action="store_true", help="leave out the emulated VT-d "
+                    "unit (intel-iommu) every device's DMA otherwise goes through")
     ap.add_argument("--nic", help="a network card model (rtl8139, e1000...); its "
                     "frames are also written to build/net-PORT.pcap")
     ap.add_argument("--netdev", default="user", help="its backend, e.g. "
@@ -320,6 +324,7 @@ def main():
         code, vars_fd = firmware(qemu, f"{MONITOR[1]}{'-stick' if opts.stick else ''}", fresh)
         args = [str(qemu), "-accel", accel, "-machine", "q35", "-cpu", cpu, "-smp", opts.smp,
                 "-m", opts.mem,
+                *([] if opts.no_iommu else ["-device", "intel-iommu,intremap=off"]),
                 "-drive", f"if=pflash,format=raw,readonly=on,file={code}",
                 "-drive", f"if=pflash,format=raw,file={vars_fd}",
                 *boot,

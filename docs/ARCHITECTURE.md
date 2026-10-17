@@ -67,10 +67,11 @@ loader reads: magic `AXIOMKRN`, entry point, file size, memory size.
 | 10 | `object.asm`, `sched.asm`, `ring.asm` | The task `kernel`, which everything at boot acts for; the scheduler: the code running from here on is the thread `main`; the timer is the scheduler's; `async_boot`: the timers' heap and the thread `async` |
 | 11 | `smp.asm` | Start every other thread (below), then `sched_topology`: each CPU's kind and SMT sibling |
 | 12 | `pci.asm` | Enumerate through ECAM, else ports CF8/CFC |
-| 13 | `kbd.asm`, `usb.asm` | PS/2 keyboard on IRQ 1; xHCI controllers and whatever is plugged in at boot (later devices arrive through hot-plug in the main loop) |
-| 14 | `nvme.asm`, `disk.asm`, `fat.asm` | NVMe controllers, their partitions (and those of USB sticks found in step 13), FAT32 mounted read-only |
-| 15 | `net.asm`, `rtl8168.asm` | Ethernet controllers; DHCP starts once the link is up |
-| 16 | `mandel.asm`, `shell.asm` | Palette, view, shell; interrupts on |
+| 13 | `iommu.asm` | VT-d units from the DMAR, translating before any driver starts: no device reaches memory until its driver maps some |
+| 14 | `kbd.asm`, `usb.asm` | PS/2 keyboard on IRQ 1; xHCI controllers and whatever is plugged in at boot (later devices arrive through hot-plug in the main loop) |
+| 15 | `nvme.asm`, `disk.asm`, `fat.asm` | NVMe controllers, their partitions (and those of USB sticks found in step 14), FAT32 mounted read-only |
+| 16 | `net.asm`, `rtl8168.asm` | Ethernet controllers; DHCP starts once the link is up |
+| 17 | `mandel.asm`, `shell.asm` | Palette, view, shell; interrupts on |
 
 Then `main_loop`: poll and service USB (enumeration, hot-plug), service the
 network (frames in, link, DHCP/ARP/ping timers), save the log if it grew
@@ -444,8 +445,8 @@ Vectors: `0x21` PS/2 keyboard (I/O APIC, with MADT overrides applied), `0x22`
 xHCI and `0x23` network cards (MSI-X or MSI to the BSP, set up by `pci_msi`),
 `0x30` the scheduler's timer, `0x40` job wake-up, `0x41` TLB shootdown, `0x42`
 reschedule, `0x43` NVMe completions (an MSI-X entry per queue, each to its
-own CPU, outside `0x20` to `0x2F` so the main loop is not woken), `0xFF`
-spurious. Every stub saves all general registers and calls
+own CPU, outside `0x20` to `0x2F` so the main loop is not woken), `0x44`
+VT-d faults (to the BSP), `0xFF` spurious. Every stub saves all general registers and calls
 the handler registered with `irq_register`; after a device's (`0x20` to
 `0x2F`) it unparks the main loop. The common path sends the EOI, then
 switches threads if the scheduler asked. From ring 3, the stub SWAPGSes in
@@ -454,6 +455,53 @@ instead. Exceptions from ring 3 end the task (Ring 3, above); those in the
 kernel go to `panic`, which stops the other CPUs and paints a full report
 (registers, CR2, CR3, segments, the thread, and for a page fault what it ran
 into) on screen and serial.
+
+## DMA isolation: `iommu.asm`, `iommutest.asm`
+
+- **Every DMA goes through VT-d.** `iommu_init` (after PCI, before any
+  driver) finds each remapping unit in the ACPI DMAR table, maps its
+  registers and gives it a root table; the firmware's own translation and
+  protected memory regions are turned off first. Page tables are 4-level
+  (48-bit) if every unit takes them, else 3-level. Then each unit
+  translates, with no device in any domain: a device nobody drives reaches
+  no memory at all. Interrupt remapping stays off, so MSIs pass as they are.
+- **A domain per driver** (`DM_*`): USB (every xHCI controller), NVMe
+  (every controller) and the network (every card). A driver makes its
+  domain with `iommu_domain_new` and puts each of its devices in it
+  (`iommu_attach`: the context entry for its bus and function, made under
+  its unit's lock, every cached context and IOTLB entry forgotten) before
+  it turns bus mastering on. Addresses are one to one: a device is handed
+  physical addresses as before, and any its domain does not hold fault.
+  The firmware's reserved regions (RMRR) are mapped for the devices they
+  name, in a domain of the firmware's until a driver claims the device,
+  then in the driver's.
+- **What a driver maps** (`iommu_map`, `iommu_unmap`, and `_va` forms that
+  look each page up): `usb_alloc_page` and `nvme_alloc_page` map every page
+  they hand out (rings, contexts, queues, PRP lists), a USB device's pages
+  are unmapped before they are freed, the USB sticks' bounce buffer and the
+  network card's rings and buffers are mapped once. **An NVMe command's
+  buffer is mapped for the command alone**: in the domain (writable for a
+  read, readable for a write) when it is submitted, out once it completes,
+  left in only if it timed out. A leaf entry counts the maps holding its
+  page in bits the unit ignores (52-61), so two commands sharing a page
+  each leave it as they found it. Unmapping a page forgets it in every
+  translating unit's IOTLB (page-selective if the unit can, else the whole
+  domain) before it returns. On a unit that does not snoop the caches,
+  every table and entry written is flushed with `clflush`.
+- **Faults** are recorded by the interrupt (or by `iommu_faults` when
+  asked): who (bus, device, function), reading or writing what page, and
+  why, kept in a ring of the last 16; the main loop says each one
+  (`iommu: fault: ...`).
+- `iommu` lists the units, the domains (devices, pages, page tables, maps,
+  unmaps) and the last faults. `iommu test` tells the first NVMe controller
+  to read into a page no domain holds (`nvme_io_raw`, the buffer left out):
+  a fault must name the controller writing that page, and the page must be
+  untouched; then the page is mapped and read into, then unmapped and
+  refused again, which shows the IOTLB forgot it. Under QEMU
+  (`tools/run.py` gives every boot an `intel-iommu` unless `--no-iommu`)
+  every suite runs with its DMA confined; `tools/test/iommu/` checks the
+  NVMe, a USB stick and a network card through their domains, and a boot
+  without VT-d.
 
 ## USB: `usb.asm`, `usbdev.asm`, `usbhub.asm`, `hid.asm`, `usbmsc.asm`, `pointer.asm`
 

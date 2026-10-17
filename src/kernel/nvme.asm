@@ -156,12 +156,6 @@ nvme_start:
     mov ecx, NV_SIZE
     xor eax, eax
     rep stosb
-    cmp qword [nv_bounce], 0            ; a page for what Identify says
-    jne .bounce_ok
-    call nvme_alloc_page
-    mov [nv_bounce_phys], rax
-    mov [nv_bounce], rdx
-.bounce_ok:
     movzx edi, byte [rbx + PE_BUS]
     shl edi, 8
     movzx eax, byte [rbx + PE_DEV]
@@ -171,6 +165,22 @@ nvme_start:
     or edi, eax
     mov [r15 + NV_BDF], edi
     mov r13d, edi
+    cmp qword [nvme_domain], 0          ; its DMA, through the NVMe domain
+    jne .domain
+    lea rdi, [str_nv_domain]
+    call iommu_domain_new
+    mov [nvme_domain], rax
+.domain:
+    mov rdi, [nvme_domain]
+    mov esi, r13d
+    call iommu_attach
+    cmp qword [nv_bounce], 0            ; a page for what Identify says
+    jne .bounce_ok
+    call nvme_alloc_page
+    mov [nv_bounce_phys], rax
+    mov [nv_bounce], rdx
+.bounce_ok:
+    mov edi, r13d
     mov esi, 0x10                       ; BAR0, 64-bit
     call pci_read32
     mov r12d, eax
@@ -278,9 +288,31 @@ nvme_start:
     pop rbx
     ret
 
-; nvme_alloc_page -> RAX = physical, RDX = mapped, zeroed (panics if none)
+; nvme_alloc_page -> RAX = physical, RDX = mapped, zeroed, and in the NVMe
+; domain (panics if none)
 nvme_alloc_page:
-    jmp usb_alloc_page
+    push rdi
+    mov edi, 1
+    call pmm_alloc_zero
+    test rax, rax
+    jz .oom
+    push rcx
+    push rsi
+    mov rdi, [nvme_domain]
+    mov rsi, rax
+    mov edx, 4096
+    mov ecx, VT_RW
+    call iommu_map
+    pop rsi
+    pop rcx
+    mov rdx, rax
+    add rdx, [phys_base]
+    pop rdi
+    ret
+.oom:
+    xor edi, edi
+    lea rsi, [str_usb_oom]
+    jmp panic
 
 ; nvme_wait_ready(R15, EDX = the RDY value wanted) -> CF on timeout or fatal status
 nvme_wait_ready:
@@ -712,6 +744,13 @@ nvme_queue_new:
     test rax, rax
     jz .fail
     mov [rbx + NQ_PRPP], rax
+    push rsi
+    mov rdi, [nvme_domain]
+    mov rsi, rax
+    mov edx, NV_QIO * NV_PRP_SLOT
+    mov ecx, VT_R
+    call iommu_map
+    pop rsi
     add rax, [phys_base]
     mov [rbx + NQ_PRP], rax
     mov [rbx + NQ_ID], r13d
@@ -871,7 +910,17 @@ nvme_add_disk:
 ; for none (a flush), R8 = buffer: dword-aligned, at most NV_MAXXFER bytes,
 ; mapped) -> EAX = status (0 = success, -1 = timed out, -2 = not mapped),
 ; CF on failure. Preserves others. From any thread; not from interrupt
-; handlers, nor with a spinlock held.
+; handlers, nor with a spinlock held. The buffer is in the NVMe domain
+; while the command is out (and after, if it timed out).
+; nvme_io_raw: the same, with the buffer left out of the domain, so that
+; 'iommu test' can watch the controller be refused.
+nvme_io_raw:
+    push rdi
+    bts edi, 31
+    call nvme_io
+    pop rdi
+    ret
+
 nvme_io:
     push rbx
     push rcx
@@ -886,9 +935,9 @@ nvme_io:
     push r12
     push r13
     push r14
-    sub rsp, 64 + NR_SIZE               ; the command, then the request
+    sub rsp, 64 + NR_SIZE + 16          ; the command, the request, what is mapped
     mov rbp, rsp
-    mov r9d, edi
+    mov r9d, edi                        ; bit 31: raw
     mov r11d, edx
     mov rdi, rbp
     xor eax, eax
@@ -903,6 +952,28 @@ nvme_io:
     lea eax, [r11d - 1]
     mov [rbp + 48], eax                 ; blocks - 1
 .nolba:
+    mov byte [rbp + 80], 0              ; the buffer, in the domain for now
+    test r11d, r11d
+    jz .reachable
+    bt r9d, 31
+    jc .reachable
+    mov rdi, [nvme_domain]
+    test rdi, rdi
+    jz .reachable
+    mov ecx, [r15 + NV_SHIFT]
+    mov edx, r11d
+    shl edx, cl
+    mov [rbp + 88], rdx
+    mov rsi, r8
+    mov ecx, VT_RW                      ; a read: the controller writes it
+    cmp r9b, 0x02
+    je .perms
+    mov ecx, VT_R
+.perms:
+    call iommu_map_va
+    jc .unreachable
+    mov byte [rbp + 80], 1
+.reachable:
     lea r12, [rbp + 64]                 ; the request
     xor r14d, r14d                      ; 0: poll for it
     pushfq
@@ -1055,9 +1126,22 @@ nvme_io:
     pause
     jmp .finish
 .status:
+    cmp byte [rbp + 80], 0              ; out of the domain again
+    je .result
+    mov rdi, [nvme_domain]
+    mov rsi, r8
+    mov rdx, [rbp + 88]
+    call iommu_unmap_va
+.result:
     mov eax, [r12 + NR_STATUS]
     test eax, eax
     jz .ok
+    stc
+    jmp .out
+
+.unreachable:
+    KLOG "nvme: a buffer at %p is not mapped", r8
+    mov eax, -2
     stc
     jmp .out
 
@@ -1095,7 +1179,7 @@ nvme_io:
 .ok:
     clc
 .out:
-    lea rsp, [rbp + 64 + NR_SIZE]
+    lea rsp, [rbp + 64 + NR_SIZE + 16]
     pop r14
     pop r13
     pop r12
@@ -1421,11 +1505,13 @@ str_nv_write:   db 'write', 0
 str_nv_read:    db 'read', 0
 str_nv_msix:    db 'each interrupting its own CPU', 0
 str_nv_polled:  db 'polled', 0
+str_nv_domain:  db 'nvme', 0
 
 section .bss
 alignb 8
 nv_bounce:      resq 1                  ; a page for admin commands
 nv_bounce_phys: resq 1
+nvme_domain:    resq 1                  ; every controller's DMA domain
 nvme_count:     resd 1
 nv_result:      resd 1                  ; dword 0 of the last admin completion
 nv_cmd_op:      resq 1

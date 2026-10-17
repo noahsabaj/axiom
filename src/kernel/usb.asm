@@ -146,13 +146,23 @@ PORTSC_KEEP     equ (1 << 9) | (3 << 14) | (7 << 25)   ; bits safe to write back
 
 section .text
 
-; usb_alloc_page -> RAX = physical, RDX = mapped; zeroed. Panics if out of memory.
+; usb_alloc_page -> RAX = physical, RDX = mapped; zeroed, and in the USB
+; controllers' DMA domain. Panics if out of memory.
 usb_alloc_page:
     push rdi
     mov edi, 1
     call pmm_alloc_zero
     test rax, rax
     jz .oom
+    push rcx
+    push rsi
+    mov rdi, [usb_domain]
+    mov rsi, rax
+    mov edx, 4096
+    mov ecx, VT_RW
+    call iommu_map
+    pop rsi
+    pop rcx
     mov rdx, rax
     add rdx, [phys_base]
     pop rdi
@@ -454,6 +464,16 @@ xhci_init:
     mov r14d, edi
     mov [r15 + XC_BDF], edi
     mov dword [r15 + XC_MSI], 0
+    cmp qword [usb_domain], 0           ; its DMA, through the USB domain
+    jne .domain
+    lea rdi, [str_usb_domain]
+    call iommu_domain_new
+    mov [usb_domain], rax
+.domain:
+    mov rdi, [usb_domain]
+    mov esi, r14d
+    call iommu_attach
+    mov edi, r14d
     mov esi, 0x10                       ; BAR0, maybe 64-bit
     call pci_read32
     mov r12d, eax
@@ -834,7 +854,12 @@ usb_speed_names:
 section .data
 usb_poll_needed: db 0                   ; a controller without MSI: poll often
 
+section .rodata
+str_usb_domain: db 'usb', 0
+
 section .bss
+alignb 8
+usb_domain:     resq 1                  ; every controller's DMA domain
 alignb 8
 xhci_count:     resd 1
 alignb 8

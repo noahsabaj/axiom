@@ -312,6 +312,15 @@ msc_buffers:
     add rax, MSC_BOUNCE - 1
     and rax, ~(MSC_BOUNCE - 1)
     mov [msc_buf_phys], rax
+    push rcx
+    push rsi
+    mov rdi, [usb_domain]
+    mov rsi, rax
+    mov edx, MSC_BOUNCE
+    mov ecx, VT_RW
+    call iommu_map
+    pop rsi
+    pop rcx
     add rax, [phys_base]
     mov [msc_buf], rax
     call usb_alloc_page
