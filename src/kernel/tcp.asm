@@ -1,17 +1,39 @@
 ; =============================================================================
-;  tcp.asm - TCP, the client side. A few connections at once, each opened by
-;  something in the kernel (http.asm) that hears about it through a table of
-;  four handlers. Retransmission on a timer (RFC 6298: Jacobson's estimate,
-;  Karn's rule, backing off), fast retransmit after three duplicate ACKs,
-;  slow start and congestion avoidance (RFC 5681), and NewReno's partial
-;  ACKs during the recovery (RFC 6582). What arrives in order goes
-;  straight to the handler; anything after a gap is dropped and the ACK says
-;  what is missing, so the sender fills it in.
+;  tcp.asm - TCP. A few connections at once, each opened by something in
+;  the kernel (http.asm, socket.asm) that hears about it through a table of
+;  four handlers, or accepted on a port it listens on. Retransmission on a
+;  timer (RFC 6298: Jacobson's estimate, Karn's rule, backing off), fast
+;  retransmit after three duplicate ACKs, slow start and congestion
+;  avoidance (RFC 5681), and NewReno's partial ACKs during the recovery
+;  (RFC 6582). What arrives in order goes straight to the handler; anything
+;  after a gap is dropped and the ACK says what is missing, so the sender
+;  fills it in.
+;
+;    tcp_connect(EDI = address, ESI = port, RDX = handlers) -> RAX = the
+;        connection, CF if none is free or there is no route
+;    tcp_listen(EDI = port, RSI = handlers for what it accepts, RDX =
+;        accept, RCX = the owner's) -> RAX = the listener, CF if the port is
+;        taken or no listener is free
+;    tcp_unlisten(RDI = listener): no more; those half open go too
+;    tcp_write, tcp_close, tcp_abort (RDI = connection), as below
+;    tcp_flow(RDI = connection, ESI = bytes, 1 to 65535): from now on the
+;        window offered is that, less what has been handed over and not yet
+;        consumed; tcp_consumed(RDI, ESI = bytes) says some was, and an ACK
+;        tells the other side when the window has opened enough. Without
+;        tcp_flow every byte is taken as it comes (a fixed window).
+;
+;  TC_USER is the owner's. accept(RDI = the connection, established, RSI =
+;  the listener) -> CF to refuse it (it is reset); else it may set TC_USER,
+;  and TH_OPEN follows on the listener's handlers. A connection half open
+;  (SYN_RCVD) has no handlers yet, and is forgotten without a word if its
+;  handshake never ends. Main loop only.
 ;
 ;  Registers by convention: R12 = connection.
 ; =============================================================================
 
-MAX_TCP         equ 8
+MAX_TCP         equ 16
+MAX_LISTEN      equ 8
+LISTEN_HALF     equ 8                   ; half-open connections a listener may have
 TCP_SBUF        equ 131072              ; what one connection can have unacknowledged
 TCP_WINDOW      equ 64240               ; what we offer: handlers take everything
 TCP_MSS         equ 1460
@@ -28,6 +50,7 @@ TS_CLOSE_WAIT   equ 5
 TS_CLOSING      equ 6
 TS_LAST_ACK     equ 7
 TS_TIME_WAIT    equ 8
+TS_SYN_RCVD     equ 9                   ; a SYN came to a listener; SYN+ACK sent
 
 ; header flags
 TCP_FIN         equ 0x01
@@ -82,7 +105,21 @@ TC_INDEX        equ 124
 TC_RXBY         equ 128                 ; bytes received
 TC_TXBY         equ 136                 ; bytes acknowledged
 TC_RECOVER      equ 144                 ; TC_NXT when fast recovery began
+TC_USER         equ 152                 ; the owner's
+TC_HELD         equ 160                 ; dword: handed over, not yet consumed
+TC_RLIMIT       equ 164                 ; dword: tcp_flow's, 0 = none
+TC_ADV          equ 168                 ; dword: the window last offered
+TC_LISTENER     equ 176                 ; what accepted it, or will
 TC_SIZE         equ 256
+
+; a listener
+LS_PORT         equ 0                   ; dword, 0 = free
+LS_HALF         equ 4                   ; dword: connections half open
+LS_OPS          equ 8                   ; the handlers its connections get
+LS_ACCEPT       equ 16
+LS_USER         equ 24                  ; the owner's
+LS_ACCEPTED     equ 32                  ; qword: how many
+LS_SIZE         equ 40
 
 section .text
 
@@ -209,6 +246,142 @@ tcp_abort:
     pop rsi
     pop rdx
     pop rcx
+    ret
+
+tcp_listen:
+    push r8
+    push r9
+    push r10
+    xor r8d, r8d                        ; a free listener
+    lea r9, [tcp_listeners]
+    mov r10d, MAX_LISTEN
+.scan:
+    mov eax, [r9 + LS_PORT]
+    test eax, eax
+    jnz .used
+    test r8, r8
+    jnz .next
+    mov r8, r9
+    jmp .next
+.used:
+    cmp eax, edi
+    je .refused                         ; someone listens there already
+.next:
+    add r9, LS_SIZE
+    dec r10d
+    jnz .scan
+    test r8, r8
+    jz .refused
+    test edi, edi
+    jz .refused
+    cmp edi, 65535
+    ja .refused
+    mov [r8 + LS_PORT], edi
+    mov dword [r8 + LS_HALF], 0
+    mov [r8 + LS_OPS], rsi
+    mov [r8 + LS_ACCEPT], rdx
+    mov [r8 + LS_USER], rcx
+    mov qword [r8 + LS_ACCEPTED], 0
+    mov rax, r8
+    clc
+    jmp .out
+.refused:
+    stc
+.out:
+    pop r10
+    pop r9
+    pop r8
+    ret
+
+tcp_unlisten:
+    push rcx
+    push r12
+    mov dword [rdi + LS_PORT], 0
+    xor ecx, ecx
+.next:
+    cmp ecx, MAX_TCP
+    jae .out
+    imul r12, rcx, TC_SIZE
+    lea rax, [tcp_conns]
+    add r12, rax
+    inc ecx
+    cmp [r12 + TC_LISTENER], rdi
+    jne .next
+    cmp dword [r12 + TC_STATE], TS_SYN_RCVD
+    jne .next
+    push rdi
+    mov rdi, r12
+    call tcp_abort
+    pop rdi
+    jmp .next
+.out:
+    pop r12
+    pop rcx
+    ret
+
+tcp_flow:
+    push rax
+    cmp esi, 65535
+    jbe .set
+    mov esi, 65535
+.set:
+    mov [rdi + TC_RLIMIT], esi
+    pop rax
+    ret
+
+tcp_consumed:
+    push rax
+    push rcx
+    push r12
+    mov r12, rdi
+    mov eax, [r12 + TC_HELD]
+    sub eax, esi
+    jae .held
+    xor eax, eax
+.held:
+    mov [r12 + TC_HELD], eax
+    cmp dword [r12 + TC_RLIMIT], 0
+    je .out
+    mov eax, [r12 + TC_STATE]           ; still taking data?
+    cmp eax, TS_ESTABLISHED
+    je .open
+    cmp eax, TS_FIN_WAIT1
+    je .open
+    cmp eax, TS_FIN_WAIT2
+    jne .out
+.open:
+    call tcp_window                     ; worth saying? from under a segment,
+    mov ecx, [r12 + TC_ADV]             ; or by half the limit
+    cmp ecx, [r12 + TC_MSS]
+    jae .half
+    cmp eax, [r12 + TC_MSS]
+    jae .say
+.half:
+    sub eax, ecx
+    jbe .out
+    mov ecx, [r12 + TC_RLIMIT]
+    shr ecx, 1
+    cmp eax, ecx
+    jb .out
+.say:
+    or dword [r12 + TC_FLAGS], TF_ACKNOW
+    call tcp_output
+.out:
+    pop r12
+    pop rcx
+    pop rax
+    ret
+
+; tcp_window(R12) -> EAX = the window to offer now. Preserves others.
+tcp_window:
+    mov eax, TCP_WINDOW
+    cmp dword [r12 + TC_RLIMIT], 0
+    je .out
+    mov eax, [r12 + TC_RLIMIT]
+    sub eax, [r12 + TC_HELD]
+    jae .out
+    xor eax, eax
+.out:
     ret
 
 ; -----------------------------------------------------------------------------
@@ -338,6 +511,7 @@ tcp_free:
     push r9
     push r10
     push r11
+    call tcp_half_gone
     mov rcx, [r12 + TC_OPS]
     mov qword [r12 + TC_OPS], 0
     mov dword [r12 + TC_STATE], TS_CLOSED
@@ -357,6 +531,22 @@ tcp_free:
     pop rdx
     pop rcx
     pop rax
+    ret
+
+; tcp_half_gone(R12): if it was half open, its listener has one fewer.
+; Preserves all.
+tcp_half_gone:
+    cmp dword [r12 + TC_STATE], TS_SYN_RCVD
+    jne .out
+    push rax
+    mov rax, [r12 + TC_LISTENER]
+    test rax, rax
+    jz .none
+    dec dword [rax + LS_HALF]
+.none:
+    pop rax
+    mov dword [r12 + TC_STATE], TS_CLOSED   ; (not twice)
+.out:
     ret
 
 ; tcp_time_wait(R12): both sides are done. The connection lingers a while
@@ -469,7 +659,10 @@ tcp_segment:
     lea eax, [ebx * 4]                  ; header length in dwords, high nibble
     mov [r8 + 12], al
     mov [r8 + 13], dl
-    mov word [r8 + 14], (TCP_WINDOW >> 8) | ((TCP_WINDOW & 0xFF) << 8)
+    call tcp_window
+    mov [r12 + TC_ADV], eax
+    xchg al, ah
+    mov [r8 + 14], ax
     mov dword [r8 + 16], 0              ; checksum, urgent pointer
     mov eax, [net_ip]                   ; the pseudo-header
     mov [tcp_ph], eax
@@ -500,13 +693,17 @@ tcp_segment:
     pop rbx
     ret
 
-; tcp_send_syn(R12) -> CF if there is no route. Timed unless it is sent
-; again. Preserves all but RAX.
+; tcp_send_syn(R12) -> CF if there is no route: a SYN, or for a connection
+; half open a SYN+ACK. Timed unless it is sent again. Preserves all but RAX.
 tcp_send_syn:
     push rcx
     push rdx
     mov eax, [r12 + TC_ISS]
     mov edx, TCP_SYN
+    cmp dword [r12 + TC_STATE], TS_SYN_RCVD
+    jne .flags
+    mov edx, TCP_SYN | TCP_ACK
+.flags:
     xor ecx, ecx
     call tcp_segment
     jc .out
@@ -781,7 +978,10 @@ tcp_timeout:
     mov dword [r12 + TC_DUPS], 0
     and dword [r12 + TC_FLAGS], ~TF_RECOVERY
     cmp dword [r12 + TC_STATE], TS_SYN_SENT
+    je .syn
+    cmp dword [r12 + TC_STATE], TS_SYN_RCVD
     jne .data
+.syn:
     call tcp_send_syn
     jmp .out
 .data:
@@ -933,6 +1133,8 @@ tcp_input:
     call tcp_arrive
     jmp .done
 .stray:
+    call tcp_passive
+    jnc .done
     call tcp_refuse
 .done:
     pop r12
@@ -1002,6 +1204,87 @@ tcp_options:
     pop rcx
     ret
 
+; tcp_passive: a SYN for no connection, to a port listened on: a connection
+; half open, SYN+ACK sent. CF if it is not that, or no room. Clobbers R12.
+tcp_passive:
+    push rcx
+    push rdx
+    push rsi
+    mov eax, [ts_flags]
+    and eax, TCP_SYN | TCP_ACK | TCP_RST | TCP_FIN
+    cmp eax, TCP_SYN
+    jne .no
+    lea rsi, [tcp_listeners]
+    mov ecx, MAX_LISTEN
+    mov eax, [ts_dport]
+.find:
+    cmp [rsi + LS_PORT], eax
+    je .found
+    add rsi, LS_SIZE
+    dec ecx
+    jnz .find
+    jmp .no
+.found:
+    cmp dword [rsi + LS_HALF], LISTEN_HALF
+    jae .drop                           ; too many already: as if it was lost
+    call tcp_slot
+    jc .drop
+    inc dword [rsi + LS_HALF]
+    mov [r12 + TC_LISTENER], rsi
+    mov eax, [ts_src]
+    mov [r12 + TC_RIP], eax
+    mov eax, [ts_sport]
+    mov [r12 + TC_RPORT], eax
+    mov eax, [ts_dport]
+    mov [r12 + TC_LPORT], eax
+    call net_random
+    mov [r12 + TC_ISS], eax
+    mov [r12 + TC_UNA], eax
+    inc eax
+    mov [r12 + TC_NXT], eax
+    mov eax, [ts_seq]
+    inc eax
+    mov [r12 + TC_RCV], eax
+    mov eax, [ts_wnd]
+    mov [r12 + TC_WND], eax
+    call tcp_their_mss
+    mov rax, [net_second]
+    mov [r12 + TC_RTO], rax
+    mov dword [r12 + TC_STATE], TS_SYN_RCVD
+    call tcp_send_syn                   ; (no route: the timer tries again)
+.drop:
+    clc                                 ; taken, or dropped: no reset
+    jmp .out
+.no:
+    stc
+.out:
+    pop rsi
+    pop rdx
+    pop rcx
+    ret
+
+; tcp_their_mss(R12): the MSS the SYN in ts_* offered (536 without one),
+; within 64 and ours; the congestion window from it. Preserves all but RAX.
+tcp_their_mss:
+    mov eax, [ts_mss]
+    test eax, eax
+    jnz .mss
+    mov eax, 536                        ; the default without the option
+.mss:
+    cmp eax, TCP_MSS
+    jbe .mss_max
+    mov eax, TCP_MSS
+.mss_max:
+    cmp eax, 64
+    jae .mss_min
+    mov eax, 64
+.mss_min:
+    mov [r12 + TC_MSS], eax
+    imul eax, eax, 10                   ; RFC 6928's initial window
+    mov [r12 + TC_CWND], eax
+    mov dword [r12 + TC_SSTH], 0x7FFFFFFF
+    ret
+
 ; tcp_refuse: a segment for no connection gets a reset, unless it is one.
 ; Clobbers R12.
 tcp_refuse:
@@ -1041,6 +1324,8 @@ tcp_refuse:
 
 ; tcp_arrive(R12): the segment in ts_*, for this connection
 tcp_arrive:
+    cmp dword [r12 + TC_STATE], TS_SYN_RCVD
+    je tcp_arrive_half
     cmp dword [r12 + TC_STATE], TS_SYN_SENT
     jne .synced
     test byte [ts_flags], TCP_ACK
@@ -1063,23 +1348,7 @@ tcp_arrive:
     mov [r12 + TC_UNA], eax
     mov eax, [ts_wnd]
     mov [r12 + TC_WND], eax
-    mov eax, [ts_mss]
-    test eax, eax
-    jnz .mss
-    mov eax, 536                        ; the default without the option
-.mss:
-    cmp eax, TCP_MSS
-    jbe .mss_max
-    mov eax, TCP_MSS
-.mss_max:
-    cmp eax, 64
-    jae .mss_min
-    mov eax, 64
-.mss_min:
-    mov [r12 + TC_MSS], eax
-    imul eax, eax, 10                   ; RFC 6928's initial window
-    mov [r12 + TC_CWND], eax
-    mov dword [r12 + TC_SSTH], 0x7FFFFFFF
+    call tcp_their_mss
     cmp qword [r12 + TC_RTT_AT], 0      ; the SYN's round trip
     je .no_rtt
     call net_clock
@@ -1188,6 +1457,19 @@ tcp_arrive:
     add rsi, rax
     sub ecx, eax
     jz .fin
+    cmp dword [r12 + TC_RLIMIT], 0      ; flow control: what the window holds
+    je .take
+    call tcp_window
+    cmp ecx, eax
+    jbe .held
+    mov ecx, eax                        ; the rest, and a FIN after it, wait
+    and dword [ts_flags], ~TCP_FIN
+    or dword [r12 + TC_FLAGS], TF_ACKNOW
+    test ecx, ecx
+    jz .respond
+.held:
+    add [r12 + TC_HELD], ecx
+.take:
     mov edx, ecx
     add [r12 + TC_RCV], ecx
     add [r12 + TC_RXBY], rcx
@@ -1222,6 +1504,84 @@ tcp_arrive:
     or dword [r12 + TC_FLAGS], TF_ACKNOW
 .respond:
     jmp tcp_output
+.drop:
+    ret
+
+; tcp_arrive_half(R12): the segment, for a connection half open. Its
+; handshake's last ACK makes it established and accepted; then whatever
+; else the segment holds is taken as on any connection.
+tcp_arrive_half:
+    test byte [ts_flags], TCP_RST
+    jz .no_rst
+    mov eax, [ts_seq]
+    cmp eax, [r12 + TC_RCV]
+    jne .drop
+    xor esi, esi
+    jmp tcp_free                        ; (no handlers: no word)
+.no_rst:
+    test byte [ts_flags], TCP_SYN
+    jz .no_syn
+    mov eax, [ts_seq]                   ; their SYN again: ours again
+    inc eax
+    cmp eax, [r12 + TC_RCV]
+    jne .drop
+    jmp tcp_send_syn
+.no_syn:
+    test byte [ts_flags], TCP_ACK
+    jz .drop
+    mov eax, [r12 + TC_ISS]
+    inc eax
+    cmp [ts_ack], eax
+    jne tcp_refuse                      ; an ACK for something never sent
+    mov [r12 + TC_UNA], eax
+    mov eax, [ts_wnd]
+    mov [r12 + TC_WND], eax
+    cmp qword [r12 + TC_RTT_AT], 0      ; the SYN+ACK's round trip
+    je .no_rtt
+    call net_clock
+    sub rax, [r12 + TC_RTT_AT]
+    call tcp_rtt
+    mov qword [r12 + TC_RTT_AT], 0
+.no_rtt:
+    call tcp_half_gone                  ; (state CLOSED for a moment)
+    mov dword [r12 + TC_RETRIES], 0
+    mov qword [r12 + TC_RTX_AT], 0
+    call tcp_arm
+    mov dword [r12 + TC_STATE], TS_ESTABLISHED
+    mov rsi, [r12 + TC_LISTENER]
+    test rsi, rsi
+    jz .refuse
+    cmp dword [rsi + LS_PORT], 0        ; stopped listening meanwhile
+    je .refuse
+    mov rax, [rsi + LS_OPS]
+    mov [r12 + TC_OPS], rax
+    inc qword [rsi + LS_ACCEPTED]
+    push rcx
+    push rdx
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    mov rdi, r12
+    call [rsi + LS_ACCEPT]
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rdx
+    pop rcx
+    jc .refuse
+    mov eax, TH_OPEN
+    call tcp_event
+    cmp dword [r12 + TC_STATE], TS_CLOSED
+    je .drop
+    jmp tcp_arrive                      ; the rest of the segment, established
+.refuse:
+    mov qword [r12 + TC_OPS], 0
+    mov rdi, r12
+    jmp tcp_abort
 .drop:
     ret
 
@@ -1344,7 +1704,188 @@ tcp_acked:
 ;  Shell
 ; -----------------------------------------------------------------------------
 
+; tcp [echo <port> | stop <port>]
 cmd_tcp:
+    mov rsi, [sh_args]
+    cmp byte [rsi], 0
+    je tcp_list
+    call arg_split
+    push rdi                            ; the port's text
+    lea rdi, [str_tcp_echo]
+    call streq
+    mov ecx, eax
+    lea rdi, [str_tcp_stop]
+    call streq
+    pop rsi
+    test ecx, ecx
+    jnz .echo
+    test eax, eax
+    jnz .stop
+.usage:
+    KLOG "usage: tcp [echo <port> | stop <port>]"
+    ret
+.echo:
+    call arg_uint
+    jc .usage
+    mov edi, eax
+    lea rsi, [tcp_echo_ops]
+    lea rdx, [tcp_echo_accept]
+    xor ecx, ecx
+    call tcp_listen
+    jc .taken
+    KLOG "tcp: echoing what comes to port %u", rdi
+    ret
+.taken:
+    KLOG "tcp: cannot listen on port %u (taken, or no listener free)", rdi
+    ret
+.stop:
+    call arg_uint
+    jc .usage
+    lea rdi, [tcp_listeners]
+    mov ecx, MAX_LISTEN
+.find:
+    cmp [rdi + LS_PORT], eax
+    je .found
+    add rdi, LS_SIZE
+    dec ecx
+    jnz .find
+    KLOG "tcp: nothing listens on port %u", rax
+    ret
+.found:
+    mov ecx, eax
+    call tcp_unlisten
+    KLOG "tcp: port %u: no longer listening (%u accepted)", rcx, qword [rdi + LS_ACCEPTED]
+    ret
+
+; -----------------------------------------------------------------------------
+;  tcp echo: what comes is sent back, through a 16 KiB window. Bytes are
+;  consumed (the window opens) only once TCP's send buffer has them; the
+;  rest waits in tcp_echo_buf, tried again after each round of the network.
+; -----------------------------------------------------------------------------
+
+TCP_ECHO_WIN    equ 16384
+
+; tcp_echo_accept(RDI = a connection, RSI = the listener)
+tcp_echo_accept:
+    mov esi, TCP_ECHO_WIN
+    call tcp_flow
+    mov eax, [rdi + TC_INDEX]
+    mov dword [tcp_echo_len + rax * 4], 0
+    mov byte [tcp_echo_fin + rax], 0
+    mov ecx, [rdi + TC_RPORT]
+    mov edx, [rdi + TC_RIP]
+    KLOG "tcp: echo: %I:%u connected", rdx, rcx
+    clc
+    ret
+
+tcp_echo_open:
+    ret
+
+; RSI = data, EDX = bytes: behind what waits, then as much as goes out
+tcp_echo_data:
+    push rbx
+    mov ebx, [rdi + TC_INDEX]
+    imul rax, rbx, TCP_ECHO_WIN
+    lea rcx, [tcp_echo_buf]
+    add rax, rcx
+    mov ecx, [tcp_echo_len + rbx * 4]
+    push rdi
+    lea rdi, [rax + rcx]
+    add ecx, edx
+    cmp ecx, TCP_ECHO_WIN               ; (the window keeps it within)
+    ja .over
+    mov [tcp_echo_len + rbx * 4], ecx
+    mov ecx, edx
+    rep movsb
+    pop rdi
+    call tcp_echo_flush
+    pop rbx
+    ret
+.over:
+    pop rdi
+    KLOG "tcp: echo: more came than the window allows"
+    call tcp_abort
+    pop rbx
+    ret
+
+; tcp_echo_flush(RDI = a connection): what waits, into TCP's send buffer
+tcp_echo_flush:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    mov ebx, [rdi + TC_INDEX]
+    mov edx, [tcp_echo_len + rbx * 4]
+    test edx, edx
+    jz .fin
+    imul rsi, rbx, TCP_ECHO_WIN
+    lea rax, [tcp_echo_buf]
+    add rsi, rax
+    call tcp_write
+    test eax, eax
+    jz .out
+    mov ecx, [tcp_echo_len + rbx * 4]   ; what is left, to the front
+    sub ecx, eax
+    mov [tcp_echo_len + rbx * 4], ecx
+    push rdi
+    mov rdi, rsi
+    add rsi, rax
+    rep movsb
+    pop rdi
+    mov esi, eax
+    call tcp_consumed
+    cmp dword [tcp_echo_len + rbx * 4], 0
+    jne .out
+.fin:
+    cmp byte [tcp_echo_fin + rbx], 1    ; they are done, and so are we
+    jne .out
+    mov byte [tcp_echo_fin + rbx], 2
+    call tcp_close
+.out:
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+tcp_echo_eof:
+    mov eax, [rdi + TC_INDEX]
+    mov byte [tcp_echo_fin + rax], 1
+    jmp tcp_echo_flush
+
+tcp_echo_gone:
+    mov eax, [rdi + TC_INDEX]
+    mov dword [tcp_echo_len + rax * 4], 0
+    mov byte [tcp_echo_fin + rax], 0
+    mov ecx, [rdi + TC_RPORT]
+    mov edx, [rdi + TC_RIP]
+    KLOG "tcp: echo: %I:%u gone (%u): %b echoed", rdx, rcx, rsi, qword [rdi + TC_TXBY]
+    ret
+
+; tcp_echo_tick: from net_service, after the rest. Preserves all but RAX.
+tcp_echo_tick:
+    push rcx
+    push rdi
+    xor ecx, ecx
+.next:
+    imul rdi, rcx, TC_SIZE
+    lea rax, [tcp_conns]
+    add rdi, rax
+    inc ecx
+    cmp dword [tcp_echo_len + rcx * 4 - 4], 0
+    je .skip
+    lea rax, [tcp_echo_ops]
+    cmp [rdi + TC_OPS], rax
+    jne .skip
+    call tcp_echo_flush
+.skip:
+    cmp ecx, MAX_TCP
+    jb .next
+    pop rdi
+    pop rcx
+    ret
+
+tcp_list:
     push rbx
     push r12
     push r13
@@ -1375,8 +1916,27 @@ cmd_tcp:
     pop rdx
     pop rax
     KLOG "tcp: port %u to %I:%u, %s, %b in, %b out, rtt %u ms", rax, rdx, rsi, rcx, qword [r12 + TC_RXBY], qword [r12 + TC_TXBY], rdi
+    mov eax, [r12 + TC_RLIMIT]
+    test eax, eax
+    jz .next
+    mov ecx, [r12 + TC_ADV]
+    mov edx, [r12 + TC_HELD]
+    KLOG "      window offered %u of %u, %u held", rcx, rax, rdx
     jmp .next
 .end:
+    lea r12, [tcp_listeners]
+    mov ebx, MAX_LISTEN
+.listener:
+    mov eax, [r12 + LS_PORT]
+    test eax, eax
+    jz .no_listener
+    inc r13d
+    mov ecx, [r12 + LS_HALF]
+    KLOG "tcp: listening on port %u: %u accepted, %u half open", rax, qword [r12 + LS_ACCEPTED], rcx
+.no_listener:
+    add r12, LS_SIZE
+    dec ebx
+    jnz .listener
     test r13d, r13d
     jnz .out
     KLOG "tcp: no connections"
@@ -1396,15 +1956,25 @@ str_ts_close_wait:  db 'they have closed', 0
 str_ts_closing:     db 'closing (both FINs)', 0
 str_ts_last_ack:    db 'closing (last ACK)', 0
 str_ts_time_wait:   db 'time-wait', 0
+str_ts_syn_rcvd:    db 'accepting', 0
+str_tcp_echo:       db 'echo', 0
+str_tcp_stop:       db 'stop', 0
+align 8
+tcp_echo_ops:       dq tcp_echo_open, tcp_echo_data, tcp_echo_eof, tcp_echo_gone
 align 8
 tcp_state_names:
     dq str_ts_closed, str_ts_syn_sent, str_ts_established, str_ts_fin_wait1
     dq str_ts_fin_wait2, str_ts_close_wait, str_ts_closing, str_ts_last_ack
-    dq str_ts_time_wait
+    dq str_ts_time_wait, str_ts_syn_rcvd
 
 section .bss
 alignb 8
 tcp_conns:      resb MAX_TCP * TC_SIZE
+tcp_listeners:  resb MAX_LISTEN * LS_SIZE
+tcp_echo_len:   resd MAX_TCP                ; bytes waiting to go back
+tcp_echo_fin:   resb MAX_TCP                ; 1: they are done; 2: so are we
+alignb 16
+tcp_echo_buf:   resb MAX_TCP * TCP_ECHO_WIN
 tcp_scratch:    resb TC_SIZE            ; for resets to segments of no connection
 ts_data:        resq 1                  ; the segment being looked at
 ts_seq:         resd 1

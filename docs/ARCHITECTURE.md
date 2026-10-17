@@ -707,11 +707,21 @@ off. `log` shows the state; `log save`, `log on`, `log off`.
   2 s apart) and ping (a TSC stamp in each request gives the round trip).
   Each runs on `net_service`'s timers, so the prompt comes back at once;
   ctrl+C stops a ping or a lookup.
-- **TCP** (`tcp.asm`): the client side, eight connections. Something in
-  the kernel opens one with a table of four handlers (open, data, the other
-  side's FIN, gone and why) and writes into an 8 KiB send buffer. MSS 1460
-  is offered and the peer's honoured; the window offered is a fixed 64240,
-  because handlers take every byte as it comes. Retransmission follows RFC
+- **TCP** (`tcp.asm`): sixteen connections, each with a 128 KiB send
+  buffer. Something in the kernel opens one with a table of four handlers
+  (open, data, the other side's FIN, gone and why) and a word of its own
+  (`TC_USER`), or listens on a port (`tcp_listen`, eight listeners): a SYN
+  there makes a connection half open (SYN_RCVD, eight at most per listener,
+  its SYN+ACK resent on the timer and forgotten without a word if the
+  handshake never ends), and the last ACK of the handshake makes it
+  established and asks the listener's accept function, which may refuse it
+  (a reset) or take it; then the listener's handlers hear TH_OPEN and the
+  rest of that segment. MSS 1460 is offered and the peer's honoured. The
+  window offered is a fixed 64240 for handlers that take every byte as it
+  comes; one that asks for flow control (`tcp_flow`) is offered its limit
+  less what it holds, data beyond that is left for the peer to send again,
+  and `tcp_consumed` opens the window, with an ACK once it has grown by a
+  segment from nearly shut, or by half. Retransmission follows RFC
   6298 (smoothed RTT and its variation in TSC ticks, Karn's rule, doubling,
   200 ms to 60 s, eight tries); RFC 5681's slow start and congestion
   avoidance start from a ten-segment window; three duplicate ACKs resend
@@ -721,7 +731,10 @@ off. `log` shows the state; `log save`, `log on`, `log off`.
   after a gap are dropped and the ACK repeats what is missing; overlapping
   ones are trimmed. A segment for no connection gets a reset. Both closes
   work; TIME_WAIT lasts 10 s, and a new connection may take over a slot in
-  it. `tcp` lists connections with their state, bytes and round trip.
+  it. `tcp` lists connections with their state, bytes, round trip and
+  window, and listeners; `tcp echo <port>` sends back whatever comes to that
+  port, through a 16 KiB window, consuming only what TCP's send buffer has
+  taken (`tcp stop <port>` ends it).
 - **HTTP** (`http.asm`): one request at a time for a client, a table of
   four handlers (the request, data, done, lost), so that `http` and `ask`
   share the connection, TLS and failure handling. `http_hangup` lets a
@@ -745,9 +758,13 @@ off. `log` shows the state; `log save`, `log on`, `log off`.
   and duplicates others; refuses, resets, keeps silent, holds a zero window,
   and asks for 64-byte segments, with three duplicate ACKs at a gap. Every
   case completes, and the 200 KB it serves through the losses arrives
-  intact. The RTL8168 code paths (G-family takeover, PHY, MSI) run only on
-  real hardware. Not yet: a TCP server side, IPv6,
-  other NICs.
+  intact. `tools/test/tcp/run.py` forwards host ports to `tcp echo` in the
+  guest: 1 MiB echoed while read; 3 MB sent while nothing is read back,
+  through a client with a 4 KiB receive buffer, until the guest's window
+  is shut with all 16 KiB held, then all of it back in order; both FINs;
+  twelve clients at once; a reset from a port nobody listens on; `tcp stop`.
+  The RTL8168 code paths (G-family takeover, PHY, MSI) run only on
+  real hardware. Not yet: IPv6, other NICs.
 
 ## TLS: `tls.asm`, `rand.asm`, `sha256.asm`, `aesgcm.asm`, `x25519.asm`, and certificates
 
