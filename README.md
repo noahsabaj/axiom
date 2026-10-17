@@ -24,7 +24,9 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   `shell`) opens another shell, each with its own output, scroll-back (the
   wheel), history and commands running; what a command prints later goes to
   the shell it was typed in. `win` lists the windows and moves, sizes,
-  raises, minimises or closes one.
+  raises, minimises or closes one. **Programs open windows of their own**,
+  by capability: pixels they draw into, keys, clicks, drags and the wheel
+  as messages over a channel, and a title; `run paint` is one to draw in.
 - **USB** on every xHCI controller: hubs (nested, USB 2 and 3), hot-plug, and a
   HID report parser for keyboards (6-key and N-key rollover), mice and tablets.
   A mouse cursor: in the Mandelbrot's window, click to recentre it, wheel to
@@ -115,7 +117,7 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   when its handle is closed, revoked or given away. A fault in a program
   ends that program, says what it ran into, and nothing else notices;
   killing one (ctrl+C, or a program killing its child) ends every program
-  it started too. `hello`, `test`, `child`, `fault`, `spin` and `stash` come with it
+  it started too. `hello`, `test`, `child`, `fault`, `spin`, `stash` and `paint` come with it
   (`src/user/`); `user test` runs them all, with a fault of every kind.
 - ACPI (MADT, MCFG, FADT, the DSDT's `_S5_`), SMBIOS, PCI Express enumeration,
   x2APIC (falling back to xAPIC), I/O APIC, TSC-deadline timer, and a panic

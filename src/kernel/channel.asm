@@ -21,6 +21,8 @@
 ;      RAX = bytes (needs RT_CH_SEND, and RT_MEM_READ on the memory)
 ;    h_ch_recv(EDI, ESI = memory, RDX = offset, RCX = room) -> RAX = bytes
 ;      (needs RT_CH_RECV, and RT_MEM_WRITE)
+;    ch_post(RDI = an end, RSI = bytes in the kernel, RDX = how many) -> RAX
+;      = bytes, or E_*: the kernel's own send (a window's events)
 ;  ch_lock covers every channel's ends and queues, taken with interrupts
 ;  off; waiters are woken under it. No memory is copied with it held.
 ; =============================================================================
@@ -264,6 +266,64 @@ h_ch_recv:
     call op_done
     pop r15
     pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+ch_post:
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov r13, rdx
+    mov rax, E_ARG
+    cmp r13, CH_MSG_MAX
+    ja .out
+    lea rdi, [r13 + CM_DATA]
+    call kmalloc
+    test rax, rax
+    jz .nomem
+    mov [rax + CM_LEN], r13
+    lea rdi, [rax + CM_DATA]
+    mov rsi, r12
+    mov rcx, r13
+    rep movsb
+    mov r12, rax                        ; R12 = the message
+    CH_LOCK
+    mov rdi, [rbx + CH_PEER]
+    mov rax, E_PEER
+    test rdi, rdi
+    jz .refused
+    mov rax, E_FULL
+    cmp dword [rdi + CH_COUNT], CH_QUEUE_MAX
+    jae .refused
+    mov rax, [rdi + CH_TAIL]
+    test rax, rax
+    jz .first
+    mov [rax + CM_NEXT], r12
+    jmp .queued
+.first:
+    mov [rdi + CH_HEAD], r12
+.queued:
+    mov [rdi + CH_TAIL], r12
+    inc dword [rdi + CH_COUNT]
+    inc qword [rbx + CH_SENT]
+    call ch_wake
+    CH_UNLOCK
+    mov rax, r13
+    jmp .out
+.refused:
+    CH_UNLOCK
+    push rax
+    mov rdi, r12
+    call kfree
+    pop rax
+    jmp .out
+.nomem:
+    mov rax, E_NOMEM
+.out:
     pop r13
     pop r12
     pop rbx

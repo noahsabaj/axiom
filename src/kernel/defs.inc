@@ -85,7 +85,9 @@ OT_CHANNEL      equ 7                   ; one end of a channel (channel.asm)
 OT_STORE        equ 8                   ; names in the store, under a prefix (store.asm)
 OT_NET          equ 9                   ; the network, to some hosts and ports (socket.asm)
 OT_SOCKET       equ 10                  ; a connection, or a port listened on (socket.asm)
-OT_TYPES        equ 11                  ; with 0, none
+OT_DESK         equ 11                  ; the desktop: windows can be opened on it (window.asm)
+OT_WINDOW       equ 12                  ; a program's window (window.asm)
+OT_TYPES        equ 13                  ; with 0, none
 
 ; what a capability allows (RT_*): three for any object, the rest by type
 RT_DUP          equ 1 << 0              ; derive more from it
@@ -115,6 +117,8 @@ RT_NET_LISTEN   equ 1 << 11             ; listen on a port
 RT_NET_ALL      equ RT_NET_CONNECT | RT_NET_TLS | RT_NET_INSECURE | RT_NET_LISTEN
 RT_SK_SEND      equ 1 << 8              ; a socket: send on it, shut it
 RT_SK_RECV      equ 1 << 9              ; receive from it, accept at it, wait to
+RT_DESK_WINDOW  equ 1 << 8              ; the desktop: open windows on it
+RT_WIN_DRAW     equ 1 << 8              ; a window: show what was drawn, title it
 RT_ALL          equ 0xFFFF
 
 ; what handle operations return when they fail
@@ -413,7 +417,11 @@ RO_NET_SUB      equ 29                  ; handle = the network, handle2 + a0: a
                                         ; "*.name" for those under it, "" any),
                                         ; a1 = a port or 0, a2 = rights -> a
                                         ; handle reaching no more than both
-RO_COUNT        equ 30
+RO_WIN_SHOW     equ 30                  ; handle = a window, a0 = x, a1 = y, a2 =
+                                        ; w | h << 32 (0: all of it): what was
+                                        ; drawn there is shown
+RO_WIN_TITLE    equ 31                  ; handle, handle2 + a0: a1 bytes of UTF-8, its title
+RO_COUNT        equ 32
 
 ; RO_NET_CONNECT's a2
 NETF_TLS        equ 1
@@ -559,6 +567,7 @@ SB_TSC_PER_US   equ 24                  ; for deadlines
 SB_ARGS_LEN     equ 32                  ; dword
 SB_STORE        equ 36                  ; dword: to the store under "name/", or 0
 SB_NET          equ 40                  ; dword: to the network, or 0
+SB_DESK         equ 44                  ; dword: to the desktop, or 0
 SB_ARGS         equ 64                  ; the arguments it was run with, NUL-ended
 SB_ARGS_MAX     equ 4096 - SB_ARGS - 1
 
@@ -577,7 +586,28 @@ SYS_SPAWN       equ 9                   ; (memory, offset, bytes of "program arg
                                         ; a handle to give it or 0) -> RAX = the
                                         ; task, RDX = its first thread
 SYS_CHANNEL_NEW equ 10                  ; -> RAX, RDX = the two ends of a channel
-SYS_COUNT       equ 11
+SYS_WINDOW_NEW  equ 11                  ; (desktop, width, height, a channel's end,
+                                        ; which the window takes) -> RAX = the
+                                        ; window, RDX = its pixels: memory, B,G,R,x
+                                        ; at width * 4 bytes a row
+SYS_COUNT       equ 12
+
+; what a window says, from the channel end it was given: a message of WE_SIZE
+; bytes to its peer for each
+WE_KIND         equ 0                   ; dword: WE_KEY ...
+WE_CODE         equ 4                   ; dword: the key; the button (1 left, 2
+                                        ; right, 3 middle); the wheel's notches
+                                        ; (up positive)
+WE_X            equ 8                   ; dword, signed: the pointer, in the window
+WE_Y            equ 12
+WE_SIZE         equ 16
+WE_KEY          equ 1                   ; a key, while it has the keys
+WE_PRESS        equ 2                   ; a button pressed in it
+WE_RELEASE      equ 3                   ; and let go (anywhere)
+WE_MOVE         equ 4                   ; the pointer moved, a button held
+WE_WHEEL        equ 5
+WE_CLOSE        equ 6                   ; its close button: it is asked to go
+WIN_MAX         equ 4096                ; a side, at most
 
 ; UEFI memory types
 MT_RESERVED     equ 0

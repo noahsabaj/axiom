@@ -610,6 +610,9 @@ cap_find:
     ret
 .used:
     mov rax, [rdx + HS_CAP]
+    test rax, rax                       ; emptied by cap_drop_all: its task is
+    jnz .out                            ; ending, while a request it made runs
+    mov rax, E_BADH
 .out:
     ret
 
@@ -1471,6 +1474,8 @@ str_rt_connect: db 'connect', 0
 str_rt_tls:     db 'tls', 0
 str_rt_insecure: db 'insecure', 0
 str_rt_listen:  db 'listen', 0
+str_rt_window:  db 'window', 0
+str_rt_draw:    db 'draw', 0
 str_e_ok:       db 'ok', 0
 str_e_badh:     db 'no such handle', 0
 str_e_type:     db 'the wrong type', 0
@@ -1521,6 +1526,10 @@ rt_names_net:   dq str_rt_dup, str_rt_give, str_rt_info, 0, 0, 0, 0, 0
                 dq str_rt_connect, str_rt_tls, str_rt_insecure, str_rt_listen, 0, 0, 0, 0
 rt_names_socket: dq str_rt_dup, str_rt_give, str_rt_info, 0, 0, 0, 0, 0
                 dq str_rt_send, str_rt_recv, 0, 0, 0, 0, 0, 0
+rt_names_desk:  dq str_rt_dup, str_rt_give, str_rt_info, 0, 0, 0, 0, 0
+                dq str_rt_window, 0, 0, 0, 0, 0, 0, 0
+rt_names_window: dq str_rt_dup, str_rt_give, str_rt_info, 0, 0, 0, 0, 0
+                dq str_rt_draw, 0, 0, 0, 0, 0, 0, 0
 
 section .data
 align 8
@@ -1537,6 +1546,8 @@ ty_channel:     dq str_ot_channel, ch_destroy, 0, 0, 0, 0, rt_names_channel, ch_
 ty_store:       dq str_ot_store, st_obj_destroy, 0, 0, 0, 0, rt_names_store, 0
 ty_net:         dq str_ot_net, obj_free, 0, 0, 0, 0, rt_names_net, 0
 ty_socket:      dq str_ot_socket, sk_destroy, 0, 0, 0, 0, rt_names_socket, sk_orphan
+ty_desk:        dq str_ot_desk, obj_free, 0, 0, 0, 0, rt_names_desk, 0
+ty_window:      dq str_ot_window, wo_destroy, 0, 0, 0, 0, rt_names_window, wo_orphan
 
 thread_list     equ ty_thread + TY_LIST
 thread_count    equ ty_thread + TY_LIVE

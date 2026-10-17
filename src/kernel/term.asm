@@ -958,7 +958,7 @@ cmd_shell:
 
 section .rodata
 align 8
-term_ops:       dq term_paint, term_key, 0, term_wheel, term_close, 0
+term_ops:       dq term_paint, term_key, 0, term_wheel, term_close, 0, 0
 
 section .data
 term_dirty:     db 0

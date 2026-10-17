@@ -59,7 +59,7 @@ loader reads: magic `AXIOMKRN`, entry point, file size, memory size.
 | 2 | `serial.asm`, `lib.asm`, `log.asm` | COM1 log, TSC time base, `sprintf`, `KLOG`; the clock and the boot volume into the log |
 | 3 | `cpu.asm` | CPUID features and brand, hybrid core types, PAT, NX, SSE/AVX through XSETBV, HWP, telemetry MSRs |
 | 4 | `pmm.asm`, `vmm.asm`, `heap.asm` | Bitmap page allocator from the UEFI memory map; the kernel's own page tables (no identity map, W^X), the vm region, the heap |
-| 5 | `gfx.asm`, `desk.asm`, `term.asm`, `ui.asm` | Framebuffer, surfaces, alpha-blended glyphs; the desktop and the first shell's window (the others once the machine is up) |
+| 5 | `gfx.asm`, `desk.asm`, `term.asm`, `window.asm`, `ui.asm` | Framebuffer, surfaces, alpha-blended glyphs; the desktop and the first shell's window (the others once the machine is up) |
 | 6 | TSS, IST | Guarded stacks: the BSP moves onto its own, the loader's goes back; #DF, NMI and #MC each get one too |
 | 7 | `acpi.asm`, `smbios.asm` | MADT (CPUs, I/O APICs, overrides), MCFG, FADT, `_S5_`; board, BIOS and memory strings |
 | 8 | `pmm.asm` | Reclaim boot-services memory |
@@ -1113,6 +1113,29 @@ text rows.
 - `win` lists the windows (a shell's with its lines and how far it is
   scrolled back); `win move|size|raise|min|close <n>` acts on one.
 
+## Program windows: `window.asm`
+
+- A program run from the console gets a handle to the desktop (`OT_DESK`,
+  `SB_DESK`, right `RT_DESK_WINDOW`). `SYS_WINDOW_NEW(desktop, width,
+  height, a channel's end)` opens a window (`OT_WINDOW`, `WO_*`) and returns
+  it and its pixels: a block of memory the program maps, B,G,R,x at width ×
+  4 bytes a row, which the desktop copies from as it composes. Its size is
+  fixed (no grip); its title starts as the program's name.
+- **What happens to it** goes to the program as messages of `WE_SIZE`
+  bytes, sent from the end it was given (`ch_post`, the kernel's own send)
+  so they arrive at the end the program kept: `WE_KEY` while it has the
+  keys, `WE_PRESS` and `WE_RELEASE` (the button, where), `WE_MOVE` while a
+  button is held in it, `WE_WHEEL`, and `WE_CLOSE` from its close button or
+  `win close`, which only ask (`OP_ASK`).
+- **On its ring:** `RO_WIN_SHOW` (a rectangle, or all of it) puts what was
+  drawn on the screen; `RO_WIN_TITLE` retitles it. Both need `RT_WIN_DRAW`.
+- The program's side runs on any CPU and never touches the desktop's own
+  structures: it notes what it wants in the object under `win_lock`
+  (`WOF_OPEN`, `WOF_TITLE`, `WOF_GONE`) and wakes the main loop, whose
+  `wo_service` (from `desk_service`) opens, retitles and closes. Showing only
+  adds damage, which any thread may. The window closes when its last handle
+  goes (`wo_orphan`): the program ended, was killed, or its shell closed.
+
 ## Terminals: `term.asm`
 
 - Each shell is a window with a terminal (`TW_*`): 1000 lines of 256 cells
@@ -1167,7 +1190,7 @@ from `_S5_`) for power-off, then QEMU's port 0x604.
   one the thread prints to; `SPRINTF buf, "fmt", args...` formats into memory. Arguments are
   64-bit registers, immediates or `qword [mem]`.
 - Structures are `equ` offsets (`PC_*`, `TH_*`, `OB_*`, `TK_*`, `CAP_*`,
-  `HS_*`, `EV_*`, `MO_*`, `RG_*`, `RA_*`, `SQ_*`, `CQ_*`, `RQ_*`, `TM_*`, `AS_*`, `AM_*`, `AXE_*`, `SF_*`, `WN_*`, `TW_*`,
+  `HS_*`, `EV_*`, `MO_*`, `RG_*`, `RA_*`, `SQ_*`, `CQ_*`, `RQ_*`, `TM_*`, `AS_*`, `AM_*`, `AXE_*`, `SF_*`, `WN_*`, `TW_*`, `WO_*`, `WE_*`,
   `SB_*`, `SR_*`, `CH_*`, `CM_*`, `PE_*`, `XC_*`, `DV_*`, `NV_*`, `DK_*`, `VO_*`, `VF_*`). Programs include
   `defs.inc` too: it is their ABI.
 - No code a system call or an interrupt reaches uses SIMD, so neither saves

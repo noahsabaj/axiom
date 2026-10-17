@@ -106,6 +106,7 @@ section .text
 %include "shell.asm"
 %include "desk.asm"
 %include "term.asm"
+%include "window.asm"
 %include "power.asm"
 %include "boot.asm"
 

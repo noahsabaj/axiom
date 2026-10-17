@@ -3,7 +3,7 @@
 
     python tools/test/desk/run.py
 
-Boots build/esp with a USB tablet (an absolute pointer) and checks, from the
+Boots build/esp from a USB stick, with a USB tablet (an absolute pointer) and checks, from the
 serial log ('win' lists the windows) and from screenshots:
   - at the start: four windows (shell 1 with the keys, System, Processors,
     the Mandelbrot), the bar across the top;
@@ -17,11 +17,16 @@ serial log ('win' lists the windows) and from screenshots:
     not closed by 'win close';
   - the wheel over a shell scrolls it back, a key there brings it home;
   - the Mandelbrot held by a right click (its frame count stays);
-  - on the screen: the bar, and the desktop where System was.
+  - on the screen: the bar, and the desktop where System was;
+  - a program's window: 'run paint' opens one with the keys; strokes drawn
+    with the mouse land in its pixels, a key changes the colour and its
+    title, its close button ends the program and the window goes; ctrl+C
+    in its shell kills it, and the window goes too.
 Outputs go to build/test/desk/.
 """
 import pathlib
 import re
+import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
@@ -47,6 +52,15 @@ SW, SH = 600 + 100, 300 + 50
 PLUS = (105 + 240) // 2
 SYSTEM_BTN = 379 + 120 // 2
 SHELL1 = (400, 1300)                            # a point in shell 1, once moved
+SHELL4 = (1000, 800)                            # in the shell opened for paint
+PX, PY = 1300, 200                              # paint's frame, once moved
+PW, PH = 600, 400
+INK, RED, PAPER = (0x1B, 0x1F, 0x27), (0xD9, 0x48, 0x3B), (0xF4, 0xF1, 0xE8)
+
+
+def client(x, y):
+    """A point in paint's window, on the screen."""
+    return PX + BORDER + x, PY + BORDER + TITLE + y
 
 
 def at(x, y):
@@ -93,7 +107,7 @@ def script():
     tx, ty = 100 + 300, 200 + BORDER + TITLE // 2       # on System's title bar
     gx, gy = 100 + 400 + BORDER + 600 - 3, 200 + 600 + BORDER + TITLE + 300 - 3   # its grip
     return [
-        "until Type 'help'", "wait 1.5",
+        "until log: kept in", "wait 1.5",
         *win("start"),
         "shot build/test/desk/start.png",
         "type win move 2 0 0\\n", "wait 0.3", *win("clamp low"),
@@ -140,6 +154,23 @@ def script():
         f"abs {at(*SHELL1)} left", "wait 0.3",
         "type x", "wait 0.3", "sendkey backspace", "wait 0.3", *win("home"),
         "type win close 6\\n", "until desk: shell 3 closes", "wait 0.3",
+        # a program's window: paint, then a shell to work from
+        "type run paint 600 400\\n", "until paint: a window", "wait 0.5",
+        f"abs {at(PLUS, BAR // 2)} left", "until desk: shell 4 opens", "wait 0.5",
+        "type win move 8 100 100\\n", "wait 0.3",
+        "type win move 7 1300 200\\n", "wait 0.3", *win("paint"),
+        f"drag {at(*client(100, 100))} {at(*client(400, 300))}", "wait 0.5",
+        "type 2", "wait 0.3",
+        f"drag {at(*client(100, 350))} {at(*client(400, 350))}", "wait 0.5",
+        f"abs {at(*SHELL4)} left", "wait 0.3", *win("painted"),
+        "shot build/test/desk/paint.png",
+        f"abs {at(PX + BORDER + PW - BTN // 2, PY + BORDER + TITLE // 2)} left",
+        "until run: PAINT exited", "wait 0.5", *win("paint closed"),
+        # again, killed by ctrl+C in its shell
+        "type run paint\\n", "until paint: a window", "wait 0.5",
+        f"abs {at(*SHELL4)} left", "wait 0.3", "sendkey ctrl-c", "until run: PAINT", "wait 0.5",
+        f"abs {at(*SHELL1)} left", "wait 0.3", *win("paint killed"),
+        "type objects\\n", "wait 0.5",
         "type poweroff\\n", "ended",
     ]
 
@@ -225,6 +256,27 @@ def check(log, err):
     result(w.get("back") == 0 and w.get("state") == "focused", "a key there brought it home")
     result("desk: shell 3 closes" in log, "win close 6 closed shell 3")
 
+    pw = listing(log, "paint").get("paint", {})
+    result("paint: a window 600x400" in log and pw.get("id") == 7, "run paint: its window, 7")
+    result((pw.get("x"), pw.get("y"), pw.get("w"), pw.get("h")) == (PX, PY, PW, PH),
+           f"win move 7: at {pw.get('x')},{pw.get('y')}, {pw.get('w')}x{pw.get('h')}")
+    result(pw.get("title") == "paint · ink", f"titled by the program: {pw.get('title')!r}")
+    w = listing(log, "painted").get("paint", {})
+    result(w.get("title") == "paint · red", f"a key to it: {w.get('title')!r}")
+    for what, (x, y), want in (("the first stroke", (250, 200), INK),
+                               ("the second, red", (250, 350), RED),
+                               ("paper elsewhere", (500, 50), PAPER)):
+        p = pixel("paint.png", *client(x, y))
+        result(p == want, f"paint: {what} ({p})")
+    result(re.search(r"^paint: 2 strokes$", log, re.M) is not None,
+           "its close button: it ended, 2 strokes")
+    result("run: PAINT exited with 0" in log, "and returned 0")
+    result(listing(log, "paint closed") and "paint" not in listing(log, "paint closed"),
+           "its window went")
+    result(listing(log, "paint killed") and "paint" not in listing(log, "paint killed")
+           and "run: PAINT stopped" in log, "ctrl+C: killed, its window gone")
+    result(re.search(r"^\s+desktop\s+\d+", log, re.M) is not None, "'objects': the desktop")
+
     p = pixel("start.png", 1500, 3)
     result(p == COL_PANEL, f"the bar on the screen ({p})")
     p, q = pixel("two.png", 915, 1100), pixel("minimised.png", 915, 1100)
@@ -236,7 +288,11 @@ def check(log, err):
 
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
-    logs = boot_all(OUT, {"desk": (script(), ["--smp", "4", "--extra", TABLET], 120)})
+    stick = OUT / "stick.img"                   # paint is run from it
+    subprocess.run([sys.executable, str(ROOT / "tools" / "mkstick.py"), str(stick)], cwd=ROOT,
+                   check=True, capture_output=True)
+    logs = boot_all(OUT, {"desk": (script(), ["--smp", "4", "--extra", TABLET, "--stick",
+                                              stick.relative_to(ROOT).as_posix()], 120)})
     check(*logs["desk"])
     print(f"{'all passed' if not FAILS else f'{FAILS} FAILED'}")
     return 1 if FAILS else 0

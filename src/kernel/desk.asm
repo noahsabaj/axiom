@@ -43,7 +43,8 @@ OP_CLICK        equ 16                  ; RBX, RDI, RSI = where in the client,
 OP_WHEEL        equ 24                  ; RBX, RDI, RSI, EDX = notches, up positive
 OP_CLOSE        equ 32                  ; RBX: it is going; let go of what it holds
 OP_MOVE         equ 40                  ; RBX, RDI, RSI: the pointer moved in the client
-OP_COUNT        equ 6
+OP_ASK          equ 48                  ; RBX: its close button; 0: it closes
+OP_COUNT        equ 7
 
 P_NONE          equ 0                   ; what is under the pointer
 P_BAR           equ 1
@@ -134,6 +135,11 @@ win_new:
     mov rax, [font_ch]
     imul rax, rax, 4
     mov [rbx + WN_MIN_H], rax
+    test r10d, WF_PROGRAM               ; a program's: the size of its pixels
+    jz .least
+    mov [rbx + WN_MIN_W], r14
+    mov [rbx + WN_MIN_H], r15
+.least:
     mov rdi, rbx
     mov rsi, r13
     call win_title_set
@@ -565,6 +571,24 @@ win_close:
     mov byte [desk_reap], 1
     ret
 
+; win_ask(RDI = window): its close button. Its owner is asked (OP_ASK), or
+; it closes. -> ZF clear if it was asked.
+win_ask:
+    mov rax, [rdi + WN_OPS]
+    mov rax, [rax + OP_ASK]
+    test rax, rax
+    jnz .ask
+    call win_close
+    xor eax, eax
+    ret
+.ask:
+    push rbx
+    mov rbx, rdi
+    call rax
+    pop rbx
+    or eax, 1
+    ret
+
 ; desk_service: from the main loop, windows that are closing go
 desk_service:
     cmp byte [desk_reap], 0
@@ -573,6 +597,7 @@ desk_service:
 .reap:
     push rbx
     mov byte [desk_reap], 0
+    call wo_service                     ; programs' windows: opened, retitled, gone
 .again:
     xor ecx, ecx
     lea rdx, [desk_z]
@@ -1459,7 +1484,7 @@ desk_press:
     jmp .done
 .close:
     mov rdi, rbx
-    call win_close
+    call win_ask
     jmp .done
 .move:
     mov byte [drag_mode], DRAG_MOVE
@@ -1751,9 +1776,13 @@ cmd_win:
     test dword [rbx + WN_FLAGS], WF_CLOSE
     jz .stays
     mov rdi, rbx
-    call win_close
+    call win_ask
     lea rax, [rbx + WN_TITLE]
+    jnz .asked
     KLOG "desk: '%s' closes", rax
+    jmp .out
+.asked:
+    KLOG "desk: '%s' is asked to close", rax
     jmp .out
 .said:
     mov rdi, rbx

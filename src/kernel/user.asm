@@ -1685,6 +1685,8 @@ user_load:
     mov [rbp + SB_STORE], eax
     call sk_program                     ; and the network
     mov [rbp + SB_NET], eax
+    call desk_program                   ; and the desktop
+    mov [rbp + SB_DESK], eax
 .no_store:
     xor eax, eax
     mov esi, [rsp + 8 + 40]             ; and what it is given
@@ -2355,7 +2357,7 @@ ut_kill_list:   dq str_uts_4, E_KILLED, 0, 20000         ; spinning in ring 3
                 dq 0
 sys_table:      dq sys_exit, sys_ring_enter, sys_ring_new, sys_mem_new, sys_map
                 dq sys_event_new, sys_thread_new, sys_yield, sys_unmap
-                dq sys_spawn, sys_channel_new
+                dq sys_spawn, sys_channel_new, sys_window_new
 
 section .bss
 alignb 8

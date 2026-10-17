@@ -1088,9 +1088,9 @@ str_l_network:      db 'network', 0
 str_l_isa:          db 'isa', 0
 str_l_boot:         db 'boot', 0
 align 8
-sys_ops:        dq sys_paint, 0, 0, 0, 0, 0
-cpu_ops:        dq cpu_paint, 0, 0, 0, 0, 0
-demo_ops:       dq demo_paint, 0, demo_click, demo_wheel, 0, 0
+sys_ops:        dq sys_paint, 0, 0, 0, 0, 0, 0
+cpu_ops:        dq cpu_paint, 0, 0, 0, 0, 0, 0
+demo_ops:       dq demo_paint, 0, demo_click, demo_wheel, 0, 0, 0
 info_labels:
     dq str_l_machine, str_l_firmware, str_l_cpu, str_l_cores, str_l_clocks
     dq str_l_memory, str_l_display, str_l_acpi, str_l_pci, str_l_storage
