@@ -467,7 +467,7 @@ mt_run:
     ret
 
 ; -----------------------------------------------------------------------------
-;  panic [null|code|const|nx|stack|guard|twice|after|page|vm]: the crash
+;  panic [null|code|const|nx|stack|guard|twice|after|page|vm|thread]: the crash
 ;  screen, from an invalid opcode, or from the memory fault named
 ; -----------------------------------------------------------------------------
 cmd_panic:
@@ -488,7 +488,7 @@ cmd_panic:
     KLOG "testing the panic screen: %s", rsi
     jmp [rbx + 8]
 .usage:
-    KLOG "usage: panic [null|code|const|nx|stack|guard|twice|after|page|vm]"
+    KLOG "usage: panic [null|code|const|nx|stack|guard|twice|after|page|vm|thread]"
     ret
 .opcode:
     KLOG "testing the panic screen"
@@ -559,8 +559,18 @@ mt_vm:
     call vm_free
     ret
 
+mt_thread:                              ; a stack overflow, in a thread of its own
+    lea rdi, [mt_stack]
+    xor esi, esi
+    lea rdx, [str_mt_deep]
+    xor ecx, ecx
+    call thread_spawn
+    mov rdi, rax
+    jmp thread_join
+
 section .rodata
 str_mt_test:    db 'test', 0
+str_mt_deep:    db 'deep', 0
 str_mt_rw:      db 'writable', 0
 str_mt_ro:      db 'read-only', 0
 str_mt_x:       db 'executable', 0
@@ -596,6 +606,7 @@ mt_faults:
     MT_FAULT 'after', mt_after
     MT_FAULT 'page',  mt_page
     MT_FAULT 'vm',    mt_vm
+    MT_FAULT 'thread', mt_thread
     dq 0, 0
 
 mt_ret:         db 0xC3                 ; a 'ret', in memory that is not code

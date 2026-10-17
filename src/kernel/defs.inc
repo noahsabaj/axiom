@@ -27,11 +27,86 @@ PC_CORE         equ 112                 ; core number within its kind
 PC_THREAD       equ 120                 ; SMT thread within the core
 PC_TSS          equ 128                 ; 104-byte TSS
 PC_TLB_GEN      equ 232                 ; last TLB shootdown this CPU answered
-PC_SIZE         equ 256
+; the scheduler's part (sched.asm)
+PC_CURRENT      equ 256                 ; the thread running here
+PC_IDLE_TH      equ 264                 ; this CPU's idle thread
+PC_RQ           equ 272                 ; threads ready to run, least run first
+PC_SLEEPQ       equ 280                 ; parked with a deadline, soonest first
+PC_RQ_LOCK      equ 288                 ; dword: both queues
+PC_RQ_LEN       equ 292                 ; dword: threads on the run queue
+PC_BUSY         equ 296                 ; dword: 1 while a thread other than idle runs
+PC_RESCHED      equ 300                 ; byte: switch on the way out of the interrupt
+PC_SCHED_ON     equ 301                 ; byte: this CPU takes threads
+PC_SKIND        equ 304                 ; the kind the scheduler goes by (CPU_KIND_*)
+PC_SIBLING      equ 312                 ; its SMT sibling's index, or -1
+PC_MIN_VR       equ 320                 ; the least virtual runtime here, never falls
+PC_SLICE_END    equ 328                 ; TSC: the running thread's slice ends
+PC_TIMER_AT     equ 336                 ; TSC: what the timer is set for, 0 = off
+PC_LAST_TSC     equ 344                 ; TSC: time counted up to here
+PC_BUSY_CYC     equ 352                 ; TSC cycles running threads
+PC_IDLE_CYC     equ 360                 ; and idle
+PC_SWITCHES     equ 368
+PC_STEALS       equ 376                 ; threads taken from other queues
+PC_PUSHES       equ 384                 ; threads handed to other CPUs
+PC_PUSH_TO      equ 392                 ; -1, or where the running thread should go
+PC_WORKER       equ 400                 ; the job worker thread (APs)
+PC_BALANCE_AT   equ 408                 ; TSC: look for a better core, 0 = no need
+PC_PUSH_WHO     equ 416                 ; the thread PC_PUSH_TO is for
+PC_WANTS        equ 424                 ; the kind of core the running thread wants, if not this
+PC_CUR_VR       equ 432                 ; the running thread's vruntime when last counted
+PC_SIZE         equ 512
 
 CPU_KIND_UNKNOWN equ 0
 CPU_KIND_P       equ 1                  ; performance core
 CPU_KIND_E       equ 2                  ; efficient core
+
+; a thread (sched.asm)
+TH_RSP          equ 0                   ; saved stack pointer, while not running
+TH_STATE        equ 8                   ; dword TS_*
+TH_ONCPU        equ 12                  ; dword: a CPU is on its stack
+TH_CPU          equ 16                  ; the CPU it runs or waits on
+TH_PIN          equ 24                  ; -1, or the only CPU it may run on
+TH_CLASS        equ 32                  ; THC_*: the kind of core it wants
+TH_NEXT         equ 40                  ; run queue, sleep queue or zombie link
+TH_VR           equ 48                  ; virtual runtime (relative while parked)
+TH_WAKE_AT      equ 56                  ; TSC deadline while parked with one
+TH_TOKEN        equ 64                  ; dword: an unpark came while not parked
+TH_WOKEN        equ 68                  ; dword: the last park ended by unpark
+TH_ID           equ 72
+TH_STACK        equ 80                  ; its stack's vm mapping, 0 if borrowed
+TH_STACK_TOP    equ 88
+TH_XSAVE        equ 96                  ; its SIMD state, 64-byte aligned
+TH_ALL_NEXT     equ 104                 ; every thread, for listings
+TH_ALL_PREV     equ 112
+TH_RUN_TSC      equ 120                 ; when it last started running
+TH_CYC_P        equ 128                 ; TSC cycles run on P-cores
+TH_CYC_E        equ 136                 ; on E-cores
+TH_CYC_O        equ 144                 ; on cores of no known kind
+TH_SWITCHES     equ 152                 ; times it was switched to
+TH_MIGRATIONS   equ 160                 ; times it ran on a different CPU
+TH_FLAGS        equ 168                 ; TF_*
+TH_REFS         equ 176                 ; dword: its own, and its handle's
+TH_EXIT         equ 184                 ; what it returned
+TH_JOINER       equ 192                 ; the thread waiting in thread_join
+TH_HINT         equ 200                 ; -1, or the CPU to start on (tests)
+TH_LAST         equ 208                 ; the CPU it last ran on, -1 if none
+TH_NAME         equ 216
+TH_NAME_LEN     equ 24
+TH_SIZE         equ 256
+
+TS_NEW          equ 0
+TS_READY        equ 1
+TS_RUNNING      equ 2
+TS_PARKED       equ 3
+TS_DEAD         equ 4
+
+THC_ANY         equ 0                   ; any core, P-cores a little sooner
+THC_PERF        equ 1                   ; wants a P-core
+THC_EFF         equ 2                   ; wants an E-core
+
+TF_IDLE         equ 1
+TF_MAIN         equ 2
+TF_WORKER       equ 4
 
 ; 64-bit TSS
 TSS_RSP0        equ 4
@@ -53,6 +128,7 @@ VEC_NET         equ 0x23
 VEC_TIMER       equ 0x30
 VEC_WAKE        equ 0x40
 VEC_TLB         equ 0x41
+VEC_RESCHED     equ 0x42
 VEC_SPURIOUS    equ 0xFF
 
 ; interrupt frame built by isr_common (offsets from the frame pointer)
@@ -81,6 +157,7 @@ FR_SS           equ 168
 
 ; model-specific registers
 MSR_APIC_BASE   equ 0x1B
+MSR_TSC_DEADLINE equ 0x6E0
 MSR_MPERF       equ 0xE7
 MSR_APERF       equ 0xE8
 MSR_THERM_STATUS equ 0x19C

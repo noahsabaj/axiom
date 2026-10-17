@@ -64,21 +64,24 @@ loader reads: magic `AXIOMKRN`, entry point, file size, memory size.
 | 7 | `acpi.asm`, `smbios.asm` | MADT (CPUs, I/O APICs, overrides), MCFG, FADT, `_S5_`; board, BIOS and memory strings |
 | 8 | `pmm.asm` | Reclaim boot-services memory |
 | 9 | `apic.asm` | x2APIC through MSRs, else xAPIC MMIO; 8259s masked; I/O APIC entries masked |
-| 10 | `smp.asm` | Start every other thread (below) |
-| 11 | `pci.asm` | Enumerate through ECAM, else ports CF8/CFC |
-| 12 | `kbd.asm`, `usb.asm` | PS/2 keyboard on IRQ 1; xHCI controllers and whatever is plugged in at boot (later devices arrive through hot-plug in the main loop) |
-| 13 | `nvme.asm`, `disk.asm`, `fat.asm` | NVMe controllers, their partitions (and those of USB sticks found in step 12), FAT32 mounted read-only |
-| 14 | `net.asm`, `rtl8168.asm` | Ethernet controllers; DHCP starts once the link is up |
-| 15 | `mandel.asm`, `shell.asm` | Palette, view, shell; interrupts on |
+| 10 | `sched.asm` | The scheduler: the code running from here on is the thread `main`; the timer is the scheduler's |
+| 11 | `smp.asm` | Start every other thread (below), then `sched_topology`: each CPU's kind and SMT sibling |
+| 12 | `pci.asm` | Enumerate through ECAM, else ports CF8/CFC |
+| 13 | `kbd.asm`, `usb.asm` | PS/2 keyboard on IRQ 1; xHCI controllers and whatever is plugged in at boot (later devices arrive through hot-plug in the main loop) |
+| 14 | `nvme.asm`, `disk.asm`, `fat.asm` | NVMe controllers, their partitions (and those of USB sticks found in step 13), FAT32 mounted read-only |
+| 15 | `net.asm`, `rtl8168.asm` | Ethernet controllers; DHCP starts once the link is up |
+| 16 | `mandel.asm`, `shell.asm` | Palette, view, shell; interrupts on |
 
 Then `main_loop`: poll and service USB (enumeration, hot-plug), service the
 network (frames in, link, DHCP/ARP/ping timers), save the log if it grew
 (every 10 s), apply pointer movement, take input, refresh telemetry every 500 ms, render a demo frame at
-most every 16 ms (or at once after a click or the wheel), and otherwise sleep
-with `hlt` until the next deadline, armed on the TSC-deadline timer: the next
+most every 16 ms (or at once after a click or the wheel), and otherwise park
+the thread `main` (`thread_park_until`) until the next deadline: the next
 refresh or frame, the next key repeat, the next network timer, or 4 ms while
-a USB controller or a network card needs polling. A USB event, a network
-interrupt or pointer movement wakes it early.
+a USB controller or a network card needs polling. Any device interrupt
+(vectors `0x20` to `0x2F`: a key, a USB event, a network frame, pointer
+movement) unparks it early. While it is parked, the BSP runs other threads,
+or idles.
 
 ## Memory: `pmm.asm`, `vmm.asm`, `heap.asm`
 
@@ -138,6 +141,70 @@ interrupt or pointer movement wakes it early.
   CPU and then on all of them at once. `panic null|code|const|nx|stack|
   guard|twice|after|page|vm` makes each kind of fault on purpose.
 
+## Threads and the scheduler: `sched.asm`, `threads.asm`
+
+- **A thread** is one vm mapping: a 32 KiB stack, with the thread's fields
+  (`TH_*`) and its XSAVE area on the page above, guarded on both sides, so a
+  stack overflow hits a guard page and the report names the thread (`the
+  guard page below the stack of thread 17, deep (a stack overflow)`). The
+  mappings of the last 32 threads to end are kept for the next ones, so
+  starting a thread touches no page tables and ending one sends no
+  shootdown. `thread_new(entry, arg, name)` and `thread_start`, or
+  `thread_spawn` with a class; `thread_join`, `thread_detach`,
+  `thread_exit`, `thread_yield`, `thread_sleep_us`. A thread holds two
+  references, its own and its creator's handle; an ended one waits on a list
+  until no CPU is on its stack, and the idle loops and `thread_new` free it.
+- **Park and unpark** are the one way to wait: `thread_park` and
+  `thread_park_until(deadline)` sleep until a `thread_unpark` or the
+  deadline, and an unpark that comes first is kept, so the next park returns
+  at once. Sleeping, joining, the job workers and the main loop are built on
+  them. `thread_unpark` works from interrupt handlers.
+- **A switch** (`sched_switch`) pushes the callee-saved registers, saves the
+  SIMD state with XSAVE (of everything XCR0 enables; the area is sized from
+  each component, since some hypervisors understate the total) or FXSAVE,
+  and loads the next thread's. A thread coming from another CPU is taken only
+  once that CPU is off its stack (`TH_ONCPU`).
+- **Each CPU** has a run queue ordered by virtual runtime (the CPU time each
+  thread has had), a sleep queue ordered by deadline, and an idle thread. The
+  least-run thread runs; while others wait, it gets a 4 ms slice. The timer
+  (TSC-deadline, else the LAPIC's one-shot timed against the TSC) is set for
+  the soonest of the slice's end, the first sleeper, the next look for a
+  better core, and a 50 ms count while busy; an idle CPU with nothing to wake
+  gets none. A switch happens on the way out of an interrupt that asked for
+  one (`PC_RESCHED`, or the IPI on `0x42` from another CPU), or at once on a
+  park or a yield. A parked thread keeps its place in time while the others
+  run on, and comes back at most half a slice ahead of the least-run thread,
+  preempting the running one if it is 1 ms or more behind it: so the shell
+  answers at once while every CPU is busy.
+- **Where a thread goes**: where it is pinned (`TH_PIN`), where it is hinted
+  once (`TH_HINT`), or the CPU that costs least: 64 for each thread there,
+  24 for the wrong kind of core for its class (perf: P-cores; eff: E-cores;
+  any: P-cores, with 4 for an E-core), 16 if its SMT sibling is busy, 8 for
+  the BSP (it runs the shell and takes the interrupts), and 2 less where it
+  last ran.
+- **Balancing**: a CPU about to idle steals a waiting thread from the
+  busiest queue (an eff thread is left for an idle E-core, the others for an
+  idle P-core); a CPU's timer hands a waiting thread to a CPU with two fewer;
+  a thread on the wrong kind of core looks every 10 ms for an idle whole core
+  of the right kind (the BSP last), or swaps with a thread on the wrong kind
+  the other way.
+- **At boot**, `sched_init` (after the LAPIC) makes the running code the
+  thread `main`, pinned to the BSP on the stack it has, and gives the BSP an
+  idle thread; each AP's boot code becomes its `idle/N` thread, and each AP
+  gets a job worker, `jobs/N`. `sched_topology` takes each CPU's kind and
+  SMT sibling from `smp_topology` once every AP is up.
+- **Locks**: each CPU's queues have one spinlock, taken with interrupts off,
+  never two at once; a thread moving between CPUs is off both queues for a
+  moment.
+- `threads` lists each CPU (its kind, threads waiting, busy time, switches,
+  steals, hand-overs) and each thread (state, CPU, class, pin, CPU time on
+  P-, E- and other cores, switches, moves). `threads test` starts and joins
+  2000 threads, times switches and wake-ups, checks sleeps, fairness, the
+  main thread's lateness under load, SIMD state across switches, spreading
+  out, P/E placement (pretending where there is one kind of core) and that
+  nothing is left over. `threads spin <n> [perf|eff|any] [s]` puts load on
+  to watch; `panic thread` overflows a thread's stack.
+
 ## Processors: `smp.asm`
 
 - The MADT gives the APIC IDs. The BSP is moved to index 0.
@@ -151,21 +218,25 @@ interrupt or pointer movement wakes it early.
   features.
 - `smp_topology` sorts threads by kind (P-core, E-core, other), then APIC ID,
   and numbers cores within each kind. That order drives the dashboard tiles.
-- **Jobs:** `job_run(fn, items, arg)` wakes every CPU with an IPI on
-  `VEC_WAKE`; all of them, the BSP included, claim items with `lock xadd`
-  until none are left and check in. `job_run_each` runs a function once per
-  CPU (telemetry sampling uses it). Idle APs sleep in `hlt` with interrupts
-  enabled only around the check, so a wake-up can't be missed.
+- **Jobs:** `job_run(fn, items, arg)` wakes every AP's worker thread
+  (`jobs/N`, pinned there) with an IPI on `VEC_WAKE`, which unparks it; all
+  of them, and the thread that asked on the BSP, claim items with `lock
+  xadd` until none are left and check in. `job_run_each` runs a function once
+  per CPU (telemetry sampling uses it). Between jobs the workers are parked
+  and the APs run other threads, or idle in `hlt`.
 - `smp_stop_others` sends NMI to every other CPU; panic uses it.
 
 ## Interrupts
 
 Vectors: `0x21` PS/2 keyboard (I/O APIC, with MADT overrides applied), `0x22`
-xHCI and `0x23` network cards (MSI-X or MSI to the BSP, set up by `pci_msi`), `0x30` TSC-deadline timer, `0x40` job wake-up, `0x41` TLB shootdown, `0xFF`
-spurious. Every stub saves all general registers and calls the handler
-registered with `irq_register`; the common path sends the EOI. Exceptions go
-to `panic`, which stops the other CPUs and paints a full report (registers,
-CR2, CR3, segments, and for a page fault what it ran into) on screen and
+xHCI and `0x23` network cards (MSI-X or MSI to the BSP, set up by `pci_msi`),
+`0x30` the scheduler's timer, `0x40` job wake-up, `0x41` TLB shootdown, `0x42`
+reschedule, `0xFF` spurious. Every stub saves all general registers and calls
+the handler registered with `irq_register`; after a device's (`0x20` to
+`0x2F`) it unparks the main loop. The common path sends the EOI, then
+switches threads if the scheduler asked. Exceptions go to `panic`, which
+stops the other CPUs and paints a full report (registers, CR2, CR3,
+segments, the thread, and for a page fault what it ran into) on screen and
 serial.
 
 ## USB: `usb.asm`, `usbdev.asm`, `usbhub.asm`, `hid.asm`, `usbmsc.asm`, `pointer.asm`
@@ -526,7 +597,7 @@ from `_S5_`) for power-off, then QEMU's port 0x604.
 - `KLOG "fmt", args...` logs to serial and, once the console exists, to the
   screen; `SPRINTF buf, "fmt", args...` formats into memory. Arguments are
   64-bit registers, immediates or `qword [mem]`.
-- Structures are `equ` offsets (`PC_*`, `PE_*`, `XC_*`, `DV_*`, `NV_*`,
-  `DK_*`, `VO_*`, `VF_*`).
+- Structures are `equ` offsets (`PC_*`, `TH_*`, `PE_*`, `XC_*`, `DV_*`,
+  `NV_*`, `DK_*`, `VO_*`, `VF_*`).
 - Self-contained modules are also tested on the host: `tools/test/<module>/`
   assembles the module with a small shim and drives it from C or Python.

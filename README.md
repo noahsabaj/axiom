@@ -2,7 +2,7 @@
 
 An operating system written entirely in x86-64 assembly, booting straight from
 UEFI onto the hardware that is actually present. No C, no libc, no GRUB, no
-borrowed kernel: about thirty-nine thousand lines of NASM, top to bottom.
+borrowed kernel: about forty-two thousand lines of NASM, top to bottom.
 
 Why it exists and where it is going: [docs/VISION.md](docs/VISION.md).
 How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
@@ -41,9 +41,9 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   and PSS) and ECDSA on P-256 and P-384. The crypto is checked against the published vectors at
   every boot; `crypto` repeats the check and times each.
 - A shell over a USB keyboard, a PS/2 keyboard or the serial port. Commands:
-  `help info cpus mem pci acpi usb disks vol ls cd cat cp write mkdir rm date
-  net ip dhcp ping host arp http ask claude tcp crypto log demo bench uptime
-  echo clear panic reboot poweroff`.
+  `help info cpus mem threads pci acpi usb disks vol ls cd cat cp write mkdir
+  rm date net ip dhcp ping host arp http ask claude tcp crypto log demo bench
+  uptime echo clear panic reboot poweroff`.
 - **A log on the boot stick**: everything Axiom prints, the commands typed
   and any panic report go into `AXIOM.LOG` on the USB stick it booted from,
   readable from Windows afterwards.
@@ -56,6 +56,14 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   ..., which is read-only: kernel code`, `the guard page below CPU 3's
   kernel stack (a stack overflow)`. `mem test` runs it all hard on every
   CPU; `panic <kind>` makes each fault on purpose.
+- **Threads and a scheduler** that knows P-cores from E-cores: kernel
+  threads on guarded stacks with their SIMD state saved, a run queue per
+  CPU ordered by CPU time had, 4 ms slices, sleeps to the microsecond, and
+  placement by class (perf threads on P-cores, eff threads on E-cores),
+  with idle CPUs stealing work and threads moving to the right kind of core
+  when one frees up. The main loop is the first thread, and a key still
+  answers at once with every CPU busy. `threads` shows each CPU and thread;
+  `threads test` checks it all; `threads spin 16 perf` puts load on.
 - ACPI (MADT, MCFG, FADT, the DSDT's `_S5_`), SMBIOS, PCI Express enumeration,
   x2APIC (falling back to xAPIC), I/O APIC, TSC-deadline timer, and a panic
   screen that stops every other CPU.
@@ -212,6 +220,10 @@ Things worth knowing:
 
 - **The demo loads every core with AVX2.** Expect fans and package power to
   climb to the CPU's limits, as under any all-core benchmark. `demo` toggles it.
+- `threads` shows each CPU's kind and load and every thread.
+  `threads spin 16 perf` runs 16 perf threads for 5 seconds, which should
+  land on the 16 P-core threads; each reports, when it ends, how much of its
+  time it had on P-cores. `threads spin 12 eff` does the same for E-cores.
 - With an Ethernet cable in, Axiom asks DHCP for an address within a few
   seconds; `net` shows the link and address, `ping 1.1.1.1` or
   `ping example.com` tries the way out, `http example.com` fetches a page,
@@ -251,7 +263,8 @@ tools/test/             host-side tests for self-contained modules (tls: the
                         kfree, from four threads at once) and QEMU suites
                         (claude: ask, against claudemock.py; memory: the
                         page tables, W^X, guard pages, the vm region and
-                        the heap, and each kind of fault)
+                        the heap, and each kind of fault; threads: the
+                        scheduler on 8 CPUs, on one, and under TCG)
 tools/mkfont.py         rasterize the console font into src/kernel/gen/
 docs/                   vision and architecture
 ```

@@ -96,8 +96,16 @@ isr_common:
     test rax, rax
     jz .eoi
     call rax
+    mov eax, [rbp + FR_VECTOR]          ; a device's: the main loop has work
+    sub eax, 0x20
+    cmp eax, 0x10
+    jae .eoi
+    call sched_irq_main
 .eoi:
     call lapic_eoi
+    cmp byte [gs:PC_RESCHED], 0         ; another thread should run now
+    je .return
+    call sched_preempt
     jmp .return
 .exception:
     call exception_dispatch
@@ -169,6 +177,8 @@ panic:
     jnz .halt                           ; someone else is already reporting
     mov [panic_frame], rdi
     mov [panic_message], rsi
+    mov rax, [gs:PC_CURRENT]
+    mov [panic_thread], rax
     lea rsp, [panic_stack_top]          ; a known-good stack
     call smp_stop_others
     mov dword [print_lock], 0           ; locks held by stopped CPUs are void
@@ -221,6 +231,13 @@ panic_compose:
     mov rbx, [panic_frame]
     SPRINTF rdi, `\n*** AXIOM PANIC ***\n%s\nCPU %u (APIC %u), uptime %h s\n`, qword [panic_headline], qword [panic_cpu], qword [panic_apic], qword [panic_uptime_cs]
     add rdi, rax
+    mov rax, [panic_thread]
+    test rax, rax
+    jz .no_thread
+    lea rcx, [rax + TH_NAME]
+    SPRINTF rdi, `thread %u, %s\n`, qword [rax + TH_ID], rcx
+    add rdi, rax
+.no_thread:
     test rbx, rbx
     jz .done
     SPRINTF rdi, `vector %u  error %p\nRIP %p  RSP %p  RFLAGS %p\nCR2 %p  CR3 %p  CS 0x%x  SS 0x%x\n`, qword [rbx + FR_VECTOR], qword [rbx + FR_ERROR], qword [rbx + FR_RIP], qword [rbx + FR_RSP], qword [rbx + FR_RFLAGS], qword [panic_cr2], qword [panic_cr3], qword [rbx + FR_CS], qword [rbx + FR_SS]
@@ -295,6 +312,7 @@ idt:            resb 256 * 16
 irq_handlers:   resq 256
 panic_frame:    resq 1
 panic_message:  resq 1
+panic_thread:   resq 1
 panic_headline: resq 1
 panic_cpu:      resq 1
 panic_apic:     resq 1

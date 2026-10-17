@@ -2,8 +2,6 @@
 ;  boot.asm - kernel_main: bring the machine up in order, then run the loop
 ; =============================================================================
 
-MSR_TSC_DEADLINE equ 0x6E0
-
 section .text
 
 ; The loader jumps here with RDI = boot information (direct-mapped),
@@ -97,8 +95,9 @@ kernel_main:
     call ioapic_init
     lea rbx, [percpu]
     call cpu_identify_local
-    call timer_init
+    call sched_init                     ; from here on, this is the thread 'main'
     call smp_start
+    call sched_topology
     mov eax, [cpus_online]
     mov ecx, [cpu_count]
     KLOG "smp: %u of %u threads online in %u us", rax, rcx, qword [smp_us]
@@ -129,7 +128,8 @@ kernel_main:
     mov [usb_poll_ticks], rcx           ; controllers without interrupts
 
 ; -----------------------------------------------------------------------------
-;  main_loop: input, telemetry twice a second, demo frames, sleep in between
+;  main_loop: input, telemetry twice a second, demo frames; in between, the
+;  thread 'main' parks until the next of them, or until a device interrupts
 ; -----------------------------------------------------------------------------
 main_loop:
     call usb_poll
@@ -200,15 +200,8 @@ main_loop:
     cmovb rax, rcx
 .armed:
     call net_deadline                   ; DHCP, ARP, ping, polling
-    cmp byte [timer_deadline], 0
-    je .awake
-    mov rdx, rax
-    shr rdx, 32
-    mov ecx, MSR_TSC_DEADLINE
-    wrmsr
-    sti
-    hlt
-    jmp main_loop
+    mov rdi, rax
+    call thread_park_until
 .awake:
     sti
     pause
@@ -218,20 +211,6 @@ boot_stop:
     cli
     hlt
     jmp boot_stop
-
-; timer_init: the BSP sleeps on the TSC-deadline timer when it has one
-timer_init:
-    test dword [cpu_f1_ecx], 1 << 24
-    jz .out
-    mov ecx, LAPIC_LVT_TIMER
-    mov eax, VEC_TIMER | (2 << 17)      ; TSC-deadline mode
-    call lapic_write
-    mov byte [timer_deadline], 1
-.out:
-    ret
-
-section .data
-timer_deadline: db 0
 
 section .bss
 alignb 8

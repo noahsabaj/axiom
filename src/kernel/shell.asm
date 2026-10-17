@@ -529,6 +529,7 @@ commands:
     COMMAND 'info',     cmd_info,     'what this machine is'
     COMMAND 'cpus',     cmd_cpus,     'each logical CPU: kind, clock, heat, work'
     COMMAND 'mem',      cmd_mem,      'mem [test | <hex address>]: memory by type and use, a self-test, or what is at an address'
+    COMMAND 'threads',  cmd_threads,  'threads [test | spin <n> [perf|eff|any] [s]]: each CPU and thread, a self-test of the scheduler, or load to watch'
     COMMAND 'pci',      cmd_pci,      'PCI Express functions'
     COMMAND 'acpi',     cmd_acpi,     'firmware ACPI tables'
     COMMAND 'usb',      usb_list,     'USB devices, hubs and what drives them'
@@ -559,7 +560,7 @@ commands:
     COMMAND 'uptime',   cmd_uptime,   'time since power-on'
     COMMAND 'echo',     cmd_echo,     'print the arguments'
     COMMAND 'clear',    cmd_clear,    'clear the console (also ctrl+L)'
-    COMMAND 'panic',    cmd_panic,    'panic [null|code|const|nx|stack|guard|twice|after|page|vm]: test the crash screen, or a kind of memory fault'
+    COMMAND 'panic',    cmd_panic,    'panic [null|code|const|nx|stack|guard|twice|after|page|vm|thread]: test the crash screen, or a kind of memory fault'
     COMMAND 'reboot',   cmd_reboot,   'restart the machine'
     COMMAND 'poweroff', cmd_poweroff, 'turn the machine off'
     dq 0, 0, 0

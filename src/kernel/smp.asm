@@ -7,8 +7,9 @@
 ;  own index from its APIC id, switches to its stack and reports online.
 ;
 ;  Work is shared through one job at a time: the BSP publishes a function and
-;  an item count, wakes the APs with an IPI, and every CPU (the BSP included)
-;  takes items with an atomic counter until none are left.
+;  an item count, wakes each AP's worker thread with an IPI, and every CPU
+;  (the BSP included, in the thread that asked) takes items with an atomic
+;  counter until none are left.
 ; =============================================================================
 
 TRAMP_MIN       equ 0x10000             ; keep the trampoline out of the first 64 KiB
@@ -303,9 +304,10 @@ ap_entry:
     PERCPU rbx, rcx
     mov rsp, [rbx + PC_STACK_TOP]
     call cpu_bringup_local
+    call sched_init_ap                  ; this is now its idle thread
     mov qword [rbx + PC_ONLINE], 1
     lock inc dword [cpus_online]
-    jmp ap_idle
+    jmp sched_idle_loop
 .lost:
     cli
     hlt
@@ -326,20 +328,18 @@ cpu_bringup_local:
     call cpu_identify_local
     ret
 
-; ap_idle: sleep until there is a job, run it, sleep again
-ap_idle:
-    cli
+; job_thread: each AP's worker, pinned there. Parks until a job is published
+; (the wake-up IPI unparks it), does its share, parks again.
+job_thread:
     mov rax, [job_gen]
     cmp rax, [gs:PC_JOB_GEN]
     jne .work
-    sti                                 ; STI's shadow makes STI; HLT atomic
-    hlt
-    jmp ap_idle
+    call thread_park
+    jmp job_thread
 .work:
     mov [gs:PC_JOB_GEN], rax
-    sti
     call job_worker
-    jmp ap_idle
+    jmp job_thread
 
 ; -----------------------------------------------------------------------------
 ;  smp_topology: number the cores within each kind and sort the CPUs for display

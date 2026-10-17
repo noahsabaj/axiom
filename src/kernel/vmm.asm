@@ -1249,6 +1249,10 @@ vmm_where:
     inc ecx
     jmp .cpu
 .not_stack:
+    mov rsi, rbx                        ; a thread's stack, or under one?
+    call thread_where
+    test rax, rax
+    jnz .out
     push rdi
     mov rdi, rbx
     and rdi, ~0xFFF
