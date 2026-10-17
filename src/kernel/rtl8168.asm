@@ -9,7 +9,7 @@
 ;  Registers by convention: RBX = interface, R12 = its registers.
 ; =============================================================================
 
-RT_RXN          equ 64                  ; receive descriptors
+RT_RXN          equ 128                 ; receive descriptors: 2 KiB, the most the page has
 RT_TXN          equ 32                  ; transmit descriptors (QEMU takes 64 at most)
 RT_BUF          equ 2048                ; bytes per buffer
 RT_BUF_SHIFT    equ 11

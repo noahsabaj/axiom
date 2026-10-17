@@ -450,8 +450,10 @@ off. `log` shows the state; `log save`, `log on`, `log off`.
   bits. G-family chips (XID 4c0 and later) are first taken from their
   out-of-band firmware and their RX gate is closed around the reset, as
   Linux does; the PHY gets an autonegotiation restart only if it was left
-  powered down, isolated or forced. One receive ring (64 descriptors) and
+  powered down, isolated or forced. One receive ring (128 descriptors) and
   one transmit ring (32), a 2 KiB buffer each; frames are copied in and out.
+  (With 64, a burst of small segments between two polls overran the ring,
+  and each lost one cost TCP a retransmission timeout: over a second.)
   MSI-X or MSI wakes the main loop, which polls the ring; without either
   (QEMU's 8139) it polls every 4 ms.
 - **Stack** (`net.asm`): drivers register an interface with a table of

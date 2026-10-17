@@ -121,12 +121,27 @@ and the shell answers between frames, so type `demo` to stop the zoom.
 
 Headless runs wait for the shell's first prompt line instead of a fixed time,
 and `until TEXT` in `--script` waits for TEXT to appear in the log after the
-last keys typed. A scripted check that used to sleep through a minute takes
-a few seconds:
+last text typed. `type TEXT` sends TEXT down the serial port all at once, as
+a terminal would; `press TEXT` types it on the keyboard, key by key. With
+`--port 0` a run takes ports nobody uses and firmware variables of its own,
+so several can boot side by side. A scripted check that used to sleep
+through a minute takes a few seconds:
 
 ```bash
 python tools/run.py --headless --nic rtl8139 --keys "crypto\n" --script "until X25519; type http https://example.com/\n; until HTTP/; type poweroff\n"
 ```
+
+Every test suite, side by side, after a build (about a minute and a half on
+the Victus when nothing else is busy; `--quick` skips the TCG boots, and
+naming suites runs only those):
+
+```bash
+python tools/test/all.py
+```
+
+Their QEMU boots share the host's idle threads (`tools/test/qemu.py`), so
+the timings the guests measure stay honest; each suite also runs alone, as
+`python tools/test/<suite>/run.py`.
 
 A test disk for the storage code: `tools/mkdisk.py` builds `build/disk.img`
 (GPT, a 64 MiB FAT32 partition full of test files, a blank one), and
@@ -281,7 +296,8 @@ tools/test/             host-side tests for self-contained modules (tls: the
                         the heap, and each kind of fault; threads: the
                         scheduler on 8 CPUs, on one, and under TCG;
                         objects: handles and capabilities, likewise;
-                        rings: async rings, likewise)
+                        rings: async rings, likewise); all.py runs them
+                        all at once, and qemu.py boots side by side
 tools/mkfont.py         rasterize the console font into src/kernel/gen/
 docs/                   vision and architecture
 ```

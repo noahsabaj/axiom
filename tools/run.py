@@ -9,10 +9,15 @@
     python tools/run.py --headless --keys "crypto\\n" --script "until X25519"
 
 Headless runs log the serial port to build/serial.log and talk to the QEMU
-monitor on 127.0.0.1:4444 for screenshots and keystrokes. They wait for the
-shell's first prompt line, not a fixed time (--wait N for that instead), and
-'until TEXT' in --script waits for TEXT in the log after the last keys typed;
-'ended' waits for the guest to end QEMU itself (poweroff).
+monitor on 127.0.0.1:4444 for screenshots and keystrokes (QMP on 4445, the
+serial port on 4446; --port 0 picks ports nobody uses and firmware variables
+of its own, so boots can run side by side). They wait for the shell's first
+prompt line, not a fixed time (--wait N for that instead). In --script,
+'type TEXT' sends TEXT down the serial port, all at once, as a terminal
+would; 'press TEXT' types it on the keyboard, key by key; 'until TEXT' waits
+for TEXT in the log after the last text typed; 'ended' waits for the guest
+to end QEMU itself (poweroff). When the firmware stalls before it loads
+Axiom, as OVMF now and then does, QEMU is started again.
 
 QEMU runs on the Windows Hypervisor Platform (WHPX) when it can, many times
 faster than its own CPU emulation (TCG); --accel picks one. The first run
@@ -22,12 +27,14 @@ import argparse
 import json
 import os
 import pathlib
+import random
 import re
 import shlex
 import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -41,6 +48,28 @@ KEYNAMES = {" ": "spc", "\n": "ret", "-": "minus", ".": "dot", "/": "slash",
 
 
 BOOT_DONE = "Type 'help' for commands."
+LOADER = "Axiom loader"
+STALL = {"whpx": 30, "tcg": 120}    # seconds the firmware may take to load Axiom, busy
+
+
+def free_ports(n=3):
+    """n ports in a row nobody listens on: the monitor, QMP, the serial port.
+    Picked at random, not by the system, which hands out ports in order, so
+    that runs starting at the same moment pick apart."""
+    while True:
+        port = random.randrange(20000, 60000)
+        socks = []
+        try:
+            for i in range(n):
+                s = socket.socket()
+                socks.append(s)
+                s.bind(("127.0.0.1", port + i))
+            return port
+        except OSError:
+            pass
+        finally:
+            for s in socks:
+                s.close()
 
 
 def pick_accel(qemu, want):
@@ -94,6 +123,48 @@ class SerialLog:
         return False
 
 
+class Serial:
+    """The guest's serial port on a socket: what it prints goes into the
+    log file as it comes; what is typed goes the other way."""
+    def __init__(self, port, path, proc):
+        self.path = path
+        self.sock = None
+        while self.sock is None and proc.poll() is None:
+            try:
+                self.sock = socket.create_connection(("127.0.0.1", port), timeout=2)
+            except OSError:
+                time.sleep(0.05)
+        self.thread = threading.Thread(target=self.pump, daemon=True)
+        self.thread.start()
+
+    def pump(self):
+        with open(self.path, "ab", buffering=0) as f:
+            if self.sock is None:
+                return
+            self.sock.settimeout(None)
+            while True:
+                try:
+                    data = self.sock.recv(65536)
+                except OSError:
+                    break
+                if not data:
+                    break
+                f.write(data)
+
+    def send(self, data):
+        if self.sock is not None:
+            try:
+                self.sock.sendall(data)
+            except OSError:
+                pass
+
+    def close(self):
+        """Once QEMU has ended: the rest of the log, then the socket."""
+        self.thread.join(timeout=5)
+        if self.sock is not None:
+            self.sock.close()
+
+
 def find_qemu():
     exe = shutil.which("qemu-system-x86_64")
     if exe:
@@ -104,13 +175,20 @@ def find_qemu():
     sys.exit("qemu-system-x86_64 not found")
 
 
-def firmware(qemu, tag):
+def firmware(qemu, tag, fresh=False):
+    """The firmware's code, and its variables: kept per tag, or (fresh) a
+    copy of their first state for this run alone."""
     share = qemu.parent / "share"
     code = share / "edk2-x86_64-code.fd"
     vars_src = share / "edk2-i386-vars.fd"
-    vars_dst = BUILD / f"ovmf_vars_{tag}.fd"
-    if not vars_dst.exists():
+    if fresh:
+        (BUILD / "vars").mkdir(exist_ok=True)
+        vars_dst = BUILD / "vars" / f"ovmf_vars_{os.getpid()}_{tag}.fd"
         shutil.copyfile(vars_src, vars_dst)
+    else:
+        vars_dst = BUILD / f"ovmf_vars_{tag}.fd"
+        if not vars_dst.exists():
+            shutil.copyfile(vars_src, vars_dst)
     return code, vars_dst
 
 
@@ -181,8 +259,8 @@ class Monitor:
                 name = "shift-" + ch.lower()
             else:
                 name = ch
-            self.cmd(f"sendkey {name}")
-            time.sleep(0.05)
+            self.cmd(f"sendkey {name} 20")     # held 20 ms, then the next
+            time.sleep(0.03)
 
 
 def main():
@@ -196,11 +274,13 @@ def main():
                     "boot or an 'until' (seconds)")
     ap.add_argument("--accel", default="auto", choices=("auto", "whpx", "tcg"),
                     help="CPU virtualization: auto tries WHPX, else TCG emulation")
-    ap.add_argument("--keys", help="text to type (\\n for enter)")
+    ap.add_argument("--keys", help="text to type on the keyboard (\\n for enter)")
     ap.add_argument("--after-keys", type=float, default=3)
     ap.add_argument("--shot", help="screenshot path (PNG)")
     ap.add_argument("--extra", default="", help="more QEMU arguments, one string")
-    ap.add_argument("--port", type=int, default=4444, help="monitor port")
+    ap.add_argument("--port", type=int, default=4444, help="monitor port (QMP and the "
+                    "serial port on the next two); 0 for free ones and firmware "
+                    "variables of its own")
     ap.add_argument("--serial", default="serial.log", help="log name in build/")
     ap.add_argument("--cpu", help="CPU model (default: max; max,-svm,-vmx on WHPX)")
     ap.add_argument("--nic", help="a network card model (rtl8139, e1000...); its "
@@ -210,12 +290,15 @@ def main():
     ap.add_argument("--mac", help="the card's MAC address")
     ap.add_argument("--stick", help="boot from this USB stick image (tools/mkstick.py) "
                     "instead of build/esp")
+    ap.add_argument("--trace", action="store_true", help="say how long each step of "
+                    "--script took")
     ap.add_argument("--script", help="monitor commands after the keys, separated "
                     "by ';' ('wait N' pauses N seconds, 'until TEXT' waits for TEXT in "
-                    "the log after the last keys typed, 'shot FILE' takes a screenshot, "
-                    "'type TEXT' types, 'abs X Y [button]' points)")
+                    "the log after the last text typed, 'shot FILE' takes a screenshot, "
+                    "'type TEXT' types down the serial port, 'press TEXT' on the "
+                    "keyboard, 'abs X Y [button]' points)")
     opts = ap.parse_args()
-    MONITOR[1] = opts.port
+    fresh = opts.port == 0
 
     if opts.stick:
         # the loader on a USB stick image, as on real hardware; writes stay
@@ -225,118 +308,150 @@ def main():
     else:
         boot = ["-drive", f"format=raw,file=fat:{BUILD / 'esp'},snapshot=on"]
     qemu = find_qemu()
-    # a stick boot leaves its own boot entries in the firmware's variables:
-    # keep them apart from the usual ones
-    code, vars_fd = firmware(qemu, f"{opts.port}{'-stick' if opts.stick else ''}")
     serial = BUILD / opts.serial
     accel = pick_accel(qemu, opts.accel)
     # under WHPX the firmware faults on the nested-virtualization bits of "max"
     cpu = opts.cpu or ("max,-svm,-vmx" if accel == "whpx" else "max")
-    args = [str(qemu), "-accel", accel, "-machine", "q35", "-cpu", cpu, "-smp", opts.smp,
-            "-m", opts.mem,
-            "-drive", f"if=pflash,format=raw,readonly=on,file={code}",
-            "-drive", f"if=pflash,format=raw,file={vars_fd}",
-            *boot,
-            "-no-reboot",
-            "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
-            *shlex.split(opts.extra)]
-    if opts.nic:
-        mac = f",mac={opts.mac}" if opts.mac else ""
-        pcap = BUILD / f"net-{opts.port}.pcap"
-        args += ["-netdev", f"{opts.netdev},id=n0",
-                 "-device", f"{opts.nic},netdev=n0{mac}",
-                 "-object", f"filter-dump,id=f0,netdev=n0,file={pcap}"]
-    else:
-        args += ["-nic", "none"]
-    if opts.headless:
-        args += ["-display", "none", "-serial", f"file:{serial}",
+
+    def qemu_args():
+        MONITOR[1] = free_ports() if fresh else opts.port
+        # a stick boot leaves its own boot entries in the firmware's variables:
+        # keep them apart from the usual ones
+        code, vars_fd = firmware(qemu, f"{MONITOR[1]}{'-stick' if opts.stick else ''}", fresh)
+        args = [str(qemu), "-accel", accel, "-machine", "q35", "-cpu", cpu, "-smp", opts.smp,
+                "-m", opts.mem,
+                "-drive", f"if=pflash,format=raw,readonly=on,file={code}",
+                "-drive", f"if=pflash,format=raw,file={vars_fd}",
+                *boot,
+                "-no-reboot",
+                "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
+                *shlex.split(opts.extra)]
+        if opts.nic:
+            mac = f",mac={opts.mac}" if opts.mac else ""
+            pcap = BUILD / f"net-{MONITOR[1]}.pcap"
+            args += ["-netdev", f"{opts.netdev},id=n0",
+                     "-device", f"{opts.nic},netdev=n0{mac}",
+                     "-object", f"filter-dump,id=f0,netdev=n0,file={pcap}"]
+        else:
+            args += ["-nic", "none"]
+        return args, vars_fd
+
+    if not opts.headless:
+        args = qemu_args()[0] + ["-serial", "stdio"]
+        sys.exit(subprocess.call(args, cwd=ROOT))
+
+    t0 = time.time()
+    log = SerialLog(serial)
+    for attempt in range(3):
+        args, vars_fd = qemu_args()
+        # the serial port on a socket QEMU waits on before it starts the guest
+        args += ["-display", "none",
+                 "-chardev", f"socket,id=com1,host={MONITOR[0]},port={MONITOR[1] + 2},"
+                             "server=on,wait=on",
+                 "-serial", "chardev:com1",
                  "-monitor", f"tcp:{MONITOR[0]}:{MONITOR[1]},server,nowait",
                  "-qmp", f"tcp:{MONITOR[0]}:{MONITOR[1] + 1},server,nowait"]
         if serial.exists():
             serial.unlink()
-        t0 = time.time()
         proc = subprocess.Popen(args, cwd=ROOT)
-        log = SerialLog(serial)
-        try:
-            mon = Monitor()
-            if opts.wait is not None:
-                time.sleep(opts.wait)
-            elif log.until(BOOT_DONE, opts.timeout, proc):
-                time.sleep(0.2)
-                print(f"run.py: booted in {time.time() - t0:.1f} s ({accel})", file=sys.stderr)
-            else:
-                print(f"run.py: no shell prompt after {opts.timeout:.0f} s", file=sys.stderr)
-            if opts.keys:
+        com = Serial(MONITOR[1] + 2, serial, proc)
+        if opts.wait is not None or attempt == 2 or log.until(LOADER, STALL[accel], proc):
+            break
+        print("run.py: QEMU ended before the firmware loaded Axiom" if proc.poll() is not None
+              else f"run.py: the firmware did not load Axiom in {STALL[accel]} s",
+              "- starting it again", file=sys.stderr)
+        proc.kill()
+        proc.wait()
+        com.close()
+        if fresh:
+            vars_fd.unlink(missing_ok=True)
+    try:
+        mon = Monitor()
+        if opts.wait is not None:
+            time.sleep(opts.wait)
+        elif log.until(BOOT_DONE, opts.timeout, proc):
+            time.sleep(0.2)
+            print(f"run.py: booted in {time.time() - t0:.1f} s ({accel})", file=sys.stderr)
+        else:
+            print(f"run.py: no shell prompt after {opts.timeout:.0f} s", file=sys.stderr)
+        if opts.keys:
+            log.set_mark()
+            mon.keys(opts.keys.encode().decode("unicode_escape"))
+            if not opts.script:
+                time.sleep(opts.after_keys)
+        qmp = None
+        for line in (opts.script or "").split(";"):
+            line = line.strip()
+            if opts.trace:
+                print(f"run.py: {time.time() - t0:6.2f} s  {line}", file=sys.stderr)
+            if line.startswith("abs "):
+                # abs X Y [left|right|middle]: absolute pointer, 0..32767,
+                # with an optional click there
+                qmp = qmp or Qmp(MONITOR[1] + 1)
+                parts = line.split()
+                x, y = int(parts[1]), int(parts[2])
+                qmp.abs(x, y)
+                for b in parts[3:]:
+                    time.sleep(0.1)
+                    qmp.abs(x, y, [(b, True)])
+                    time.sleep(0.1)
+                    qmp.abs(x, y, [(b, False)])
+            elif line.startswith("wait "):
+                time.sleep(float(line[5:]))
+            elif line == "ended":
+                # ended: wait for the guest to end QEMU itself (poweroff)
+                end = time.time() + opts.timeout
+                while proc.poll() is None and time.time() < end:
+                    time.sleep(0.05)
+                print("run.py: QEMU " + ("ended by itself" if proc.poll() is not None
+                                         else "is still running"), file=sys.stderr)
+            elif line.startswith("until "):
+                # until TEXT: in the log, after the last text typed
+                if not log.until(line[6:], opts.timeout, proc):
+                    print(f"run.py: no '{line[6:]}' after {opts.timeout:.0f} s",
+                          file=sys.stderr)
+            elif line.startswith("type "):
+                # type TEXT: down the serial port, \n for enter
                 log.set_mark()
-                mon.keys(opts.keys.encode().decode("unicode_escape"))
-                if not opts.script:
-                    time.sleep(opts.after_keys)
-            qmp = None
-            for line in (opts.script or "").split(";"):
-                line = line.strip()
-                if line.startswith("abs "):
-                    # abs X Y [left|right|middle]: absolute pointer, 0..32767,
-                    # with an optional click there
-                    qmp = qmp or Qmp(opts.port + 1)
-                    parts = line.split()
-                    x, y = int(parts[1]), int(parts[2])
-                    qmp.abs(x, y)
-                    for b in parts[3:]:
-                        time.sleep(0.1)
-                        qmp.abs(x, y, [(b, True)])
-                        time.sleep(0.1)
-                        qmp.abs(x, y, [(b, False)])
-                elif line.startswith("wait "):
-                    time.sleep(float(line[5:]))
-                elif line == "ended":
-                    # ended: wait for the guest to end QEMU itself (poweroff)
-                    end = time.time() + opts.timeout
-                    while proc.poll() is None and time.time() < end:
-                        time.sleep(0.05)
-                    print("run.py: QEMU " + ("ended by itself" if proc.poll() is not None
-                                             else "is still running"), file=sys.stderr)
-                elif line.startswith("until "):
-                    # until TEXT: in the log, after the last keys typed
-                    if not log.until(line[6:], opts.timeout, proc):
-                        print(f"run.py: no '{line[6:]}' after {opts.timeout:.0f} s",
-                              file=sys.stderr)
-                elif line.startswith("type "):
-                    # type TEXT: keystrokes, \n for enter
-                    log.set_mark()
-                    mon.keys(line[5:].encode().decode("unicode_escape"))
-                elif line.startswith("shot "):
-                    mon.cmd(f"screendump {pathlib.Path(line[5:]).resolve()} -f png")
-                elif line:
-                    out = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", mon.cmd(line))
-                    out = out.replace("(qemu) ", "")
-                    lines = [l.strip() for l in out.splitlines()
-                             if l.strip() and line not in l]
-                    if lines:
-                        print("monitor:", line, "->", " | ".join(lines))
-            if opts.shot:
-                shot = pathlib.Path(opts.shot).resolve()
-                ppm = shot.with_suffix(".ppm")
-                out = mon.cmd(f"screendump {shot} -f png")
-                if not shot.exists():
-                    mon.cmd(f"screendump {ppm}")
-                    print(out.strip())
-            if proc.poll() is None:
-                try:
-                    mon.cmd("quit")
-                except OSError:
-                    pass                        # the guest powered off just now
-        finally:
+                com.send(line[5:].encode().decode("unicode_escape").encode("latin-1"))
+            elif line.startswith("press "):
+                # press TEXT: on the keyboard, key by key
+                log.set_mark()
+                mon.keys(line[6:].encode().decode("unicode_escape"))
+            elif line.startswith("shot "):
+                mon.cmd(f"screendump {pathlib.Path(line[5:]).resolve()} -f png")
+            elif line:
+                out = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", mon.cmd(line))
+                out = out.replace("(qemu) ", "")
+                lines = [l.strip() for l in out.splitlines()
+                         if l.strip() and line not in l]
+                if lines:
+                    print("monitor:", line, "->", " | ".join(lines))
+        if opts.shot:
+            shot = pathlib.Path(opts.shot).resolve()
+            ppm = shot.with_suffix(".ppm")
+            out = mon.cmd(f"screendump {shot} -f png")
+            if not shot.exists():
+                mon.cmd(f"screendump {ppm}")
+                print(out.strip())
+        if proc.poll() is None:
             try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-        sys.stdout.flush()                      # (UTF-8 now: Claude's answers)
-        sys.stdout.buffer.write(serial.read_bytes().replace(b"\r\n", b"\n") + b"\n")
-        sys.stdout.flush()
-        print(f"run.py: {time.time() - t0:.1f} s in all", file=sys.stderr)
-    else:
-        args += ["-serial", "stdio"]
-        sys.exit(subprocess.call(args, cwd=ROOT))
+                mon.cmd("quit")
+            except OSError:
+                pass                        # the guest powered off just now
+    finally:
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        com.close()
+        if fresh:
+            vars_fd.unlink(missing_ok=True)
+    sys.stdout.flush()                      # (UTF-8 now: Claude's answers)
+    sys.stdout.buffer.write(serial.read_bytes().replace(b"\r\n", b"\n") + b"\n")
+    sys.stdout.flush()
+    print(f"run.py: {time.time() - t0:.1f} s in all", file=sys.stderr)
 
 
 if __name__ == "__main__":

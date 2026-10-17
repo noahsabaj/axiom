@@ -25,6 +25,9 @@ import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT / "tools" / "test"))
+from qemu import boot_all  # noqa: E402
+
 OUT = ROOT / "build" / "test" / "memory"
 FAILS = 0
 
@@ -59,25 +62,6 @@ def symbol(name):
     sys.exit(f"{name} is not in build/kernel.map")
 
 
-def boot(name, script, *extra, timeout=60):
-    """Boots once; again if the firmware never got as far as Axiom (OVMF
-    now and then stalls before it loads anything, when boots come back to
-    back)."""
-    serial = OUT / f"{name}.log"
-    for attempt in range(2):
-        proc = subprocess.run([sys.executable, str(ROOT / "tools" / "run.py"), "--headless",
-                               "--timeout", str(timeout),
-                               "--serial", str(serial.relative_to(ROOT / "build")),
-                               "--script", "; ".join(script), *extra],
-                              cwd=ROOT, capture_output=True, text=True, encoding="utf-8",
-                              errors="replace")
-        log = serial.read_bytes().decode("utf-8", errors="replace").replace("\r", "")
-        if "memory: our own page tables" in log:
-            break
-        print(f"      ({name}: the firmware never reached Axiom; booting again)")
-    return log, proc.stderr
-
-
 def check_mem_test(log, cpus, label):
     m = re.search(r"mem test: 40000 operations on one CPU, (\d+) failed", log)
     result(m and m.group(1) == "0", f"{label}: one CPU, no failures")
@@ -102,14 +86,16 @@ def check_mem_test(log, cpus, label):
         print(f"      kmalloc + kfree {m.group(1)} ns, vm_alloc + vm_free {m.group(2)} us")
 
 
-def full(opts):
+def jobs(opts):
+    """Every boot, side by side."""
+    OUT.mkdir(parents=True, exist_ok=True)
     subprocess.run([sys.executable, str(ROOT / "tools" / "mkstick.py"), str(OUT / "stick.img")],
                    cwd=ROOT, check=True, capture_output=True)
     subprocess.run([sys.executable, str(ROOT / "tools" / "mkdisk.py"), str(OUT / "disk.img")],
                    cwd=ROOT, check=True, capture_output=True)
     rodata, data = symbol("kernel_rodata"), symbol("kernel_data")
     script = [
-        "type mem\\n", "until heap:",
+        "press mem\\n", "until heap:",                 # on the keyboard, the rest serial
         "type mem ffffffff80000000\\n", "until physical",
         f"type mem {rodata + 64:x}\\n", "until physical",
         f"type mem {data + 64:x}\\n", "until physical",
@@ -121,11 +107,27 @@ def full(opts):
         "type log save\\n", "until saved to",
         "type poweroff\\n", "ended",
     ]
-    log, err = boot("full", script, "--smp", "8", "--nic", "rtl8139",
-                    "--stick", (OUT / "stick.img").relative_to(ROOT).as_posix(), "--extra",
-                    f"-drive file={(OUT / 'disk.img').relative_to(ROOT).as_posix()},if=none,"
-                    "id=nvm,format=raw "
-                    "-device nvme,serial=axiom0,drive=nvm", timeout=90)
+    mem_test = ["type mem test\\n", "until mem test: kmalloc", "wait 0.5",
+                "type poweroff\\n", "ended"]
+    jobs = {
+        "full": (script, ["--smp", "8", "--nic", "rtl8139",
+                          "--stick", (OUT / "stick.img").relative_to(ROOT).as_posix(), "--extra",
+                          f"-drive file={(OUT / 'disk.img').relative_to(ROOT).as_posix()},"
+                          "if=none,id=nvm,format=raw "
+                          "-device nvme,serial=axiom0,drive=nvm"], 90),
+        "one": (mem_test, ["--smp", "1"], 60),
+    }
+    if not opts.quick:
+        jobs["tcg"] = (mem_test, ["--smp", "4", "--accel", "tcg"], 300)
+    for name in FAULTS:
+        jobs[f"panic_{name}"] = ([f"type panic {name}\\n", "until AXIOM PANIC", "wait 0.5"],
+                                 ["--smp", "1"], 30)
+    return jobs
+
+
+def full(logs):
+    rodata, data = symbol("kernel_rodata"), symbol("kernel_data")
+    log, err = logs["full"]
     print("-- a full machine, 8 CPUs")
     result("memory: our own page tables; code" in log and "no identity map" in log,
            "booted on its own page tables")
@@ -153,28 +155,24 @@ def full(opts):
     result("AXIOM PANIC" not in log, "no panic")
 
 
-def small(opts):
+def small(opts, logs):
     print("-- one CPU")
-    log, err = boot("one", ["type mem test\\n", "until mem test: kmalloc", "wait 0.5",
-                            "type poweroff\\n", "ended"], "--smp", "1")
+    log, err = logs["one"]
     check_mem_test(log, 1, "1 CPU")
     result("QEMU ended by itself" in err, "1 CPU: powered off")
     if opts.quick:
         return
     print("-- TCG, 4 CPUs")
-    log, err = boot("tcg", ["type mem test\\n", "until mem test: kmalloc", "wait 0.5",
-                            "type poweroff\\n", "ended"], "--smp", "4", "--accel", "tcg",
-                    timeout=300)
+    log, err = logs["tcg"]
     result("smp: 4 of 4 threads online" in log, "TCG: 4 CPUs came up")
     check_mem_test(log, 4, "TCG")
     result("QEMU ended by itself" in err, "TCG: powered off")
 
 
-def faults(opts):
+def faults(logs):
     print("-- faults, one boot each")
     for name, wants in FAULTS.items():
-        log, _ = boot(f"panic_{name}", [f"type panic {name}\\n", "until AXIOM PANIC",
-                                        "wait 0.5"], timeout=30)
+        log, _ = logs[f"panic_{name}"]
         report = log[log.find("*** AXIOM PANIC ***"):] if "AXIOM PANIC" in log else ""
         cause = next((l for l in report.splitlines()
                       if l.startswith("cause:") or ": 0x" in l), "no report")
@@ -185,10 +183,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--quick", action="store_true", help="skip the TCG boot")
     opts = ap.parse_args()
-    OUT.mkdir(parents=True, exist_ok=True)
-    full(opts)
-    small(opts)
-    faults(opts)
+    logs = boot_all(OUT, jobs(opts))
+    full(logs)
+    small(opts, logs)
+    faults(logs)
     print(f"{'all passed' if not FAILS else f'{FAILS} FAILED'}")
     return 1 if FAILS else 0
 

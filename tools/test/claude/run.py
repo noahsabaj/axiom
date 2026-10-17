@@ -16,13 +16,14 @@ https://example.com/. Outputs go to build/test/claude/.
 """
 import argparse
 import pathlib
-import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 OUT = ROOT / "build" / "test" / "claude"
 sys.path.insert(0, str(ROOT / "tools"))
+sys.path.insert(0, str(ROOT / "tools" / "test"))
 import claudemock  # noqa: E402
+from qemu import boot  # noqa: E402
 
 MODEL = "claude-test"
 WRONG = "sk-ant-wrong-0123456789abcdef"
@@ -89,16 +90,11 @@ def main():
         if until:
             script.append(f"until {until}")
     script.append("type poweroff\\n")
-    serial = OUT / "serial.log"
-    proc = subprocess.run([sys.executable, str(ROOT / "tools" / "run.py"), "--headless",
-                           "--nic", "rtl8139", "--timeout", "60",
-                           "--serial", str(serial.relative_to(ROOT / "build")),
-                           "--script", "; ".join(script)],
-                          cwd=ROOT, capture_output=True, text=True, encoding="utf-8",
-                          errors="replace")
-    print(proc.stderr.strip())
+    # once only: the mock remembers every request
+    log, err, _ = boot(OUT, "serial", script, "--smp", "2", "--nic", "rtl8139", timeout=60,
+                       again=False)
+    print(err.strip())
     mock.close()
-    log = serial.read_bytes().decode("utf-8", errors="replace").replace("\r", "")
 
     # -- what Axiom said
     for _, until in steps:

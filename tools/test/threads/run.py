@@ -21,10 +21,12 @@ Outputs go to build/test/threads/.
 import argparse
 import pathlib
 import re
-import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT / "tools" / "test"))
+from qemu import boot_all  # noqa: E402
+
 OUT = ROOT / "build" / "test" / "threads"
 FAILS = 0
 
@@ -34,25 +36,6 @@ def result(ok, text):
     FAILS += 0 if ok else 1
     print(("PASS " if ok else "FAIL ") + text)
     return ok
-
-
-def boot(name, script, *extra, timeout=60):
-    """Boots once; again if the firmware never got as far as Axiom (OVMF
-    now and then stalls before it loads anything, when boots come back to
-    back)."""
-    serial = OUT / f"{name}.log"
-    for attempt in range(2):
-        proc = subprocess.run([sys.executable, str(ROOT / "tools" / "run.py"), "--headless",
-                               "--timeout", str(timeout),
-                               "--serial", str(serial.relative_to(ROOT / "build")),
-                               "--script", "; ".join(script), *extra],
-                              cwd=ROOT, capture_output=True, text=True, encoding="utf-8",
-                              errors="replace")
-        log = serial.read_bytes().decode("utf-8", errors="replace").replace("\r", "")
-        if "memory: our own page tables" in log:
-            break
-        print(f"      ({name}: the firmware never reached Axiom; booting again)")
-    return log, proc.stderr
 
 
 TEST = ["type threads test\\n", "until threads test: p", "wait 0.5"]
@@ -109,16 +92,30 @@ def check_test(log, cpus, label):
     result("AXIOM PANIC" not in log, f"{label}: no panic")
 
 
-def eight(opts):
+def jobs(opts):
+    """Every boot, side by side."""
+    jobs = {
+        "eight": ([
+            "type threads\\n", "until ended since boot", "wait 0.5",
+            *TEST,
+            "type threads spin 16 any 2\\n", "until spin: 16", "wait 1",
+            "type threads\\n", "until ended since boot", "wait 2.5",
+            "type threads\\n", "wait 0.5",
+            "type poweroff\\n", "ended",
+        ], ["--smp", "8"], 120),
+        "one": ([*TEST, "type poweroff\\n", "ended"], ["--smp", "1"], 90),
+        "panic_thread": (["type panic thread\\n", "until AXIOM PANIC", "wait 0.5"],
+                         ["--smp", "1"], 30),
+    }
+    if not opts.quick:
+        jobs["tcg"] = ([*TEST, "type poweroff\\n", "ended"], ["--smp", "4", "--accel", "tcg"],
+                       400)
+    return jobs
+
+
+def eight(logs):
     print("-- 8 CPUs")
-    log, err = boot("eight", [
-        "type threads\\n", "until ended since boot", "wait 0.5",
-        *TEST,
-        "type threads spin 16 any 2\\n", "until spin: 16", "wait 1",
-        "type threads\\n", "until ended since boot", "wait 2.5",
-        "type threads\\n", "wait 0.5",
-        "type poweroff\\n", "ended",
-    ], "--smp", "8", timeout=120)
+    log, err = logs["eight"]
     first = log[log.find("  CPU  kind"):]
     rows = re.findall(r"^\s+(\d+)\s+\S+\s+\d+\s+\d+%", first.split("threads;")[0], re.M)
     result(rows == [str(i) for i in range(8)], "'threads' lists 8 CPUs")
@@ -142,25 +139,23 @@ def eight(opts):
     result("QEMU ended by itself" in err, "8 CPUs: powered off")
 
 
-def small(opts):
+def small(opts, logs):
     print("-- one CPU")
-    log, err = boot("one", [*TEST, "type poweroff\\n", "ended"], "--smp", "1", timeout=90)
+    log, err = logs["one"]
     check_test(log, 1, "1 CPU")
     result("QEMU ended by itself" in err, "1 CPU: powered off")
     if opts.quick:
         return
     print("-- TCG, 4 CPUs")
-    log, err = boot("tcg", [*TEST, "type poweroff\\n", "ended"], "--smp", "4", "--accel", "tcg",
-                    timeout=400)
+    log, err = logs["tcg"]
     result("smp: 4 of 4 threads online" in log, "TCG: 4 CPUs came up")
     check_test(log, 4, "TCG")
     result("QEMU ended by itself" in err, "TCG: powered off")
 
 
-def overflow(opts):
+def overflow(logs):
     print("-- a thread's stack overflow")
-    log, _ = boot("panic_thread", ["type panic thread\\n", "until AXIOM PANIC", "wait 0.5"],
-                  timeout=30)
+    log, _ = logs["panic_thread"]
     report = log[log.find("*** AXIOM PANIC ***"):] if "AXIOM PANIC" in log else ""
     cause = next((l for l in report.splitlines() if l.startswith("cause:")), "no report")
     result(re.search(r"^thread \d+, deep$", report, re.M) is not None,
@@ -173,10 +168,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--quick", action="store_true", help="skip the TCG boot")
     opts = ap.parse_args()
-    OUT.mkdir(parents=True, exist_ok=True)
-    eight(opts)
-    small(opts)
-    overflow(opts)
+    logs = boot_all(OUT, jobs(opts))
+    eight(logs)
+    small(opts, logs)
+    overflow(logs)
     print(f"{'all passed' if not FAILS else f'{FAILS} FAILED'}")
     return 1 if FAILS else 0
 

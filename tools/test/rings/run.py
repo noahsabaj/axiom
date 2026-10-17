@@ -20,11 +20,12 @@ Outputs go to build/test/rings/.
 import argparse
 import pathlib
 import re
-import subprocess
 import sys
-import time
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT / "tools" / "test"))
+from qemu import boot_all  # noqa: E402
+
 OUT = ROOT / "build" / "test" / "rings"
 FAILS = 0
 
@@ -34,27 +35,6 @@ def result(ok, text):
     FAILS += 0 if ok else 1
     print(("PASS " if ok else "FAIL ") + text)
     return ok
-
-
-def boot(name, script, *extra, timeout=60):
-    """Boots once; again if the firmware never got as far as Axiom (OVMF
-    now and then stalls before it loads anything, when boots come back to
-    back)."""
-    serial = OUT / f"{name}.log"
-    for attempt in range(2):
-        start = time.monotonic()
-        proc = subprocess.run([sys.executable, str(ROOT / "tools" / "run.py"), "--headless",
-                               "--timeout", str(timeout),
-                               "--serial", str(serial.relative_to(ROOT / "build")),
-                               "--script", "; ".join(script), *extra],
-                              cwd=ROOT, capture_output=True, text=True, encoding="utf-8",
-                              errors="replace")
-        log = serial.read_bytes().decode("utf-8", errors="replace").replace("\r", "")
-        print(f"      ({name}: {time.monotonic() - start:.0f} s)")
-        if "memory: our own page tables" in log:
-            break
-        print(f"      ({name}: the firmware never reached Axiom; booting again)")
-    return log, proc.stderr
 
 
 TEST = ["type rings test\\n", "until rings test: p", "wait 0.5"]
@@ -117,16 +97,28 @@ def summary(text):
     return m and tuple(int(g) for g in m.groups())
 
 
-def eight(opts):
+def jobs(opts):
+    """Every boot, side by side."""
+    jobs = {
+        "eight": ([
+            "type rings\\n", "until fired", "wait 0.5",
+            *TEST,
+            "type rings\\n", "wait 0.5",
+            "type rings nonsense\\n", "wait 0.3",
+            "type objects\\n", "until refused", "wait 0.5",
+            "type poweroff\\n", "ended",
+        ], ["--smp", "8"], 120),
+        "one": ([*TEST, "type poweroff\\n", "ended"], ["--smp", "1"], 90),
+    }
+    if not opts.quick:
+        jobs["tcg"] = ([*TEST, "type poweroff\\n", "ended"], ["--smp", "4", "--accel", "tcg"],
+                       400)
+    return jobs
+
+
+def eight(logs):
     print("-- 8 CPUs")
-    log, err = boot("eight", [
-        "type rings\\n", "until fired", "wait 0.5",
-        *TEST,
-        "type rings\\n", "wait 0.5",
-        "type rings nonsense\\n", "wait 0.3",
-        "type objects\\n", "until refused", "wait 0.5",
-        "type poweroff\\n", "ended",
-    ], "--smp", "8", timeout=120)
+    log, err = logs["eight"]
     first = summary(log[:log.find("rings test")])
     result(first and first[0] == 0 and first[1] == 0 and first[3] == 0,
            f"'rings' before: {first}")
@@ -142,16 +134,15 @@ def eight(opts):
     result("QEMU ended by itself" in err, "8 CPUs: powered off")
 
 
-def small(opts):
+def small(opts, logs):
     print("-- one CPU")
-    log, err = boot("one", [*TEST, "type poweroff\\n", "ended"], "--smp", "1", timeout=90)
+    log, err = logs["one"]
     check_test(log, "1 CPU")
     result("QEMU ended by itself" in err, "1 CPU: powered off")
     if opts.quick:
         return
     print("-- TCG, 4 CPUs")
-    log, err = boot("tcg", [*TEST, "type poweroff\\n", "ended"], "--smp", "4", "--accel", "tcg",
-                    timeout=400)
+    log, err = logs["tcg"]
     result("smp: 4 of 4 threads online" in log, "TCG: 4 CPUs came up")
     check_test(log, "TCG")
     result("QEMU ended by itself" in err, "TCG: powered off")
@@ -161,9 +152,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--quick", action="store_true", help="skip the TCG boot")
     opts = ap.parse_args()
-    OUT.mkdir(parents=True, exist_ok=True)
-    eight(opts)
-    small(opts)
+    logs = boot_all(OUT, jobs(opts))
+    eight(logs)
+    small(opts, logs)
     print(f"{'all passed' if not FAILS else f'{FAILS} FAILED'}")
     return 1 if FAILS else 0
 
