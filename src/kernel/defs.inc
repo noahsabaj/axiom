@@ -284,7 +284,6 @@ SK_CIN_HEAD     equ 200
 SK_CIN_LEN      equ 204
 SK_FREED        equ 208                 ; dword: received, not yet told to TCP
 SK_BUSY         equ 212                 ; dword: bit 0 a send, bit 1 a receive, copying
-SK_IP           equ 216                 ; dword
 SK_PORT         equ 220                 ; dword
 SK_GONE_AT      equ 224                 ; TSC: no handle; reset if not closed by then
 SK_ACN          equ 232                 ; dword: accepted connections waiting
@@ -292,7 +291,8 @@ SK_ACQ          equ 240                 ; SK_ACCEPT_MAX of them, oldest first
 SK_RXBY         equ 304                 ; bytes received, ever
 SK_TXBY         equ 312                 ; sent
 SK_HOST         equ 320                 ; 256 bytes, NUL-ended
-SK_SIZE         equ 576
+SK_ADDR         equ 576                 ; the other side's address (16 bytes)
+SK_SIZE         equ 592
 
 ; a block of memory (kobj.asm), an object
 MO_BASE         equ 64                  ; its pages, in the vm region

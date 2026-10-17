@@ -1042,15 +1042,12 @@ sk_begin:
     je .listen
     xor edx, edx
     mov esi, NETW_DOWN
-    cmp dword [net_ip], 0
-    je sk_fail
+    call net_up
+    jc sk_fail
     lea rsi, [rbx + SK_HOST]
-    call ip_parse
-    jc .name
-    cmp byte [rsi], 0
-    jne .name
-    mov [rbx + SK_IP], eax
-    jmp sk_connect
+    lea rdi, [rbx + SK_ADDR]
+    call addr_parse
+    jnc sk_connect
 .name:
     lea rsi, [rbx + SK_HOST]
     mov edx, DQ_SOCKET
@@ -1077,11 +1074,13 @@ sk_begin:
     xor edx, edx
     jmp sk_fail
 
-; sock_dns_done(RDI = a socket, EAX = its host's address): from dns_done
+; sock_dns_done(RDI = a socket, RAX = its host's address): from dns_done
 sock_dns_done:
     push rbx
     mov rbx, rdi
-    mov [rbx + SK_IP], eax
+    mov rsi, rax
+    lea rdi, [rbx + SK_ADDR]
+    call addr_copy
     call sk_connect
     pop rbx
     ret
@@ -1095,9 +1094,9 @@ sock_dns_failed:
     pop rbx
     ret
 
-; sk_connect(RBX = a socket, SK_IP known): TCP's SYN on its way
+; sk_connect(RBX = a socket, SK_ADDR known): TCP's SYN on its way
 sk_connect:
-    mov edi, [rbx + SK_IP]
+    lea rdi, [rbx + SK_ADDR]
     mov esi, [rbx + SK_PORT]
     lea rdx, [sk_tcp_ops]
     call tcp_connect
@@ -1451,13 +1450,14 @@ sk_accept:
     mov r13, rax                        ; R13 = the new one, the main loop's
     mov [r13 + SK_TCP], r12
     mov [r12 + TC_USER], r13
-    mov eax, [r12 + TC_RIP]
-    mov [r13 + SK_IP], eax
+    lea rsi, [r12 + TC_RA]
+    lea rdi, [r13 + SK_ADDR]
+    call addr_copy
     mov ecx, [r12 + TC_RPORT]
     mov [r13 + SK_PORT], ecx
     mov dword [r13 + SK_STATE], SKS_CONNECT
-    mov eax, eax
-    SPRINTF r13 + SK_HOST, "%I", rax
+    lea rax, [r12 + TC_RA]
+    SPRINTF r13 + SK_HOST, "%A", rax
     mov rdi, r12
     mov esi, 65535
     call tcp_flow

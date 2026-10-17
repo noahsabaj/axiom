@@ -1,6 +1,6 @@
 ; =============================================================================
 ;  netapp.asm - what runs over the network stack: a DHCP client, a DNS
-;  resolver for IPv4 addresses, ping, and the shell's network commands. Each
+;  resolver (A and AAAA), ping, and the shell's network commands. Each
 ;  runs in the background on net_service's timers, so the prompt comes back
 ;  at once and answers arrive as log lines; ctrl+C stops a ping or a lookup.
 ; =============================================================================
@@ -30,11 +30,15 @@ DQ_THEN         equ 4                   ; dword: 0 print, 1 ping, 2 http, DQ_SOC
 DQ_USER         equ 8                   ; the socket, for DQ_SOCKET
 DQ_NEXT         equ 16                  ; TSC: ask again, or give up
 DQ_TRIES        equ 24                  ; dword
-DQ_SERVER       equ 28                  ; dword: whom it asked
-DQ_PORT         equ 32                  ; dword: from which port
-DQ_ID           equ 36                  ; word
-DQ_NAME         equ 40                  ; NUL-ended
-DQ_SIZE         equ 296
+DQ_PORT         equ 28                  ; dword: from which port
+DQ_ID           equ 32                  ; word
+DQ_TYPE         equ 34                  ; word: 1 A, 28 AAAA
+DQ_THEN_TYPE    equ 36                  ; word: asked next if this finds none
+DQ_FOUND        equ 38                  ; byte: the shell's, an address said
+DQ_SERVER       equ 40                  ; whom it asked (16 bytes)
+DQ_ADDR         equ 56                  ; what it found (16 bytes)
+DQ_NAME         equ 72                  ; NUL-ended
+DQ_SIZE         equ 328
 DQ_SOCKET       equ 3
 
 ; why a lookup ended without an address
@@ -42,7 +46,7 @@ DNS_NOSERVER    equ 1                   ; no DNS server is known
 DNS_BADNAME     equ 2                   ; not a host name
 DNS_BUSY        equ 3                   ; too many lookups at once
 DNS_NOHOST      equ 4                   ; no such name
-DNS_NOADDR      equ 5                   ; it has no IPv4 address
+DNS_NOADDR      equ 5                   ; it has no address of a kind we can reach
 DNS_REFUSED     equ 6                   ; the server could not answer
 DNS_NOANSWER    equ 7                   ; no answer from the server
 PING_DATA       equ 56                  ; bytes after the ICMP header
@@ -51,6 +55,7 @@ section .text
 
 ; net_link_up: the interface with the address has a link
 net_link_up:
+    call ip6_start
     cmp byte [net_static], 0
     jne .out
     jmp dhcp_start
@@ -517,12 +522,15 @@ dhcp_tick:
     jmp dhcp_start
 
 ; -----------------------------------------------------------------------------
-;  DNS: A lookups, DNS_SLOTS at once, each from a port and with an id of
-;  its own, the answer taken only from the server asked. The shell's
-;  (DQ_THEN 0 print the address, 1 ping it, 2 fetch from it) one at a time,
-;  a new one in place of the last; a socket's (DQ_SOCKET) its own, the
-;  answer to sock_dns_done(RDI = the socket, EAX = the address) or
-;  sock_dns_failed(RDI, ESI = why: DNS_*)
+;  DNS: lookups of A and AAAA records, DNS_SLOTS at once, each from a port
+;  and with an id of its own, the answer taken only from the server asked
+;  (IPv4's while there is an IPv4 address, else the one a router named).
+;  The shell's (DQ_THEN 0 print the addresses, 1 ping, 2 fetch) one at a
+;  time, a new one in place of the last; a socket's (DQ_SOCKET) its own, the
+;  answer to sock_dns_done(RDI = the socket, RAX = the address) or
+;  sock_dns_failed(RDI, ESI = why: DNS_*). 'host' asks for both kinds; the
+;  others for what can be reached: A, then AAAA if there is none (AAAA
+;  first after 'ip6 prefer')
 ; -----------------------------------------------------------------------------
 
 ; dns_lookup(RSI = name, EDX = DQ_THEN, RCX = the socket for DQ_SOCKET) ->
@@ -538,16 +546,25 @@ dns_lookup:
     push r9
     mov r8, rsi
     mov r9d, edx
+    lea rdi, [dns_server]
+    call dns_choose
     mov eax, DNS_NOSERVER
-    cmp dword [net_dns], 0
-    je .refused
+    jc .refused
     call dns_slot                       ; RBX = where it goes
     mov eax, DNS_BUSY
     jc .refused
     mov [rbx + DQ_THEN], r9d
     mov [rbx + DQ_USER], rcx
-    mov eax, [net_dns]
-    mov [rbx + DQ_SERVER], eax
+    push rsi
+    lea rsi, [dns_server]
+    lea rdi, [rbx + DQ_SERVER]
+    call addr_copy
+    pop rsi
+    mov edx, r9d
+    call dns_order
+    mov [rbx + DQ_TYPE], ax
+    mov [rbx + DQ_THEN_TYPE], cx
+    mov byte [rbx + DQ_FOUND], 0
     lea rdi, [rbx + DQ_NAME]            ; letters, digits, '-' and '_' in
     xor ecx, ecx                        ; labels of 63 at most, 253 in all
     xor edx, edx
@@ -616,7 +633,7 @@ dns_lookup:
     push rax
     cmp eax, DNS_NOSERVER
     jne .not_server
-    KLOG "host: no DNS server (DHCP named none; 'ip' can set one)"
+    KLOG "host: no DNS server (none was named; 'ip' or 'ip6' can set one)"
     jmp .said
 .not_server:
     cmp eax, DNS_BADNAME
@@ -637,6 +654,82 @@ dns_lookup:
     pop rdx
     pop rcx
     pop rbx
+    ret
+
+; dns_choose(RDI = 16 bytes) -> the DNS server to ask: IPv4's while there
+; is an IPv4 address, else the one a router named; CF if neither.
+; Preserves all.
+dns_choose:
+    push rax
+    push rsi
+    mov eax, [net_dns]
+    test eax, eax
+    jz .six
+    cmp dword [net_ip], 0
+    je .six
+    call addr_set4
+    jmp .ok
+.six:
+    lea rsi, [ip6_dns]
+    call addr_null
+    jz .none
+    call ip6_up
+    jc .none
+    call addr_copy
+.ok:
+    clc
+    jmp .out
+.none:
+    stc
+.out:
+    pop rsi
+    pop rax
+    ret
+
+; dns_order(EDX = DQ_THEN) -> EAX = the type to ask for first, ECX = the one
+; after it if that finds nothing, 0 for none. Preserves others.
+dns_order:
+    mov eax, 1
+    mov ecx, 28
+    test edx, edx                       ; 'host': both
+    jz .out
+    xor ecx, ecx
+    cmp byte [ip6_gua_state], A6_READY
+    jne .out                            ; no global IPv6 address: A alone
+    mov eax, 28
+    cmp dword [net_ip], 0
+    je .out                             ; no IPv4 address: AAAA alone
+    mov eax, 1
+    mov ecx, 28
+    cmp byte [ip6_prefer], 0
+    je .out
+    mov eax, 28
+    mov ecx, 1
+.out:
+    ret
+
+; dns_again(RBX = a slot whose lookup has ended) -> CF unless it asks
+; again, for the other kind of address. Preserves all but RAX.
+dns_again:
+    movzx eax, word [rbx + DQ_THEN_TYPE]
+    test eax, eax
+    jz .no
+    mov [rbx + DQ_TYPE], ax
+    mov word [rbx + DQ_THEN_TYPE], 0
+    call net_random
+    mov [rbx + DQ_ID], ax
+    mov dword [rbx + DQ_TRIES], 1
+    mov dword [rbx + DQ_STATE], 1
+    call dns_send
+    call net_clock
+    add rax, [net_second]
+    add rax, [net_second]
+    mov [rbx + DQ_NEXT], rax
+    call dns_arm
+    clc
+    ret
+.no:
+    stc
     ret
 
 ; dns_slot(EDX = DQ_THEN) -> RBX = a slot for it: the shell's where its last
@@ -730,7 +823,14 @@ dns_send:
     push rdx
     push rsi
     push rdi
+    push r8
+    lea rsi, [rbx + DQ_SERVER]
     lea rdi, [net_frame + UDP_PAYLOAD]
+    call addr_is4
+    je .base
+    lea rdi, [net_frame + UDP6_PAYLOAD]
+.base:
+    mov r8, rdi
     mov ax, [rbx + DQ_ID]
     mov [rdi], ax
     mov word [rdi + 2], 0x0001          ; recursion desired
@@ -762,23 +862,37 @@ dns_send:
     mov [rdx], cl
 .root:
     mov byte [rdi], 0
-    mov dword [rdi + 1], 0x01000100     ; type A, class IN
+    mov ax, [rbx + DQ_TYPE]
+    xchg al, ah
+    mov [rdi + 1], ax
+    mov word [rdi + 3], 0x0100          ; class IN
     add rdi, 5
-    lea rax, [net_frame + UDP_PAYLOAD]
-    sub rdi, rax
+    sub rdi, r8
     mov ecx, edi
-    mov edi, [rbx + DQ_SERVER]
     mov esi, [rbx + DQ_PORT]
     mov edx, 53
+    lea rdi, [rbx + DQ_SERVER]
+    push rsi
+    mov rsi, rdi
+    call addr_is4
+    pop rsi
+    je .four
+    call udp6_send
+    jmp .sent
+.four:
+    mov edi, [rbx + DQ_SERVER + 12]
     call udp_send
+.sent:
+    pop r8
     pop rdi
     pop rsi
     pop rdx
     pop rcx
     ret
 
-; dns_input(RBX, RSI = message, ECX = bytes, EDX = sender, EAX = the port it
-; came to): from udp_input, for every port a question may have gone from
+; dns_input(RBX, RSI = message, ECX = bytes, RDX = the sender's address,
+; EAX = the port it came to): from udp_input and udp6_input, for every port
+; a question may have gone from
 dns_input:
     cmp ecx, 12
     jb .out
@@ -792,7 +906,13 @@ dns_input:
     je .next
     cmp [rbx + DQ_PORT], eax
     jne .next
-    cmp [rbx + DQ_SERVER], edx
+    push rsi
+    push rdi
+    mov rsi, rdx
+    lea rdi, [rbx + DQ_SERVER]
+    call addr_eq
+    pop rdi
+    pop rsi
     jne .next
     mov r9w, [rsi]
     cmp r9w, [rbx + DQ_ID]
@@ -844,11 +964,28 @@ dns_input:
     lea rax, [rdi + rdx + 10]
     cmp rax, r12
     ja .none
-    cmp dword [rdi], 0x01000100         ; type A, class IN, an address
+    cmp word [rdi + 2], 0x0100          ; class IN
     jne .skip
+    movzx eax, word [rbx + DQ_TYPE]
+    xchg al, ah
+    cmp [rdi], ax                       ; the type asked for
+    jne .skip
+    cmp eax, 0x0100                     ; A: 4 bytes
+    jne .aaaa
     cmp edx, 4
     jne .skip
     mov eax, [rdi + 10]
+    lea rdi, [rbx + DQ_ADDR]
+    call addr_set4
+    jmp .found_addr
+.aaaa:
+    cmp edx, 16
+    jne .skip
+    lea rsi, [rdi + 10]
+    lea rdi, [rbx + DQ_ADDR]
+    call addr_copy
+.found_addr:
+    lea rax, [rbx + DQ_ADDR]
     call dns_done
     jmp .done
 .skip:
@@ -899,7 +1036,7 @@ dns_skip_name:
     pop rax
     ret
 
-; dns_done(RBX = the slot, its lookup over; EAX = the address found)
+; dns_done(RBX = the slot, its lookup over; RAX = the address found)
 dns_done:
     mov ecx, [rbx + DQ_THEN]
     cmp ecx, DQ_SOCKET
@@ -909,8 +1046,9 @@ dns_done:
     cmp ecx, 2
     je http_begin
     lea rdx, [rbx + DQ_NAME]
-    KLOG "%s is %I", rdx, rax
-    ret
+    KLOG "%s is %A", rdx, rax
+    mov byte [rbx + DQ_FOUND], 1
+    jmp dns_again                       ; and its other kind of address
 .socket:
     mov rdi, [rbx + DQ_USER]
     jmp sock_dns_done
@@ -918,6 +1056,18 @@ dns_done:
 ; dns_failed(RBX = the slot, its lookup over; ESI = why, DNS_*; EAX = the
 ; server's code for DNS_REFUSED): the shell's say so; whoever waited hears
 dns_failed:
+    cmp dword [rbx + DQ_THEN], 0
+    jne .not_host
+    cmp byte [rbx + DQ_FOUND], 0        ; 'host' has said an address already
+    jne .ret
+.not_host:
+    cmp esi, DNS_NOADDR
+    jne .final
+    push rax
+    call dns_again                      ; perhaps the other kind
+    pop rax
+    jnc .ret
+.final:
     cmp dword [rbx + DQ_THEN], DQ_SOCKET
     je .socket
     lea rdx, [rbx + DQ_NAME]
@@ -933,14 +1083,15 @@ dns_failed:
 .silent:
     cmp esi, DNS_NOANSWER
     jne .no_address
-    mov eax, [rbx + DQ_SERVER]
-    KLOG "host: no answer from the DNS server %I", rax
+    lea rax, [rbx + DQ_SERVER]
+    KLOG "host: no answer from the DNS server %A", rax
     jmp .then
 .no_address:
-    KLOG "host: %s has no IPv4 address", rdx
+    KLOG "host: %s has no address Axiom can reach", rdx
 .then:
     cmp dword [rbx + DQ_THEN], 2
     je http_dns_failed
+.ret:
     ret
 .socket:
     mov rdi, [rbx + DQ_USER]
@@ -990,17 +1141,22 @@ dns_tick:
 ;  Ping
 ; -----------------------------------------------------------------------------
 
-; ping_begin(EAX = address); ping_count is set
+; ping_begin(RAX = address); ping_count is set
 ping_begin:
     push rcx
-    mov [ping_ip], eax
+    push rsi
+    push rdi
+    mov rsi, rax
+    lea rdi, [ping_addr]
+    call addr_copy
+    lea rax, [ping_addr]
     mov ecx, [ping_count]
     cmp ecx, 1
     je .once
-    KLOG "ping %I, %u times (ctrl+C stops it)", rax, rcx
+    KLOG "ping %A, %u times (ctrl+C stops it)", rax, rcx
     jmp .start
 .once:
-    KLOG "ping %I, once", rax
+    KLOG "ping %A, once", rax
 .start:
     call net_random
     mov [ping_id], ax
@@ -1013,6 +1169,8 @@ ping_begin:
     mov qword [ping_min], -1
     mov dword [ping_active], 1
     call ping_send
+    pop rdi
+    pop rsi
     pop rcx
     ret
 
@@ -1025,8 +1183,14 @@ ping_send:
     push rdi
     inc dword [ping_seq]
     mov dword [ping_waiting], 1
+    lea rsi, [ping_addr]
     lea rdi, [net_frame + NET_PAYLOAD]
     mov word [rdi], 0x0008              ; echo request, code 0
+    call addr_is4
+    je .request
+    lea rdi, [net_frame + NET6_PAYLOAD]
+    mov word [rdi], 0x0080              ; ICMPv6's
+.request:
     mov word [rdi + 2], 0
     mov ax, [ping_id]
     mov [rdi + 4], ax
@@ -1041,22 +1205,34 @@ ping_send:
     inc ecx
     cmp ecx, 8 + PING_DATA
     jb .fill
+    lea rsi, [ping_addr]
+    call addr_is4
+    jne .six
     mov rsi, rdi
     mov ecx, 8 + PING_DATA
     xor eax, eax
     call net_sum
     call net_fold
     mov [rsi + 2], ax
-    mov edi, [ping_ip]
+    mov edi, [ping_addr + 12]
     mov esi, 1
     call ip_send
+    jmp .sent
+.six:
+    lea rdi, [ping_addr]
+    mov esi, 58
+    mov ecx, 8 + PING_DATA
+    mov edx, 2
+    call ip6_send
+.sent:
     jc .no_route
     call net_clock
     add rax, [net_second]
     mov [ping_next], rax
     jmp .out
 .no_route:
-    KLOG "ping: no route to %I (no gateway)", qword [ping_ip]
+    lea rax, [ping_addr]
+    KLOG "ping: no route to %A", rax
     call ping_end
 .out:
     pop rdi
@@ -1074,8 +1250,11 @@ ping_tick:
     ja .out
     cmp dword [ping_waiting], 0
     je .next
+    push rcx
     mov eax, [ping_seq]
-    KLOG "%I: no reply to %u", qword [ping_ip], rax
+    lea rcx, [ping_addr]
+    KLOG "%A: no reply to %u", rcx, rax
+    pop rcx
     mov dword [ping_waiting], 0
 .next:
     mov eax, [ping_seq]
@@ -1085,7 +1264,8 @@ ping_tick:
 .out:
     ret
 
-; ping_reply(RBX, RSI = message, ECX = bytes, RDI = IP header): an echo reply
+; ping_reply(RBX, RSI = message, ECX = bytes, RDX = the sender's address,
+; R8D = the time to live, or hop limit, it came with): an echo reply
 ping_reply:
     cmp dword [ping_active], 0
     je .out
@@ -1095,6 +1275,10 @@ ping_reply:
     cmp ax, [ping_id]
     jne .out
     push r12
+    push r13
+    push r14
+    mov r13, rdx
+    mov r14d, r8d
     RDTSC64
     sub rax, [rsi + 8]                  ; there and back
     call ticks_to_us
@@ -1120,9 +1304,9 @@ ping_reply:
     mov r8d, 10
     div r8
     mov r8, rax
-    mov eax, [rdi + 12]
-    movzx edx, byte [rdi + 8]
-    KLOG "reply from %I: seq %u, ttl %u, %h ms", rax, rcx, rdx, r8
+    KLOG "reply from %A: seq %u, ttl %u, %h ms", r13, rcx, r14, r8
+    pop r14
+    pop r13
     pop r12
     mov eax, [ping_seq]                 ; the last one answered: done
     cmp eax, [ping_count]
@@ -1162,6 +1346,31 @@ ping_error:
     lea rdx, [str_ttl_out]
 .say:
     KLOG "%I: %s", rax, rdx
+.out:
+    ret
+
+; ping_error6(RBX, RDI = IPv6 header, RSI = message, ECX = bytes):
+; unreachable, or the hop limit reached, about one of our requests?
+ping_error6:
+    cmp dword [ping_active], 0
+    je .out
+    cmp ecx, 8 + 40 + 8
+    jb .out
+    cmp byte [rsi + 8 + 6], 58          ; the packet it is about: ICMPv6,
+    jne .out
+    cmp byte [rsi + 48], 128            ; an echo request, ours
+    jne .out
+    mov ax, [rsi + 52]
+    cmp ax, [ping_id]
+    jne .out
+    mov dword [ping_waiting], 0
+    lea rax, [rdi + 8]
+    lea rdx, [str_unreachable]
+    cmp byte [rsi], 1
+    je .say
+    lea rdx, [str_ttl_out]
+.say:
+    KLOG "%A: %s", rax, rdx
 .out:
     ret
 
@@ -1263,12 +1472,20 @@ ip_parse:
     pop rcx
     ret
 
+; net_up -> CF if there is no address to send from: none for IPv4, and
+; IPv6's link-local one not ready. Preserves all.
+net_up:
+    cmp dword [net_ip], 0
+    je ip6_up
+    clc
+    ret
+
 ; net_ready -> CF (having said why) if there is no interface or no address
 net_ready:
     cmp dword [nic_count], 0
     je .no_nic
-    cmp dword [net_ip], 0
-    je .no_address
+    call net_up
+    jc .no_address
     clc
     ret
 .no_nic:
@@ -1388,6 +1605,7 @@ cmd_net:
     cmp r12d, [nic_count]
     jb .nic
     call net_show_address
+    call ip6_show
 .out:
     pop r12
     pop rbx
@@ -1512,10 +1730,10 @@ cmd_ping:
     jc .out
     call ping_end                       ; one at a time
     mov rsi, r12
-    call ip_parse
+    lea rdi, [ping_addr]
+    call addr_parse
     jc .name
-    cmp byte [rsi], 0
-    jne .name
+    lea rax, [ping_addr]
     call ping_begin
     jmp .out
 .name:
@@ -1631,7 +1849,6 @@ ping_count:     resd 1
 ping_seq:       resd 1                  ; requests sent
 ping_got:       resd 1                  ; replies
 ping_waiting:   resd 1                  ; the last request is unanswered
-ping_ip:        resd 1
 ping_id:        resw 1
 net_static:     resb 1                  ; the address was set by hand
 lease_buf:      resb 32
@@ -1639,3 +1856,6 @@ gw_text:        resb 16
 dns_text:       resb 16
 alignb 8
 dns_slots:      resb DNS_SLOTS * DQ_SIZE
+alignb 8
+ping_addr:      resb 16
+dns_server:     resb 16

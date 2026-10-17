@@ -679,7 +679,7 @@ when the FAT code's state can't be trusted. USB transfers are polled, so the
 save works with interrupts off. A failed automatic save turns automatic saving
 off. `log` shows the state; `log save`, `log on`, `log off`.
 
-## Network: `rtl8168.asm`, `net.asm`, `tcp.asm`, `netapp.asm`, `http.asm`, `socket.asm`
+## Network: `rtl8168.asm`, `net.asm`, `ip6.asm`, `tcp.asm`, `netapp.asm`, `http.asm`, `httpd.asm`, `socket.asm`
 
 - **Realtek** (`rtl8168.asm`): the RTL8111/8168 family (the Victus's "Gaming
   GbE", 10EC:8168), and the RTL8139C+ QEMU emulates, whose C+ mode uses the
@@ -700,11 +700,40 @@ off. `log` shows the state; `log save`, `log on`, `log off`.
   second apart). IPv4 checks header checksums, drops fragments, and routes
   through the gateway when the destination is off the subnet. ICMP answers
   echo requests sent to us; UDP checks checksums and hands port 68 to DHCP
-  and ports from 49152 up to DNS; protocol 6 goes to TCP. Addresses stay in network byte order
-  throughout (`%I` prints them, `%M` prints a MAC).
+  and ports from 49152 up to DNS; protocol 6 goes to TCP; IPv6 frames go
+  to `ip6.asm`. Addresses stay in network byte order throughout (`%I`
+  prints an IPv4 one, `%A` a 16-byte address of either family, `%M` a
+  MAC).
+- **IPv6** (`ip6.asm`), beside IPv4 on the same interface. Above IP an
+  address is 16 bytes for either family, IPv4 as `::ffff:a.b.c.d`, so DNS,
+  ping, TCP, `http` and sockets each keep one kind. At link up: a
+  link-local address from the MAC (EUI-64), checked to be free (an NS from
+  `::`, a second's wait), then up to three router solicitations 4 s apart.
+  A router advertisement gives the router (and its lifetime), the hop
+  limit, the MTU, a DNS server (RDNSS), the /64 on the link, and from the
+  first prefix offered for it a global address (SLAAC), checked the same
+  way; its valid lifetime is kept. NDP finds neighbours as ARP does (16
+  kept, four frames held while it asks, three times a second apart) and
+  answers solicitations for our addresses; an advertisement or a check for
+  an address we are still checking means it is someone else's, and it is
+  given up. An MLDv2 report says we listen to our solicited-node group,
+  again when a router asks, so a switch that watches for them still passes
+  NDP's multicasts to us. Hop-by-hop, routing and destination headers are
+  passed over; fragments are dropped. ICMPv6 echo is answered; UDP (its
+  checksum required) goes to DNS, TCP to `tcp.asm`. Sources: link-local
+  for link-local and multicast destinations, else the global address; the
+  router for what is off the link. `ip6` shows the addresses, router, DNS
+  and neighbours; `ip6 <address>/64 [router] [dns]` sets them by hand,
+  `ip6 auto` goes back to the router's, `ip6 prefer` puts AAAA before A.
+  No DHCPv6, no privacy addresses, one global address.
 - **Clients** (`netapp.asm`): DHCP (discover, request, renew at half the
-  lease, start over on NAK or link up), an A-record resolver and ping (a
-  TSC stamp in each request gives the round trip). The resolver keeps
+  lease, start over on NAK or link up), a resolver for A and AAAA records,
+  and ping over ICMP or ICMPv6 (a TSC stamp in each request gives the round
+  trip). The resolver asks IPv4's DNS server while there is an IPv4
+  address, else the one a router named; `host` asks for both kinds of
+  record, the others for what can be reached: A, then AAAA when there is
+  none, AAAA alone without an IPv4 address (AAAA first after `ip6
+  prefer`). It keeps
   eight lookups at once (`dns_slots`), each from a random port of its own
   with a random id, both checked along with the server on the answer;
   three tries, 2 s apart; it reports to the shell or to a socket
@@ -721,7 +750,8 @@ off. `log` shows the state; `log save`, `log on`, `log off`.
   handshake never ends), and the last ACK of the handshake makes it
   established and asks the listener's accept function, which may refuse it
   (a reset) or take it; then the listener's handlers hear TH_OPEN and the
-  rest of that segment. MSS 1460 is offered and the peer's honoured. The
+  rest of that segment. Over IPv4 or IPv6, by the address's form; MSS 1460
+  is offered (1440 over IPv6) and the peer's honoured. The
   window offered is a fixed 64240 for handlers that take every byte as it
   comes; one that asks for flow control (`tcp_flow`) is offered its limit
   less what it holds, data beyond that is left for the peer to send again,
@@ -790,7 +820,8 @@ off. `log` shows the state; `log save`, `log on`, `log off`.
   `RO_NET_SUB` makes narrower ones, on a host, every host under a name
   (`*.example.com`) or one port, with fewer of the rights `RT_NET_CONNECT`
   (plain TCP), `RT_NET_TLS` (TLS, the certificate checked),
-  `RT_NET_INSECURE` (TLS, not checked) and `RT_NET_LISTEN`. A socket
+  `RT_NET_INSECURE` (TLS, not checked) and `RT_NET_LISTEN`. A host is a
+  name, an IPv4 address or an IPv6 one (bare or in brackets). A socket
   (`OT_SOCKET`, 32 at once) is a connection or a port listened on, with
   64 KiB each way in the kernel: `RO_SEND` and `RO_RECV` copy in what fits
   and out what came, and the main loop (`sk_tick`, from `net_service`)
@@ -811,7 +842,7 @@ off. `log` shows the state; `log save`, `log on`, `log off`.
   copying without it. `sockets` lists them. NET.AXE (`src/user/net.asm`)
   is a client and server for it: `net get`, `net echo`, `net serve`, and
   `net test` (41 checks).
-- Shell: `net`, `ip`, `dhcp`, `ping`, `host`, `arp`, `tcp`, `http`, `httpd`, `sockets`.
+- Shell: `net`, `ip`, `ip6`, `dhcp`, `ping`, `host`, `arp`, `tcp`, `http`, `httpd`, `sockets`.
 - Tested in QEMU with `tools/run.py --nic rtl8139`: DHCP, ping and DNS
   through QEMU's user network, and two Axiom VMs joined by a socket pinging
   each other, with every frame's checksums checked in the dump
@@ -843,6 +874,17 @@ off. `log` shows the state; `log save`, `log on`, `log off`.
   301, a listing, an `index.html`, `%20`, a POST passed over on a
   connection that goes on, three requests sent together, HTTP/1.0 closed
   or kept, five kinds of bad request, eight clients at once.
+  `tools/test/ip6/run.py` boots three guests at once. One on QEMU's user
+  network takes its address from QEMU's router, pings it, fetches from a
+  server on the host's `[::1]` by length and in chunks on one connection
+  and twice over TLS on another, and echoes through sockets on four
+  connections at once. Two on a hub written in Python, which is also their
+  router (prefix, RDNSS, NDP, a DNS server) and has no IPv4: the server
+  runs `httpd`; the client pings it by name and the router by both its
+  addresses, looks names up, and fetches 92 KB and 552 KB by the server's
+  global address and by name, compared with `build/esp`, and a listing by
+  its link-local address. The hub checks DAD for each address, the MLD
+  reports and the solicitations.
   The RTL8168 code paths (G-family takeover, PHY, MSI) run only on
   real hardware. Not yet: IPv6, other NICs.
 

@@ -553,6 +553,7 @@ commands:
     COMMAND 'date',     cmd_date,     'the clock'
     COMMAND 'net',      cmd_net,      'network interfaces, link and address'
     COMMAND 'ip',       cmd_ip,       'ip <a.b.c.d/n> [gateway] [dns]: set the address by hand'
+    COMMAND 'ip6',      cmd_ip6,      'ip6: IPv6 addresses and neighbours; ip6 <address>/64 [router] [dns], ip6 auto, ip6 prefer [off]'
     COMMAND 'dhcp',     cmd_dhcp,     'ask the network for an address'
     COMMAND 'ping',     cmd_ping,     'ping <address or name> [count]'
     COMMAND 'host',     cmd_host,     'host <name>: look up its address'

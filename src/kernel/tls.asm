@@ -1408,6 +1408,8 @@ tl_sni_len:
     xor ecx, ecx
     xor edx, edx                        ; EDX = anything but digits and dots
     lea rsi, [rbp + S_tl_host]
+    cmp byte [rsi], '['                 ; an IPv6 address: no name either
+    je .out
 .char:
     movzx eax, byte [rsi + rcx]
     test eax, eax

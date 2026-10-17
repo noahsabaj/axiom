@@ -8,6 +8,7 @@
 ;
 ;  An IPv4 address is kept as it travels: a dword whose low byte is the first
 ;  octet. Ports, lengths and types are swapped where they are read or written.
+;  IPv6 is in ip6.asm.
 ; =============================================================================
 
 MAX_NIC         equ 2
@@ -238,6 +239,8 @@ net_service:
     call net_links
 .timers:
     call arp_tick
+    call nd_tick
+    call ip6_tick
     call dhcp_tick
     call dns_tick
     call ping_tick
@@ -436,6 +439,8 @@ net_receive:
     je arp_input
     cmp eax, ETYPE_IP
     je ip_input
+    cmp eax, ETYPE_IP6
+    je ip6_input
 .out:
     ret
 
@@ -998,7 +1003,7 @@ icmp_input:
     cmp al, 8
     je .echo
     cmp al, 0
-    je ping_reply
+    je .reply
     cmp al, 3
     je ping_error
     cmp al, 11
@@ -1029,6 +1034,15 @@ icmp_input:
     mov edi, [rdi + 12]
     mov esi, 1
     jmp ip_send
+.reply:
+    push rdi
+    mov eax, [rdi + 12]
+    lea rdi, [net_from]
+    call addr_set4
+    pop rdi
+    lea rdx, [net_from]
+    movzx r8d, byte [rdi + 8]
+    jmp ping_reply
 
 ; -----------------------------------------------------------------------------
 ;  UDP
@@ -1063,7 +1077,16 @@ udp_input:
     cmp eax, 68
     je dhcp_input
     cmp eax, 49152                      ; where DNS questions go from
-    jae dns_input
+    jb .out
+    push rax
+    push rdi
+    mov eax, edx
+    lea rdi, [net_from]
+    call addr_set4
+    pop rdi
+    pop rax
+    lea rdx, [net_from]
+    jmp dns_input
 .out:
     ret
 
@@ -1158,7 +1181,10 @@ dhcp_next:      resq 1
 dns_next:       resq 1
 ping_next:      resq 1
 tcp_next:       resq 1
-NET_TIMERS      equ 6
+ip6_next:       resq 1
+nd_next:        resq 1
+NET_TIMERS      equ 8
+net_from:       resb 16                 ; a sender, as an address (ip6.asm)
 net_text:       resb 128
 arp_cache:      resb ARP_SLOTS * AR_SIZE
 arp_frame:      resb 64

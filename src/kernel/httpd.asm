@@ -1208,8 +1208,8 @@ hd_begin:
     lea rsi, [hd_head]
     mov ecx, r10d
     rep movsb
-    mov eax, [r12 + TC_RIP]
-    KLOG "httpd: %I %s %s: %u, %b", rax, qword [hd_mtext], qword [hd_target_p], r13, r14
+    lea rax, [r12 + TC_RA]
+    KLOG "httpd: %A %s %s: %u, %b", rax, qword [hd_mtext], qword [hd_target_p], r13, r14
     cmp byte [hd_meth], 2
     jne .body
     xor edi, edi

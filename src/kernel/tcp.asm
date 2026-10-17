@@ -9,8 +9,9 @@
 ;  after a gap is dropped and the ACK says what is missing, so the sender
 ;  fills it in.
 ;
-;    tcp_connect(EDI = address, ESI = port, RDX = handlers) -> RAX = the
-;        connection, CF if none is free or there is no route
+;    tcp_connect(RDI = address, 16 bytes, IPv4 or IPv6; ESI = port, RDX =
+;        handlers) -> RAX = the connection, CF if none is free or there is
+;        no route
 ;    tcp_listen(EDI = port, RSI = handlers for what it accepts, RDX =
 ;        accept, RCX = the owner's) -> RAX = the listener, CF if the port is
 ;        taken or no listener is free
@@ -78,7 +79,6 @@ TCP_TIMEOUT     equ 3
 
 ; a connection
 TC_STATE        equ 0
-TC_RIP          equ 4                   ; the other side, as it travels
 TC_LPORT        equ 8                   ; ports, as numbers
 TC_RPORT        equ 12
 TC_ISS          equ 16                  ; our first sequence number
@@ -111,6 +111,8 @@ TC_RLIMIT       equ 164                 ; dword: tcp_flow's, 0 = none
 TC_ADV          equ 168                 ; dword: the window last offered
 TC_LISTENER     equ 176                 ; what accepted it, or will
 TC_MAX          equ 184                 ; dword: past the furthest ever sent
+TC_V6           equ 188                 ; dword: 1 over IPv6
+TC_RA           equ 192                 ; the other side's address (16 bytes)
 TC_SIZE         equ 256
 
 ; a listener
@@ -124,13 +126,16 @@ LS_SIZE         equ 40
 
 section .text
 
-; tcp_connect(EDI = address, ESI = port, RDX = handlers) -> RAX = the
+; tcp_connect(RDI = address, ESI = port, RDX = handlers) -> RAX = the
 ; connection, CF if none is free or there is no route. Preserves others.
 tcp_connect:
     push r12
     call tcp_slot
     jc .fail
-    mov [r12 + TC_RIP], edi
+    push rsi
+    mov rsi, rdi
+    call tcp_set_peer
+    pop rsi
     mov [r12 + TC_RPORT], esi
     mov [r12 + TC_OPS], rdx
     call tcp_port
@@ -158,6 +163,20 @@ tcp_connect:
     stc
 .out:
     pop r12
+    ret
+
+; tcp_set_peer(R12, RSI = address): the other side's, and its family.
+; Preserves all.
+tcp_set_peer:
+    push rdi
+    lea rdi, [r12 + TC_RA]
+    call addr_copy
+    mov dword [r12 + TC_V6], 0
+    call addr_is4
+    je .out
+    mov dword [r12 + TC_V6], 1
+.out:
+    pop rdi
     ret
 
 ; tcp_write(RDI = connection, RSI = data, EDX = bytes) -> EAX = bytes taken
@@ -501,8 +520,13 @@ tcp_find:
     inc ecx
     cmp dword [r12 + TC_STATE], TS_CLOSED
     je .next
-    mov eax, [ts_src]
-    cmp [r12 + TC_RIP], eax
+    push rsi
+    push rdi
+    lea rsi, [ts_from]
+    lea rdi, [r12 + TC_RA]
+    call addr_eq
+    pop rdi
+    pop rsi
     jne .next
     mov eax, [ts_sport]
     cmp [r12 + TC_RPORT], eax
@@ -652,12 +676,19 @@ tcp_segment:
     push r8
     push r9
     lea r8, [net_frame + NET_PAYLOAD]
+    cmp dword [r12 + TC_V6], 0
+    je .base
+    lea r8, [net_frame + NET6_PAYLOAD]
+.base:
     mov r9d, eax
     mov ebx, 20
     test dl, TCP_SYN
     jz .copy
     mov ebx, 24
     mov dword [r8 + 20], 0xB4050402     ; MSS 1460: kind 2, length 4, 05 B4
+    cmp dword [r12 + TC_V6], 0
+    je .copy
+    mov dword [r8 + 20], 0xA0050402     ; over IPv6, 1440
 .copy:
     lea rdi, [r8 + rbx]
     push rcx
@@ -684,9 +715,11 @@ tcp_segment:
     xchg al, ah
     mov [r8 + 14], ax
     mov dword [r8 + 16], 0              ; checksum, urgent pointer
+    cmp dword [r12 + TC_V6], 0
+    jne .six
     mov eax, [net_ip]                   ; the pseudo-header
     mov [tcp_ph], eax
-    mov eax, [r12 + TC_RIP]
+    mov eax, [r12 + TC_RA + 12]
     mov [tcp_ph + 4], eax
     mov eax, ecx
     xchg al, ah
@@ -701,9 +734,16 @@ tcp_segment:
     call net_sum
     call net_fold
     mov [r8 + 16], ax
-    mov edi, [r12 + TC_RIP]
+    mov edi, [r12 + TC_RA + 12]
     mov esi, 6
     call ip_send
+    jmp .sent
+.six:
+    lea rdi, [r12 + TC_RA]
+    mov esi, 6
+    mov edx, 16
+    call ip6_send
+.sent:
     pop r9
     pop r8
     pop rdi
@@ -1130,6 +1170,41 @@ tcp_input:
     call net_fold
     test eax, eax
     jnz .out
+    mov eax, [rdi + 12]
+    push rdi
+    lea rdi, [ts_from]
+    call addr_set4
+    pop rdi
+    jmp tcp_segment_in
+.out:
+    ret
+
+; tcp6_input(RBX, RDI = IPv6 header, RSI = segment, ECX = bytes)
+tcp6_input:
+    cmp byte [rdi + 24], 0xFF           ; to us alone, never a group
+    je .out
+    cmp ecx, 20
+    jb .out
+    mov eax, 6
+    call ip6_pseudo
+    call net_sum
+    call net_fold
+    test eax, eax
+    jnz .out
+    push rsi
+    push rdi
+    lea rsi, [rdi + 8]
+    lea rdi, [ts_from]
+    call addr_copy
+    pop rdi
+    pop rsi
+    jmp tcp_segment_in
+.out:
+    ret
+
+; tcp_segment_in(RSI = a segment, its checksum right; ECX = its bytes;
+; ts_from = who sent it)
+tcp_segment_in:
     movzx eax, byte [rsi + 12]          ; header length
     shr eax, 4
     shl eax, 2
@@ -1159,8 +1234,6 @@ tcp_input:
     movzx eax, word [rsi + 2]
     xchg al, ah
     mov [ts_dport], eax
-    mov eax, [rdi + 12]
-    mov [ts_src], eax
     push r12
     call tcp_find
     jc .stray
@@ -1265,8 +1338,10 @@ tcp_passive:
     jc .drop
     inc dword [rsi + LS_HALF]
     mov [r12 + TC_LISTENER], rsi
-    mov eax, [ts_src]
-    mov [r12 + TC_RIP], eax
+    push rsi
+    lea rsi, [ts_from]
+    call tcp_set_peer
+    pop rsi
     mov eax, [ts_sport]
     mov [r12 + TC_RPORT], eax
     mov eax, [ts_dport]
@@ -1306,9 +1381,16 @@ tcp_their_mss:
     jnz .mss
     mov eax, 536                        ; the default without the option
 .mss:
+    cmp dword [r12 + TC_V6], 0
+    jne .mss6
     cmp eax, TCP_MSS
     jbe .mss_max
     mov eax, TCP_MSS
+    jmp .mss_max
+.mss6:
+    cmp eax, TCP6_MSS
+    jbe .mss_max
+    mov eax, TCP6_MSS
 .mss_max:
     cmp eax, 64
     jae .mss_min
@@ -1326,8 +1408,10 @@ tcp_refuse:
     test byte [ts_flags], TCP_RST
     jnz .out
     lea r12, [tcp_scratch]
-    mov eax, [ts_src]
-    mov [r12 + TC_RIP], eax
+    push rsi
+    lea rsi, [ts_from]
+    call tcp_set_peer
+    pop rsi
     mov eax, [ts_sport]
     mov [r12 + TC_RPORT], eax
     mov eax, [ts_dport]
@@ -1818,8 +1902,8 @@ tcp_echo_accept:
     mov dword [tcp_echo_len + rax * 4], 0
     mov byte [tcp_echo_fin + rax], 0
     mov ecx, [rdi + TC_RPORT]
-    mov edx, [rdi + TC_RIP]
-    KLOG "tcp: echo: %I:%u connected", rdx, rcx
+    lea rdx, [rdi + TC_RA]
+    KLOG "tcp: echo: %A port %u connected", rdx, rcx
     clc
     ret
 
@@ -1903,8 +1987,8 @@ tcp_echo_gone:
     mov dword [tcp_echo_len + rax * 4], 0
     mov byte [tcp_echo_fin + rax], 0
     mov ecx, [rdi + TC_RPORT]
-    mov edx, [rdi + TC_RIP]
-    KLOG "tcp: echo: %I:%u gone (%u): %b echoed", rdx, rcx, rsi, qword [rdi + TC_TXBY]
+    lea rdx, [rdi + TC_RA]
+    KLOG "tcp: echo: %A port %u gone (%u): %b echoed", rdx, rcx, rsi, qword [rdi + TC_TXBY]
     ret
 
 ; tcp_echo_tick: from net_service, after the rest. Preserves all but RAX.
@@ -1949,7 +2033,7 @@ tcp_list:
     inc r13d
     mov rcx, [tcp_state_names + rax * 8]
     mov eax, [r12 + TC_LPORT]
-    mov edx, [r12 + TC_RIP]
+    lea rdx, [r12 + TC_RA]
     mov esi, [r12 + TC_RPORT]
     mov rdi, [r12 + TC_SRTT]
     push rax
@@ -1960,7 +2044,7 @@ tcp_list:
     mov rdi, rax
     pop rdx
     pop rax
-    KLOG "tcp: port %u to %I:%u, %s, %b in, %b out, rtt %u ms", rax, rdx, rsi, rcx, qword [r12 + TC_RXBY], qword [r12 + TC_TXBY], rdi
+    KLOG "tcp: port %u to %A port %u, %s, %b in, %b out, rtt %u ms", rax, rdx, rsi, rcx, qword [r12 + TC_RXBY], qword [r12 + TC_TXBY], rdi
     mov eax, [r12 + TC_RLIMIT]
     test eax, eax
     jz .next
@@ -2027,7 +2111,7 @@ ts_ack:         resd 1
 ts_wnd:         resd 1
 ts_flags:       resd 1
 ts_len:         resd 1
-ts_src:         resd 1
+ts_from:        resb 16                 ; who sent the segment
 ts_sport:       resd 1
 ts_dport:       resd 1
 ts_mss:         resd 1

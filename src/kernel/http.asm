@@ -145,10 +145,10 @@ http_fetch:
     call http_kept
     jnc .reuse
     lea rsi, [http_host]
-    call ip_parse
+    lea rdi, [http_addr]
+    call addr_parse
     jc .name
-    cmp byte [rsi], 0
-    jne .name
+    lea rsi, [http_addr]
     call http_connect
     jmp .started
 .name:
@@ -165,7 +165,8 @@ http_fetch:
     lea rdx, [http_host]
     lea rsi, [http_path]
     mov ecx, [http_port]
-    KLOG "http: GET %s from %s (%I) port %u, on the connection kept open", rsi, rdx, qword [http_ip], rcx
+    lea rax, [http_addr]
+    KLOG "http: GET %s from %s (%A) port %u, on the connection kept open", rsi, rdx, rax, rcx
 .send:
     RDTSC64
     mov [http_t0], rax
@@ -176,7 +177,7 @@ http_fetch:
     call tcp_abort
     call http_tls_abort
     mov byte [http_reused], 0
-    mov eax, [http_ip]
+    lea rsi, [http_addr]
     call http_connect
     jmp .started
 .not_url:
@@ -216,14 +217,32 @@ http_url:
 .scheme:
     lea rdi, [http_host]
     xor ecx, ecx
+    xor edx, edx                        ; 1 within [ ]: an IPv6 address
 .host:
     mov al, [rsi]
     test al, al
     jz .host_end
+    cmp al, '['
+    jne .not_open
+    test ecx, ecx
+    jnz .bad
+    mov edx, 1
+    jmp .take
+.not_open:
+    cmp al, ']'
+    jne .not_close
+    test edx, edx
+    jz .bad
+    xor edx, edx
+    jmp .take
+.not_close:
+    test edx, edx
+    jnz .take                           ; its ':' are its own
     cmp al, '/'
     je .host_end
     cmp al, ':'
     je .host_end
+.take:
     cmp ecx, 253
     jae .bad
     mov [rdi + rcx], al
@@ -233,6 +252,8 @@ http_url:
 .host_end:
     test ecx, ecx
     jz .bad
+    test edx, edx
+    jnz .bad                            ; '[' never closed
     mov byte [rdi + rcx], 0
     mov eax, [http_defport]
     mov [http_port], eax
@@ -458,10 +479,11 @@ http_forget:
 .out:
     ret
 
-; http_begin(EAX = the server's address): from dns_done
+; http_begin(RAX = the server's address): from dns_done
 http_begin:
     cmp qword [http_app], 0
     je .out
+    mov rsi, rax
     call http_connect
     jc http_lost
 .out:
@@ -473,7 +495,7 @@ http_dns_failed:
     je http_lost
     ret
 
-; http_connect(EAX = the server's address) -> CF (said why) if it cannot
+; http_connect(RSI = the server's address) -> CF (said why) if it cannot
 http_connect:
     push rcx
     push rdx
@@ -481,15 +503,20 @@ http_connect:
     push rdi
     cmp qword [http_conn], 0
     jne .fail
-    mov [http_ip], eax
+    lea rdi, [http_addr]
+    cmp rsi, rdi
+    je .known
+    call addr_copy
+.known:
     cmp byte [http_quiet], 0
     jne .connect
+    lea rax, [http_addr]
     lea rdx, [http_host]
     lea rsi, [http_path]
     mov ecx, [http_port]
-    KLOG "http: GET %s from %s (%I) port %u", rsi, rdx, rax, rcx
+    KLOG "http: GET %s from %s (%A) port %u", rsi, rdx, rax, rcx
 .connect:
-    mov edi, eax
+    lea rdi, [http_addr]
     mov esi, [http_port]
     lea rdx, [http_ops]
     call tcp_connect
@@ -525,7 +552,7 @@ http_retry:
     jne .again
     KLOG "http: the connection kept open had closed; again, on a new one"
 .again:
-    mov eax, [http_ip]
+    lea rsi, [http_addr]
     call http_connect
     jnc .done
     call http_lost
@@ -933,13 +960,15 @@ http_gone:
     KLOG "http: the connection ended early"
     jmp http_lost
 .refused:
-    KLOG "http: %I refused the connection on port %u", qword [http_ip], rax
+    lea rcx, [http_addr]
+    KLOG "http: %A refused the connection on port %u", rcx, rax
     jmp http_lost
 .reset:
     KLOG "http: the server reset the connection"
     jmp http_lost
 .timeout:
-    KLOG "http: no answer from %I (timed out)", qword [http_ip]
+    lea rcx, [http_addr]
+    KLOG "http: no answer from %A (timed out)", rcx
     jmp http_lost
 .out:
     ret
@@ -1506,7 +1535,7 @@ http_hdlen:     resq 1                  ; of http_head
 http_rx:        resq 1                  ; bytes of the answer so far
 http_left:      resq 1                  ; of Content-Length, or of the chunk
 http_idle_until: resq 1                 ; net_clock: a kept one is closed then
-http_ip:        resd 1
+http_addr:      resb 16                 ; the server's
 http_defport:   resd 1                  ; 80, or 443 for https
 http_status:    resd 1
 http_trail:     resd 1                  ; the chunks': characters in a line

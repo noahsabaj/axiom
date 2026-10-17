@@ -75,6 +75,7 @@ section .text
 %include "rtc.asm"
 %include "log.asm"
 %include "net.asm"
+%include "ip6.asm"
 %include "rtl8168.asm"
 %include "tcp.asm"
 %include "netapp.asm"

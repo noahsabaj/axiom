@@ -110,7 +110,8 @@ strcpy_trim:
 ;    %s string  %c char  %u unsigned  %d signed  %x hex  %p 0x + 16 hex digits
 ;    %b bytes as B/KiB/MiB/GiB/TiB  %t tenths (123 -> 12.3)
 ;    %h hundredths (1234 -> 12.34)  %I IPv4 address (first octet in the low
-;    byte, as loaded from a packet)  %M MAC address at a pointer  %% literal
+;    byte, as loaded from a packet)  %A an address at a pointer, 16 bytes,
+;    IPv6 or IPv4-mapped (ip6.asm)  %M MAC address at a pointer  %% literal
 ;    Flags: '-' left-align, '0' zero-pad, then a width: %-12s %08x %5u
 ; -----------------------------------------------------------------------------
 format:
@@ -184,6 +185,8 @@ format:
     je .c_ip
     cmp al, 'M'
     je .c_mac
+    cmp al, 'A'
+    je .c_addr
     test al, al
     jz .finish
     stosb                               ; %% or unknown: literal
@@ -312,6 +315,20 @@ format:
     jnz .c_ip_octet
     lea rcx, [fmt_ip]
     jmp .nested
+
+.c_addr:
+    mov rdx, [rbx]
+    add rbx, 8
+    push rsi
+    push rdi
+    mov rsi, rdx
+    lea rdi, [rsp + 16]                 ; the text scratch
+    call ip6_text
+    pop rdi
+    pop rsi
+    mov r10, rsp
+    mov r11, rax
+    jmp .emit
 
 .c_mac:
     mov rdx, [rbx]
