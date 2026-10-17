@@ -82,7 +82,8 @@ OT_MEMORY       equ 4
 OT_RING         equ 5
 OT_CONSOLE      equ 6                   ; the screen and the serial log (user.asm)
 OT_CHANNEL      equ 7                   ; one end of a channel (channel.asm)
-OT_TYPES        equ 8                   ; with 0, none
+OT_STORE        equ 8                   ; names in the store, under a prefix (store.asm)
+OT_TYPES        equ 9                   ; with 0, none
 
 ; what a capability allows (RT_*): three for any object, the rest by type
 RT_DUP          equ 1 << 0              ; derive more from it
@@ -100,6 +101,11 @@ RT_RING_ENTER   equ 1 << 8              ; a ring: submit to it, wait on it
 RT_CON_WRITE    equ 1 << 8              ; the console: write lines to it
 RT_CH_SEND      equ 1 << 8              ; a channel's end: send from it
 RT_CH_RECV      equ 1 << 9              ; receive at it, and wait to
+RT_ST_READ      equ 1 << 8              ; the store: read names, list them
+RT_ST_WRITE     equ 1 << 9              ; stage changes, drop them
+RT_ST_COMMIT    equ 1 << 10             ; commit what is staged
+RT_ST_ROLLBACK  equ 1 << 11             ; put its names back as an earlier commit had them
+RT_ST_ALL       equ RT_ST_READ | RT_ST_WRITE | RT_ST_COMMIT | RT_ST_ROLLBACK
 RT_ALL          equ 0xFFFF
 
 ; what handle operations return when they fail
@@ -117,8 +123,12 @@ E_CANCELED      equ -11
 E_KILLED        equ -12                 ; a thread whose task was killed
 E_FAULT         equ -13                 ; one that faulted in ring 3
 E_PEER          equ -14                 ; a channel's other end is closed
-E_EMPTY         equ -15                 ; nothing to receive yet
-E_COUNT         equ 16                  ; with 0, none
+E_EMPTY         equ -15                 ; nothing to receive yet; nothing to commit
+E_CONFLICT      equ -16                 ; the store: the head changed a name since it was staged
+E_NONAME        equ -17                 ; no such name in the store
+E_IO            equ -18                 ; the drive failed
+E_NOSTORE       equ -19                 ; no store, or one that cannot be written
+E_COUNT         equ 20                  ; with 0, none
 E_ANY           equ -4096               ; what returns a pointer or an E_*: an
                                         ; error is RAX >= E_ANY, unsigned (the
                                         ; kernel's pointers are negative too)
@@ -314,7 +324,24 @@ RO_RECV         equ 14                  ; handle, the next message into handle2 
                                         ; a0, a1 bytes at most -> its bytes, or
                                         ; E_EMPTY (RO_WAIT on it waits for one)
 RO_KILL         equ 15                  ; handle = a task
-RO_COUNT        equ 16
+RO_ST_PUT       equ 16                  ; handle = a store, handle2 + a0: a name
+                                        ; (a 64-byte field, NUL-ended), handle2 +
+                                        ; a1: a2 bytes for it -> 0, staged
+RO_ST_GET       equ 17                  ; handle, handle2 + a0: a name; into
+                                        ; handle2 + a1, a2 bytes at most -> the
+                                        ; bytes it holds (staged, else committed)
+RO_ST_DEL       equ 18                  ; handle, handle2 + a0: a name -> 0, staged
+RO_ST_COMMIT    equ 19                  ; handle, handle2 + a0: why, a1 bytes ->
+                                        ; the commit's number
+RO_ST_ABORT     equ 20                  ; handle -> the changes dropped
+RO_ST_SUB       equ 21                  ; handle, handle2 + a0: a name, a1 =
+                                        ; rights -> a handle to the names under
+                                        ; "name/" alone
+RO_ST_ROLLBACK  equ 22                  ; handle, a0 = a commit's number -> a new
+                                        ; commit: its names as they were then
+RO_ST_LIST      equ 23                  ; handle, into handle2 + a0, a1 bytes at
+                                        ; most: its names, NUL-ended -> how many
+RO_COUNT        equ 24
 
 TS_NEW          equ 0
 TS_READY        equ 1
@@ -429,6 +456,7 @@ SB_GIFT         equ 12                  ; dword: what the task that started it g
 SB_RING_VA      equ 16                  ; where the ring's memory is mapped
 SB_TSC_PER_US   equ 24                  ; for deadlines
 SB_ARGS_LEN     equ 32                  ; dword
+SB_STORE        equ 36                  ; dword: to the store under "name/", or 0
 SB_ARGS         equ 64                  ; the arguments it was run with, NUL-ended
 SB_ARGS_MAX     equ 4096 - SB_ARGS - 1
 

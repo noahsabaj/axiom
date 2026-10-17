@@ -1465,6 +1465,8 @@ str_rt_enter:   db 'enter', 0
 str_rt_kill:    db 'kill', 0
 str_rt_send:    db 'send', 0
 str_rt_recv:    db 'receive', 0
+str_rt_commit:  db 'commit', 0
+str_rt_rollback: db 'rollback', 0
 str_e_ok:       db 'ok', 0
 str_e_badh:     db 'no such handle', 0
 str_e_type:     db 'the wrong type', 0
@@ -1480,13 +1482,18 @@ str_e_canceled: db 'canceled', 0
 str_e_killed:   db 'killed', 0
 str_e_fault:    db 'a fault in ring 3', 0
 str_e_peer:     db 'the other end is closed', 0
-str_e_empty:    db 'nothing to receive', 0
+str_e_empty:    db 'nothing there', 0
+str_e_conflict: db 'changed since it was staged', 0
+str_e_noname:   db 'no such name', 0
+str_e_io:       db 'the drive failed', 0
+str_e_nostore:  db 'no store to write to', 0
 str_e_unknown:  db 'an unknown error', 0
 
 align 8
 err_names:      dq str_e_ok, str_e_badh, str_e_type, str_e_rights, str_e_expired
                 dq str_e_revoked, str_e_range, str_e_nomem, str_e_full, str_e_timeout, str_e_arg
                 dq str_e_canceled, str_e_killed, str_e_fault, str_e_peer, str_e_empty
+                dq str_e_conflict, str_e_noname, str_e_io, str_e_nostore
 rt_names_none:  dq str_rt_dup, str_rt_give, str_rt_info, 0, 0, 0, 0, 0
                 dq 0, 0, 0, 0, 0, 0, 0, 0
 rt_names_task:  dq str_rt_dup, str_rt_give, str_rt_info, 0, 0, 0, 0, 0
@@ -1503,6 +1510,8 @@ rt_names_console: dq str_rt_dup, str_rt_give, str_rt_info, 0, 0, 0, 0, 0
                 dq str_rt_write, 0, 0, 0, 0, 0, 0, 0
 rt_names_channel: dq str_rt_dup, str_rt_give, str_rt_info, 0, 0, 0, 0, 0
                 dq str_rt_send, str_rt_recv, 0, 0, 0, 0, 0, 0
+rt_names_store: dq str_rt_dup, str_rt_give, str_rt_info, 0, 0, 0, 0, 0
+                dq str_rt_read, str_rt_write, str_rt_commit, str_rt_rollback, 0, 0, 0, 0
 
 section .data
 align 8
@@ -1516,6 +1525,7 @@ ty_memory:      dq str_ot_memory, mem_destroy, 0, 0, 0, 0, rt_names_memory, 0
 ty_ring:        dq str_ot_ring, ring_destroy, 0, 0, 0, 0, rt_names_ring, ring_orphan
 ty_console:     dq str_ot_console, obj_free, 0, 0, 0, 0, rt_names_console, 0
 ty_channel:     dq str_ot_channel, ch_destroy, 0, 0, 0, 0, rt_names_channel, ch_orphan
+ty_store:       dq str_ot_store, st_obj_destroy, 0, 0, 0, 0, rt_names_store, 0
 
 thread_list     equ ty_thread + TY_LIST
 thread_count    equ ty_thread + TY_LIVE

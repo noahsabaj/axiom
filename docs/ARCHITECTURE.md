@@ -72,6 +72,7 @@ loader reads: magic `AXIOMKRN`, entry point, file size, memory size.
 | 15 | `nvme.asm`, `disk.asm`, `fat.asm` | NVMe controllers, their partitions (and those of USB sticks found in step 14), FAT32 mounted read-only |
 | 16 | `net.asm`, `rtl8168.asm` | Ethernet controllers; DHCP starts once the link is up |
 | 17 | `mandel.asm`, `shell.asm` | Palette, view, shell; interrupts on |
+| 18 | `store.asm` | The object store, from the first drive holding one (below) |
 
 Then `main_loop`: poll and service USB (enumeration, hot-plug), service the
 network (frames in, link, DHCP/ARP/ping timers), save the log if it grew
@@ -597,6 +598,68 @@ into) on screen and serial.
   clusters, two drives at once, a USB stick direct and behind a hub, pulled
   and plugged in again), checked by `tools/fatcheck.py` and 7-Zip.
   Not yet: 4 KiB-sector drives tested, UAS (USB Attached SCSI), exFAT/NTFS.
+
+## Store: `store.asm`, `storetest.asm`
+
+- **On disk**, in 4 KiB blocks: two superblocks (blocks 0 and 1, `SU_*`),
+  then a log that is only ever appended to. The superblock in use is the
+  newer one whose SHA-256 is right; the next goes into the other slot, so a
+  torn superblock write leaves the one before. It holds the head (the newest
+  commit's hash and number), where the log ends, the newest journal record,
+  and up to 32 snapshots (a name, a commit).
+- **Objects are named by their SHA-256**: a blob is what a name holds (up to
+  1 MiB), a tree (`TR_*`) every name, sorted, with its blob's hash, size and
+  the commit that set it (up to 1024 names), and a commit (`CM_*`, 512
+  bytes) its tree, the commit before, and its provenance: the task, its name
+  (or `console`), the capability object, its rights and prefix, the time, why,
+  and how many names it added, changed and removed; a rollback also says to
+  which commit. Bytes already there cost nothing: the same hash is the same
+  object.
+- **A commit** writes its new blobs, its tree and itself, then a journal
+  record (`JR_*`: the commit, the one before's record, and each new object's
+  hash, block and size, all under a SHA-256), flushes, writes the
+  superblock, and flushes again. Until that superblock is down the store is
+  as it was: whatever was written lies past the log's end and is written
+  over by the next commit. `store tear` stops a commit just short of it, on
+  purpose. **Mounting** walks the journal back from the newest record, each
+  one checked: every object into the index (an open-addressed table from
+  hash to block, in memory) and every commit into the chain (number to
+  hash); then the head's tree is read, its hash checked like every object
+  read.
+- **Transactions**: changes (`SX_*`: put or remove, a name, a copy of the
+  bytes) are staged in a transaction (`TX_*`), the console's own or a store
+  capability's, up to 128 at once; reads through it see them first. Each
+  change keeps what the head held under its name when it was staged, and a
+  commit that finds the head changed there since is refused (`E_CONFLICT`)
+  and drops nothing; one that changes nothing is `E_EMPTY`. `store diff`
+  shows what is staged, or what changed between two commits.
+- **Rollback** is a new commit: under the capability's prefix its names are
+  those of the commit asked for, each with the commit that set it then, so
+  rolling everything back makes that commit's very tree again; names outside
+  the prefix stay as they are. Undo is a rollback to the commit before the
+  head. Nothing is ever lost, since every commit is still in the log.
+- **Programs reach the store by capability** (`OT_STORE`): an object with a
+  prefix and a transaction of its own; rights `RT_ST_READ`, `RT_ST_WRITE`,
+  `RT_ST_COMMIT` and `RT_ST_ROLLBACK`. `run` gives each program one on
+  `<name>/` (`SB_STORE`; read-only when the store is), and its names are
+  seen without that prefix. Ring entries `RO_ST_PUT`, `RO_ST_GET`,
+  `RO_ST_DEL`, `RO_ST_COMMIT` (why in a block of memory), `RO_ST_ABORT`,
+  `RO_ST_SUB` (a capability on a narrower prefix, with fewer rights),
+  `RO_ST_ROLLBACK` and `RO_ST_LIST`. Its errors: `E_CONFLICT`, `E_NONAME`,
+  `E_IO`, `E_NOSTORE`.
+- **Safety**: the store writes only to an NVMe drive whose serial is
+  `AXIOMTEST` (QEMU's test drive): a store on any other drive is mounted
+  read-only, and `store format` makes none there. No space is reclaimed yet.
+- One operation at a time, under a lock a waiter yields on (the holder may
+  park on the drive). Hashing uses SHA-NI on a kernel thread and plain x86
+  in a system call, whose SIMD registers are its program's; both keep their
+  working state on the stack.
+- `store` says what is mounted; `store put|get|rm|ls|diff|commit|abort|log`
+  work on the console's transaction; `store snap|unsnap|rollback|undo`,
+  `store verify` (every object read back and hashed, the chain, both
+  superblocks), `store format`, `store tear`, and `store test` (46 checks,
+  through capabilities of its own). STASH (`src/user/stash.asm`) checks the
+  same from ring 3 through its own, then keeps names for `stash put|get|ls`.
 
 ## Log: `log.asm`
 

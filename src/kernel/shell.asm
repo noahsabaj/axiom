@@ -541,6 +541,7 @@ commands:
     COMMAND 'disks',    cmd_disks,    'drives and their volumes'
     COMMAND 'iommu',    cmd_iommu,    'iommu [test]: VT-d units, the DMA domain of each driver, faults; or a self-test, an NVMe read refused'
     COMMAND 'nvme',     cmd_nvme,     'nvme [test]: NVMe controllers and their queues; or a self-test, reading from every CPU at once'
+    COMMAND 'store',    cmd_store,    'store [put|get|rm|ls|diff|commit|abort|log|snap|rollback|undo|verify|format|test]: the object store'
     COMMAND 'vol',      cmd_vol,      'vol <n> [rw|ro]: pick a volume, allow writes'
     COMMAND 'ls',       cmd_ls,       'list a directory'
     COMMAND 'cd',       cmd_cd,       'change directory'

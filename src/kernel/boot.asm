@@ -119,6 +119,7 @@ kernel_main:
     call ui_ready
     call shell_init
     sti
+    call store_init                     ; interrupts on: the drive completes by them
 
     RDTSC64
     mov [next_refresh], rax

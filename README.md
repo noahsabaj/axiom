@@ -2,7 +2,7 @@
 
 An operating system written entirely in x86-64 assembly, booting straight from
 UEFI onto the hardware that is actually present. No C, no libc, no GRUB, no
-borrowed kernel: about fifty-seven thousand lines of NASM, top to bottom.
+borrowed kernel: about sixty-three thousand lines of NASM, top to bottom.
 
 Why it exists and where it is going: [docs/VISION.md](docs/VISION.md).
 How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
@@ -29,6 +29,13 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 - **DMA confined by VT-d**: each driver's devices reach only the memory that
   driver mapped for them (an NVMe command's buffer only while it is out), and
   a device no driver claims reaches none (`iommu`, `iommu test`).
+- **An object store** on NVMe: content-addressed (SHA-256) and copy-on-write,
+  every change staged in a transaction, shown by `store diff`, and committed
+  with who made it, through which capability, when and why (`store log`).
+  Snapshots, rollback and undo, each a new commit, so nothing is lost; a
+  crash mid-commit leaves the store as it was (`store tear` shows it).
+  Programs reach it only through a capability on names of their own.
+  It writes to QEMU's test drive alone; any other store is read-only.
 - **Ethernet** on Realtek RTL8111/8168 chips (the Victus's): DHCP, ARP, IPv4,
   ICMP, UDP, DNS and **TCP**. `ping` and `host` work by name, and `http`
   fetches a web page, over **TLS 1.3** for `https://`, or saves it to a file.
@@ -46,8 +53,8 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   and PSS) and ECDSA on P-256 and P-384. The crypto is checked against the published vectors at
   every boot; `crypto` repeats the check and times each.
 - A shell over a USB keyboard, a PS/2 keyboard or the serial port. Commands:
-  `help info cpus mem threads objects rings run user pci acpi iommu usb disks nvme vol ls cd cat cp write mkdir
-  rm date net ip dhcp ping host arp http ask claude tcp crypto log demo bench
+  `help info cpus mem threads objects rings run user pci acpi iommu usb disks nvme store vol ls cd cat cp
+  write mkdir rm date net ip dhcp ping host arp http ask claude tcp crypto log demo bench
   uptime echo clear panic reboot poweroff`.
 - **A log on the boot stick**: everything Axiom prints, the commands typed
   and any panic report go into `AXIOM.LOG` on the USB stick it booted from,
@@ -94,7 +101,7 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   when its handle is closed, revoked or given away. A fault in a program
   ends that program, says what it ran into, and nothing else notices;
   killing one (ctrl+C, or a program killing its child) ends every program
-  it started too. `hello`, `test`, `child`, `fault` and `spin` come with it
+  it started too. `hello`, `test`, `child`, `fault`, `spin` and `stash` come with it
   (`src/user/`); `user test` runs them all, with a fault of every kind.
 - ACPI (MADT, MCFG, FADT, the DSDT's `_S5_`), SMBIOS, PCI Express enumeration,
   x2APIC (falling back to xAPIC), I/O APIC, TSC-deadline timer, and a panic
@@ -321,7 +328,9 @@ tools/test/             host-side tests for self-contained modules (tls: the
                         from a stick image, likewise; nvme: per-CPU
                         queues on QEMU's NVMe drive, with 1 to 8 CPUs and
                         fewer queues than CPUs; iommu: VT-d, a device
-                        kept out of memory not its own); all.py runs them
+                        kept out of memory not its own; store: the object
+                        store, its drive read back by a reader of its own,
+                        torn, remounted, damaged and read-only); all.py runs them
                         all at once, and qemu.py boots side by side
 tools/mkfont.py         rasterize the console font into src/kernel/gen/
 docs/                   vision and architecture

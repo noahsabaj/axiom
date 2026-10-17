@@ -25,7 +25,9 @@
 ;      E_* (E_PEER: the other end is closed, and nothing waits)
 ;  Globals: ax_sb (the start block), ax_ring, ax_ring_va, ax_console, ax_io
 ;  and ax_io_va (a page of memory to write from), ax_tsc_us, ax_gift (what
-;  the task that started it gave it, 0 if nothing).
+;  the task that started it gave it, 0 if nothing), ax_store (its names in
+;  the store, under "name/", if it was run from the console and there is a
+;  store; else 0).
 ;  Each preserves RBX, RBP, R12-R15, as the kernel's functions do.
 ; =============================================================================
 
@@ -63,6 +65,8 @@ ax_start:
     mov [ax_tsc_us], rax
     mov eax, [rdi + SB_GIFT]
     mov [ax_gift], eax
+    mov eax, [rdi + SB_STORE]
+    mov [ax_store], eax
     mov edi, 4096                       ; a page to write from
     mov eax, SYS_MEM_NEW
     syscall
@@ -422,6 +426,7 @@ ax_ring:        resd 1
 ax_console:     resd 1
 ax_io:          resd 1
 ax_gift:        resd 1
+ax_store:       resd 1
 ax_rx:          resd 1
 ax_len:         resd 1
 ax_digits:      resb 24

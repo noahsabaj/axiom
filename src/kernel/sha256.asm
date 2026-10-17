@@ -327,8 +327,9 @@ sha256_blocks_x86:
     push r13
     push r14
     push r15
+    sub rsp, 256                        ; W, here: reentrant, any thread at once
     mov rbp, rdx
-    lea rbx, [sha_w]
+    mov rbx, rsp
     lea rdx, [sha_k]
 .block:
     xor ecx, ecx
@@ -404,6 +405,7 @@ sha256_blocks_x86:
     add rsi, 64
     dec rbp
     jnz .block
+    add rsp, 256
     pop r15
     pop r14
     pop r13
@@ -659,7 +661,6 @@ sha256_mode:    db 0                    ; 0 not looked yet, 1 plain x86, 2 SHA-N
 
 section .bss
 alignb 16
-sha_w:          resd 64
 sha_lenbe:      resq 1
 sha_ctx:        resb SHA_CTX
 hm_ctx:         resb HMAC_CTX

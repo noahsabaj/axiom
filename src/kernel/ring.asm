@@ -878,6 +878,58 @@ ring_exec:
     mov edi, [rbx + SQ_HANDLE]
     call h_task_kill
     jmp .out
+.st_put:
+    mov edi, [rbx + SQ_HANDLE]
+    mov esi, [rbx + SQ_HANDLE2]
+    mov rdx, [rbx + SQ_A0]
+    mov rcx, [rbx + SQ_A1]
+    mov r8, [rbx + SQ_A2]
+    call h_st_put
+    jmp .out
+.st_get:
+    mov edi, [rbx + SQ_HANDLE]
+    mov esi, [rbx + SQ_HANDLE2]
+    mov rdx, [rbx + SQ_A0]
+    mov rcx, [rbx + SQ_A1]
+    mov r8, [rbx + SQ_A2]
+    call h_st_get
+    jmp .out
+.st_del:
+    mov edi, [rbx + SQ_HANDLE]
+    mov esi, [rbx + SQ_HANDLE2]
+    mov rdx, [rbx + SQ_A0]
+    call h_st_del
+    jmp .out
+.st_commit:
+    mov edi, [rbx + SQ_HANDLE]
+    mov esi, [rbx + SQ_HANDLE2]
+    mov rdx, [rbx + SQ_A0]
+    mov rcx, [rbx + SQ_A1]
+    call h_st_commit
+    jmp .out
+.st_abort:
+    mov edi, [rbx + SQ_HANDLE]
+    call h_st_abort
+    jmp .out
+.st_sub:
+    mov edi, [rbx + SQ_HANDLE]
+    mov esi, [rbx + SQ_HANDLE2]
+    mov rdx, [rbx + SQ_A0]
+    mov rcx, [rbx + SQ_A1]
+    call h_st_sub
+    jmp .out
+.st_rollback:
+    mov edi, [rbx + SQ_HANDLE]
+    mov rsi, [rbx + SQ_A0]
+    call h_st_rollback
+    jmp .out
+.st_list:
+    mov edi, [rbx + SQ_HANDLE]
+    mov esi, [rbx + SQ_HANDLE2]
+    mov rdx, [rbx + SQ_A0]
+    mov rcx, [rbx + SQ_A1]
+    call h_st_list
+    jmp .out
 .bad:
     mov rax, E_ARG                      ; one it does not know
 .out:
@@ -1354,7 +1406,10 @@ ro_exec:        dq ring_exec.nop, ring_exec.signal, ring_exec.reset, ring_exec.b
                 dq ring_exec.bad, ring_exec.bad, ring_exec.copy, ring_exec.dup
                 dq ring_exec.close, ring_exec.give, ring_exec.revoke, ring_exec.cancel
                 dq ring_exec.write, ring_exec.send, ring_exec.recv, ring_exec.kill
+                dq ring_exec.st_put, ring_exec.st_get, ring_exec.st_del, ring_exec.st_commit
+                dq ring_exec.st_abort, ring_exec.st_sub, ring_exec.st_rollback, ring_exec.st_list
 ro_async:       db 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 ; which wait: RO_WAIT, RO_JOIN, RO_TIMEOUT
+                db 0, 0, 0, 0, 0, 0, 0, 0
 
 section .bss
 alignb 8

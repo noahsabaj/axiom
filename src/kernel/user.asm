@@ -1676,6 +1676,12 @@ user_load:
     cmp rax, E_ANY
     jae .as_us
     mov [rbp + SB_CONSOLE], eax
+    cmp qword [rsp + 8 + 32], 0         ; run from the console: its own names in the store
+    jne .no_store
+    mov rdi, r15
+    call st_program
+    mov [rbp + SB_STORE], eax
+.no_store:
     xor eax, eax
     mov esi, [rsp + 8 + 40]             ; and what it is given
     test esi, esi
