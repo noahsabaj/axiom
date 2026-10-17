@@ -158,6 +158,51 @@ crypto_check:
     lea rdx, [str_ct_open]
     call ct_expect
 
+    call gcm_pick                       ; VAES, 128 bytes at a time, against
+    cmp byte [gcm_mode], 2              ; AES-NI: 200 bytes of AAD and 300 of
+    jne .x25519                         ; data, sealed each way, then opened
+    xor ecx, ecx
+    lea rdi, [ct_gx]
+.fill:
+    imul eax, ecx, 7
+    add eax, 3
+    mov [rdi + rcx], al
+    inc ecx
+    cmp ecx, CT_GX
+    jb .fill
+    lea rsi, [ct_gx + CT_GX_A]
+    lea rdi, [ct_gx + CT_GX_B]
+    mov ecx, 300
+    rep movsb
+    lea rsi, [ct_gx + CT_GX_A]
+    lea rdi, [ct_gx + CT_GX_C]
+    mov ecx, 300
+    rep movsb
+    mov byte [gcm_mode], 1
+    lea r8, [ct_gx + CT_GX_A]
+    call ct_gx_args
+    call gcm_seal
+    mov byte [gcm_mode], 2
+    lea r8, [ct_gx + CT_GX_B]
+    call ct_gx_args
+    call gcm_seal
+    lea rsi, [ct_gx + CT_GX_B]
+    lea rdi, [ct_gx + CT_GX_A]
+    mov ecx, 316
+    lea rdx, [str_ct_vseal]
+    call ct_expect
+    lea r8, [ct_gx + CT_GX_B]
+    call ct_gx_args
+    call gcm_open
+    jnc .vaes_opened
+    mov byte [ct_bad], 1
+.vaes_opened:
+    lea rsi, [ct_gx + CT_GX_B]
+    lea rdi, [ct_gx + CT_GX_C]          ; what was sealed, as it was
+    mov ecx, 300
+    lea rdx, [str_ct_vopen]
+    call ct_expect
+
 .x25519:                                ; RFC 7748 6.1
     lea rdi, [ct_out]
     lea rsi, [ct_alice]
@@ -261,6 +306,16 @@ ct_gcm_args:
     mov r9d, 60
     ret
 
+; ct_gx_args(R8 = 300 bytes in ct_gx, room for the tag after): the VAES
+; check's arguments
+ct_gx_args:
+    lea rdi, [ct_gcm]
+    lea rsi, [ct_giv]
+    lea rdx, [ct_gx]
+    mov ecx, 200
+    mov r9d, 300
+    ret
+
 ; crypto_boot: the check, one line in the log
 crypto_boot:
     push rcx
@@ -282,8 +337,15 @@ ct_names:
     lea rcx, [str_ct_aesni]
     push rax
     call gcm_supported
+    jc .none
+    call gcm_pick
     pop rax
-    jnc .out
+    cmp byte [gcm_mode], 2
+    jne .out
+    lea rcx, [str_ct_vaes]
+    ret
+.none:
+    pop rax
     lea rcx, [str_ct_none]
 .out:
     ret
@@ -344,6 +406,9 @@ cmd_crypto:
     lea rdi, [ct_gcm]
     lea rsi, [ct_gk]
     call gcm_init
+    call gcm_pick                       ; each way, when VAES is there
+    movzx r13d, byte [gcm_mode]
+.gcm_again:
     RDTSC64
     mov rbx, rax
     mov r12d, ct_bench_bytes / ct_buf_size
@@ -360,7 +425,18 @@ cmd_crypto:
     RDTSC64
     sub rax, rbx
     call ct_rate
-    KLOG "crypto: AES-128-GCM %u MB/s", rax
+    lea rcx, [str_ct_aesni]
+    cmp byte [gcm_mode], 2
+    jne .gcm_say
+    lea rcx, [str_ct_vaes]
+.gcm_say:
+    KLOG "crypto: AES-128-GCM (%s) %u MB/s", rcx, rax
+    cmp byte [gcm_mode], 2
+    jne .gcm_done
+    mov byte [gcm_mode], 1
+    jmp .gcm_again
+.gcm_done:
+    mov [gcm_mode], r13b
 .ladder:
     RDTSC64
     mov rbx, rax
@@ -435,6 +511,9 @@ str_ct_p384:    db 'ECDSA P-384', 0
 str_ct_x86:     db 'plain x86', 0
 str_ct_shani:   db 'SHA-NI', 0
 str_ct_aesni:   db 'AES-NI', 0
+str_ct_vaes:    db 'VAES', 0
+str_ct_vseal:   db 'AES-128-GCM sealing on VAES, against AES-NI', 0
+str_ct_vopen:   db 'AES-128-GCM opening on VAES', 0
 str_ct_none:    db 'skipped: no AES-NI here', 0
 
 ct_abc:         db 'abc'
@@ -612,3 +691,8 @@ ct_bad:         resb 1
 ct_sig:         resb 512
 alignb 16
 ct_buf:         resb ct_buf_size
+CT_GX           equ 1280                ; AAD, then three places for 300 bytes
+CT_GX_A         equ 256
+CT_GX_B         equ 576
+CT_GX_C         equ 896
+ct_gx:          resb CT_GX

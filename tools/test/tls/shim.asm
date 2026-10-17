@@ -23,7 +23,7 @@ section .bss bss align=64
 global sha256_init, sha256_update, sha256_final, sha256, sha256_mode
 global hmac_init, hmac_update, hmac_final, hmac_sha256
 global hkdf_extract, hkdf_expand, tls13_expand_label
-global gcm_supported, gcm_init, gcm_seal, gcm_open
+global gcm_supported, gcm_init, gcm_seal, gcm_open, gcm_mode
 global x25519, x25519_base
 global kc, kcall
 

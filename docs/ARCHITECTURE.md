@@ -832,23 +832,29 @@ A TLS 1.3 client (RFC 8446) and the crypto under it.
   (RFC 8446 7.1).
 - **AES-128-GCM** (`aesgcm.asm`): key expansion with `aeskeygenassist`,
   counter mode with `aesenc`, GHASH with four `pclmulqdq` and Gueron's
-  reduction on byte-reflected blocks. Seals and opens in place, tag after
-  the data; opening compares the tag in constant time and leaves the record
-  untouched when it is wrong. `gcm_supported` says whether the CPU can.
-- **X25519** (`x25519.asm`, RFC 7748): field elements as four 64-bit limbs,
-  products folded with 2^256 = 38 (mod p), a 255-step Montgomery ladder with
-  masked swaps; no branch or memory address depends on the secret scalar,
-  and the scratch is wiped afterwards.
+  reduction on byte-reflected blocks. On a CPU with VAES, VPCLMULQDQ and
+  AVX2 (`gcm_mode` 2; the i7-14700F has them) 128 bytes go at a time
+  through YMM registers, two blocks to each: eight counter blocks encrypted
+  together, and eight blocks hashed with a single reduction, each times the
+  power of H it needs (H^8 down to H, made by `gcm_init`); the rest goes a
+  block at a time. Seals and opens in place, tag after the data; opening
+  compares the tag in constant time and leaves the record untouched when it
+  is wrong. `gcm_supported` says whether the CPU can. Its scratch (the
+  round keys copied out aligned, the counter, the hash) is on the stack and
+  wiped, so a context may be used from any kernel thread, several at once.
 - All three preserve every general register but RAX and clobber at most
-  XMM0-XMM10; their scratch is in .bss, so main loop only.
+  XMM0-XMM10 (AES-GCM on VAES also the upper halves of the YMM registers);
+  AES-GCM keeps its scratch on the stack; SHA-256's one-call form, HMAC,
+  HKDF and X25519 keep theirs in .bss (main loop only).
 - `cryptotest.asm` checks each against its published vectors (FIPS 180-4,
   RFC 4231, RFC 5869, RFC 8448, GCM test case 4 with a forged tag refused,
   RFC 7748, SHA-384/512 of "abc", RFC 6979's P-256 signature, and RSA-2048
   PKCS #1 v1.5 and PSS and P-384 signatures made for the tests, each also
   with a changed byte that must be refused) at boot, both SHA-256 paths
-  when the CPU has SHA-NI, and logs one line. `crypto` repeats the check
-  and times SHA-256 (each way), AES-GCM, one X25519 and each signature
-  check.
+  when the CPU has SHA-NI, AES-GCM on VAES against AES-NI (300 bytes after
+  200 of AAD, sealed each way and opened) when it has VAES, and logs one
+  line. `crypto` repeats the check and times SHA-256 and AES-GCM (each
+  way), one X25519 and each signature check.
 - `tools/test/tls/run.py` runs them on the host: the published vectors plus
   about 670 random cases from independent references (hashlib; a pure-Python
   AES-GCM and X25519 written from SP 800-38D and RFC 7748, each made to
@@ -857,7 +863,7 @@ A TLS 1.3 client (RFC 8446) and the crypto under it.
   tag, ciphertext and additional data refused, X25519's non-canonical inputs,
   RFC 7748's 1000-fold iteration, register preservation through `kcall`, all
   with plain-x86 SHA-256 and again with SHA-NI. On this i7-14700F: SHA-256
-  about 1.6 GB/s on SHA-NI (210 MB/s plain), AES-128-GCM 575 MB/s, X25519
+  about 1.6 GB/s on SHA-NI (210 MB/s plain), AES-128-GCM 640 MB/s on AES-NI and 3.3 GB/s on VAES, X25519
   64 us.
 
 ## Claude: `claude.asm`, `json.asm`, `text.asm`

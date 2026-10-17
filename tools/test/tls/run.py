@@ -259,9 +259,11 @@ def random_cases(rng):
         n = rng.choice([12, 16, 32, rng.randrange(1, 100)])
         L.append(("label", sec.hex(), lab.hex(), ctx.hex() or "-", str(n),
                   expand_label(sec, lab, ctx, n).hex()))
-    for n in list(range(0, 70)) + [rng.randrange(70, 2000) for _ in range(40)]:
-        key, iv = rng.randbytes(16), rng.randbytes(12)
-        aad = rng.randbytes(rng.choice([0, 5, 13, 16, 17, rng.randrange(0, 50)]))
+    eights = list(range(112, 146)) + list(range(250, 262)) + [383, 384, 385, 1024, 1039, 16384, 16385]
+    for i, n in enumerate(list(range(0, 70)) + [rng.randrange(70, 2000) for _ in range(40)] + eights):
+        key, iv = rng.randbytes(16), rng.randbytes(12)       # the last ones 128 bytes at a time with VAES
+        aad = rng.randbytes(rng.choice([0, 5, 13, 16, 17, rng.randrange(0, 50)]) if i % 4
+                            else rng.choice([127, 128, 129, 300]))
         pt = rng.randbytes(n)
         ct, tag = gcm_seal(key, iv, aad, pt)
         L.append(("gcm", key.hex(), iv.hex(), aad.hex() or "-", pt.hex() or "-",

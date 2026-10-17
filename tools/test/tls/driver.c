@@ -40,7 +40,7 @@ extern char hmac_init[], hmac_update[], hmac_final[], hmac_sha256[];
 extern char hkdf_extract[], hkdf_expand[], tls13_expand_label[];
 extern char gcm_supported[], gcm_init[], gcm_seal[], gcm_open[];
 extern char x25519[], x25519_base[];
-extern u8 sha256_mode;
+extern u8 sha256_mode, gcm_mode;
 
 u64 kc(void *target, const u64 *args, int *cf);
 
@@ -57,7 +57,7 @@ static const char *gpr_name[16] = {
 
 #define SHA_CTX  112
 #define HMAC_CTX 224
-#define GCM_CTX  192
+#define GCM_CTX  320
 
 /* call a kernel function, arguments in RDI, RSI, RDX, RCX, R8, R9 order */
 static int last_cf;
@@ -407,13 +407,13 @@ static void kcall_case(const char *name, void *fn, int keep_xmm_from, const u64 
         if (memcmp(out, exp, n))
             pl += snprintf(problems + pl, sizeof problems - pl, " output wrong;");
     }
-    result(pl == 0, "registers: %-20s mode %d, entry RSP %s%s", name, sha256_mode,
+    result(pl == 0, "registers: %-20s modes %d/%d, entry RSP %s%s", name, sha256_mode, gcm_mode,
            misalign ? "= 0 mod 16" : "= 8 mod 16", problems);
 }
 
 static void registers(int have_gcm)
 {
-    static u8 ctx[256], hctx[256], out[64], gbuf[64];
+    static u8 ctx[GCM_CTX], hctx[256], out[64], gbuf[64];
     static const u8 abc[3] = { 'a', 'b', 'c' };
     static u8 key[16], iv[12], k25[32] = { 9 }, u25[32] = { 9 };
     const char *abc_sha = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
@@ -451,6 +451,10 @@ static void registers(int have_gcm)
             kcall_case("gcm_open", gcm_open, 10, b2, 0, 0, m);
             u64 b3[6] = { P(ctx), P(iv), P(abc), 3, P(gbuf), 16 };
             kcall_case("gcm_seal 16", gcm_seal, 10, b3, 0, 0, m);
+            static u8 gbig[300 + 16];
+            u64 b4[6] = { P(ctx), P(iv), P(gbig), 200, P(gbig), 300 };
+            kcall_case("gcm_seal 300", gcm_seal, 10, b4, 0, 0, m);
+            kcall_case("gcm_open 300", gcm_open, 10, b4, 0, 0, m);
         }
         u64 c1[6] = { P(out), P(k25), P(u25), NA, NA, NA };
         kcall_case("x25519", x25519, 0, c1, out, x_one, m);
@@ -480,7 +484,7 @@ static void speed(int have_gcm, int ladders)
         t = now();
         for (int i = 0; i < 16; i++) K(gcm_seal, P(ctx), P(iv), 0, 0, P(big), sizeof big - 16);
         t = now() - t;
-        printf("      aes-128-gcm seal: %.0f MB/s\n", 16.0 / t);
+        printf("      aes-128-gcm seal (mode %d): %.0f MB/s\n", gcm_mode, 16.0 / t);
     }
     if (ladders) {
         t = now();
@@ -497,29 +501,36 @@ int main(int argc, char **argv)
     unsigned a = 0, b = 0, c = 0, d = 0;
     __get_cpuid_count(7, 0, &a, &b, &c, &d);
     int have_ni = (b >> 29) & 1;
+    int have_vaes = ((b >> 5) & 1) && ((c >> 9) & 3) == 3;   /* AVX2, VAES, VPCLMULQDQ */
     K(gcm_supported, 0, 0, 0, 0, 0, 0);
     int have_gcm = !last_cf;
     if (!have_gcm) result(0, "this CPU lacks AES-NI, PCLMULQDQ or SSSE3: AES-GCM untested");
 
+    int fast = have_ni || have_vaes;
+
     printf("-- vectors and random cases\n");
     sha256_mode = 1;
-    run_file(argv[1], "plain x86 SHA-256");
-    if (have_ni) {
-        sha256_mode = 2;
-        run_file(argv[1], "SHA-NI SHA-256");
-    } else {
-        printf("      (no SHA-NI on this CPU: only plain x86 tested)\n");
+    gcm_mode = 1;
+    run_file(argv[1], "plain x86 SHA-256, AES-NI GCM");
+    if (fast) {
+        sha256_mode = have_ni ? 2 : 1;
+        gcm_mode = have_vaes ? 2 : 1;
+        run_file(argv[1], have_vaes ? "SHA-NI SHA-256, VAES GCM" : "SHA-NI SHA-256");
     }
+    if (!have_ni) printf("      (no SHA-NI on this CPU: only plain x86 SHA-256 tested)\n");
+    if (!have_vaes) printf("      (no VAES on this CPU: only AES-NI GCM tested)\n");
 
     printf("-- register preservation (kernel convention)\n");
     sha256_mode = 1;
+    gcm_mode = 1;
     registers(have_gcm);
-    if (have_ni) { sha256_mode = 2; registers(have_gcm); }
+    if (fast) { sha256_mode = have_ni ? 2 : 1; gcm_mode = have_vaes ? 2 : 1; registers(have_gcm); }
 
     printf("-- speed\n");
     sha256_mode = 1;
+    gcm_mode = 1;
     speed(have_gcm, 1);
-    if (have_ni) { sha256_mode = 2; speed(0, 0); }
+    if (fast) { sha256_mode = have_ni ? 2 : 1; gcm_mode = have_vaes ? 2 : 1; speed(have_gcm, 0); }
 
     printf("-- %d passed, %d failed\n", passes, fails);
     return fails ? 1 : 0;
