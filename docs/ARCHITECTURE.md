@@ -443,7 +443,9 @@ or idles.
 Vectors: `0x21` PS/2 keyboard (I/O APIC, with MADT overrides applied), `0x22`
 xHCI and `0x23` network cards (MSI-X or MSI to the BSP, set up by `pci_msi`),
 `0x30` the scheduler's timer, `0x40` job wake-up, `0x41` TLB shootdown, `0x42`
-reschedule, `0xFF` spurious. Every stub saves all general registers and calls
+reschedule, `0x43` NVMe completions (an MSI-X entry per queue, each to its
+own CPU, outside `0x20` to `0x2F` so the main loop is not woken), `0xFF`
+spurious. Every stub saves all general registers and calls
 the handler registered with `irq_register`; after a device's (`0x20` to
 `0x2F`) it unparks the main loop. The common path sends the EOI, then
 switches threads if the scheduler asked. From ring 3, the stub SWAPGSes in
@@ -492,12 +494,36 @@ into) on screen and serial.
 ## Storage: `nvme.asm`, `usbmsc.asm`, `disk.asm`, `fat.asm`
 
 - **NVMe** (`nvme.asm`): each controller (PCI 01/08/02) is reset and given an
-  admin queue pair and one I/O queue pair, polled. Commands complete in
-  microseconds, so the caller waits. Identify gives the model, firmware,
-  transfer limit and the first active namespace. Data moves through one
-  physically contiguous 64 KiB bounce buffer with a prebuilt PRP list, so
-  callers can use any kernel buffer. Per-core queues and interrupts come with
-  M1's scheduler.
+  admin queue pair, polled, for setting it up. Identify gives the model,
+  firmware, transfer limit (64 KiB at most) and the first active namespace.
+  Then **an I/O queue pair per CPU**: as many as Set Features (Number of
+  Queues) grants, the MSI-X table holds and `NV_QMAX` (32) allows. MSI-X
+  entry *i* is aimed at CPU *i* with `VEC_NVME`, and queue *i* + 1's
+  completions come through it; CPU *c* submits on queue *c* mod *n* + 1, so
+  with a queue for every CPU a command is submitted and completed on the
+  same CPU. Each queue (`NQ_*`) has its own lock, taken with interrupts off.
+- **A command** (`nvme_io`) goes straight from or into the caller's buffer,
+  dword-aligned and mapped: PRP1 is where it starts, PRP2 the second page
+  or the slot's own PRP list of the rest, each page looked up in the page
+  tables, so vm-region buffers scattered in physical memory are fine. The
+  command and its request (`NR_*`) are on the caller's stack; the slot is
+  the command identifier. The caller parks (`thread_park_until`, 10 ms at a
+  time) and the interrupt on the queue's CPU (`nvme_irq`) drains the
+  completion queue (`nvme_drain`): each request gets its status, is marked
+  done, its thread unparked, then marked let go, and only then may the
+  waiter return. A waiter whose 10 ms pass drains the queue itself; at boot
+  (interrupts off) or without MSI-X it polls. A command that times out
+  leaves its slot taken until the controller answers. The disk operations
+  split a transfer into commands and send a buffer that is not
+  dword-aligned through a copy from the heap.
+- `nvme` lists each controller and its queues (CPU, commands, interrupts,
+  polls that found something, errors). `nvme test` reads the first MiB once,
+  then a thread pinned to every CPU makes 200 reads of 1 to 128 blocks at
+  random places and at random dword offsets, each checked against the first
+  read; every queue must be used and interrupted. Only on a drive whose
+  serial is `AXIOMTEST` (QEMU's, in `tools/test/nvme/`) does each thread
+  then write 128 KiB of its own after the first MiB, read it back and flush;
+  the Victus's drive is never written.
 - **Disks and volumes** (`disk.asm`): a driver registers a disk with a table
   of operations (read, write, flush, describe). GPT partitions (else MBR, else
   a filesystem on the bare disk) become volumes, each probed for FAT32, FAT16,

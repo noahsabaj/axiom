@@ -2,7 +2,7 @@
 
 An operating system written entirely in x86-64 assembly, booting straight from
 UEFI onto the hardware that is actually present. No C, no libc, no GRUB, no
-borrowed kernel: about fifty-three thousand lines of NASM, top to bottom.
+borrowed kernel: about fifty-five thousand lines of NASM, top to bottom.
 
 Why it exists and where it is going: [docs/VISION.md](docs/VISION.md).
 How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
@@ -21,7 +21,9 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   HID report parser for keyboards (6-key and N-key rollover), mice and tablets.
   A mouse cursor: click to recentre the Mandelbrot, wheel to zoom, right click
   to hold, middle click to start over.
-- **NVMe SSDs** and **USB sticks** (hot-plug too), GPT and MBR partitions, and
+- **NVMe SSDs**, an I/O queue pair per CPU, each completing on its own CPU's
+  interrupt (`nvme`, `nvme test`), and **USB sticks** (hot-plug too), GPT and
+  MBR partitions, and
   **FAT32** with long names: read, write, copy, make directories, remove.
   Every volume is read-only until you unlock it with `vol <n> rw`.
 - **Ethernet** on Realtek RTL8111/8168 chips (the Victus's): DHCP, ARP, IPv4,
@@ -41,7 +43,7 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   and PSS) and ECDSA on P-256 and P-384. The crypto is checked against the published vectors at
   every boot; `crypto` repeats the check and times each.
 - A shell over a USB keyboard, a PS/2 keyboard or the serial port. Commands:
-  `help info cpus mem threads objects rings run user pci acpi usb disks vol ls cd cat cp write mkdir
+  `help info cpus mem threads objects rings run user pci acpi usb disks nvme vol ls cd cat cp write mkdir
   rm date net ip dhcp ping host arp http ask claude tcp crypto log demo bench
   uptime echo clear panic reboot poweroff`.
 - **A log on the boot stick**: everything Axiom prints, the commands typed
@@ -313,7 +315,9 @@ tools/test/             host-side tests for self-contained modules (tls: the
                         scheduler on 8 CPUs, on one, and under TCG;
                         objects: handles and capabilities, likewise;
                         rings: async rings, likewise; user: ring 3,
-                        from a stick image, likewise); all.py runs them
+                        from a stick image, likewise; nvme: per-CPU
+                        queues on QEMU's NVMe drive, with 1 to 8 CPUs and
+                        fewer queues than CPUs); all.py runs them
                         all at once, and qemu.py boots side by side
 tools/mkfont.py         rasterize the console font into src/kernel/gen/
 docs/                   vision and architecture

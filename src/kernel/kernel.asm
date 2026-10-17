@@ -94,6 +94,7 @@ section .text
 %include "threads.asm"
 %include "objtest.asm"
 %include "ringtest.asm"
+%include "nvmetest.asm"
 %include "mandel.asm"
 %include "ui.asm"
 %include "shell.asm"

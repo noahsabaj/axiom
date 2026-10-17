@@ -539,6 +539,7 @@ commands:
     COMMAND 'acpi',     cmd_acpi,     'firmware ACPI tables'
     COMMAND 'usb',      usb_list,     'USB devices, hubs and what drives them'
     COMMAND 'disks',    cmd_disks,    'drives and their volumes'
+    COMMAND 'nvme',     cmd_nvme,     'nvme [test]: NVMe controllers and their queues; or a self-test, reading from every CPU at once'
     COMMAND 'vol',      cmd_vol,      'vol <n> [rw|ro]: pick a volume, allow writes'
     COMMAND 'ls',       cmd_ls,       'list a directory'
     COMMAND 'cd',       cmd_cd,       'change directory'
