@@ -11,7 +11,8 @@
 ;  for none.
 ;
 ;  Most operations are done at once, inside h_ring_enter. Waiting for an
-;  event, for a thread to end, or for a time (RO_WAIT, RO_JOIN, RO_TIMEOUT)
+;  event or a message (RO_WAIT on an event or a channel's end), for a
+;  thread to end, or for a time (RO_WAIT, RO_JOIN, RO_TIMEOUT)
 ;  blocks nothing: each becomes a request, whose completion is written when
 ;  it happens, from whatever made it happen, an interrupt handler too.
 ;  Entries linked (SQF_LINK) run in order, each once the one before it
@@ -545,6 +546,13 @@ ring_arm:
     mov edi, [rbx + RQ_SQE + SQ_HANDLE]
     cmp eax, RO_JOIN
     je .join
+    push rdi
+    call handle_info                    ; an event, or a channel's end
+    pop rdi
+    cmp rax, E_ANY
+    jae .out                            ; refused (and counted) once
+    cmp rax, OT_CHANNEL
+    je .channel
     mov esi, OT_EVENT
     mov edx, RT_EV_WAIT
     call handle_get
@@ -563,6 +571,16 @@ ring_arm:
     mov r13, rax
     lea r14, [r13 + TH_ENDED]
     lea rax, [r13 + TH_WQ]
+    jmp .queue
+.channel:                               ; until a message waits, or its peer is gone
+    mov esi, OT_CHANNEL
+    mov edx, RT_CH_RECV
+    call handle_get
+    cmp rax, E_ANY
+    jae .out
+    mov r13, rax
+    lea r14, [r13 + CH_READY]
+    lea rax, [r13 + CH_WQ]
 .queue:
     mov [rbx + RQ_WQ], rax
     jmp .arm
@@ -841,6 +859,24 @@ ring_exec:
     mov rdx, [rbx + SQ_A0]
     mov rcx, [rbx + SQ_A1]
     call h_con_write
+    jmp .out
+.send:
+    mov edi, [rbx + SQ_HANDLE]
+    mov esi, [rbx + SQ_HANDLE2]
+    mov rdx, [rbx + SQ_A0]
+    mov rcx, [rbx + SQ_A1]
+    call h_ch_send
+    jmp .out
+.recv:
+    mov edi, [rbx + SQ_HANDLE]
+    mov esi, [rbx + SQ_HANDLE2]
+    mov rdx, [rbx + SQ_A0]
+    mov rcx, [rbx + SQ_A1]
+    call h_ch_recv
+    jmp .out
+.kill:
+    mov edi, [rbx + SQ_HANDLE]
+    call h_task_kill
     jmp .out
 .bad:
     mov rax, E_ARG                      ; one it does not know
@@ -1317,8 +1353,8 @@ align 8
 ro_exec:        dq ring_exec.nop, ring_exec.signal, ring_exec.reset, ring_exec.bad
                 dq ring_exec.bad, ring_exec.bad, ring_exec.copy, ring_exec.dup
                 dq ring_exec.close, ring_exec.give, ring_exec.revoke, ring_exec.cancel
-                dq ring_exec.write
-ro_async:       db 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0 ; which wait: RO_WAIT, RO_JOIN, RO_TIMEOUT
+                dq ring_exec.write, ring_exec.send, ring_exec.recv, ring_exec.kill
+ro_async:       db 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 ; which wait: RO_WAIT, RO_JOIN, RO_TIMEOUT
 
 section .bss
 alignb 8

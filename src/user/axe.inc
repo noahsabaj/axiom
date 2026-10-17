@@ -15,8 +15,17 @@
 ;    ax_add(RSI = NUL-ended), ax_addn(RSI, RCX = bytes), ax_addu(RDI),
 ;      ax_addd(RDI), ax_addx(RDI): onto ax_line; ax_flush writes it
 ;    ax_now -> RAX = the TSC; ax_us(RDI) -> RAX = that many us in TSC ticks
+;    ax_spawn(RSI = NUL-ended "program arguments", EDI = a handle to give it
+;      or 0) -> RAX = a handle to the task started, RDX = to its first
+;      thread; RAX < 0 if refused
+;    ax_send(EDI = a channel's end, RSI = bytes, RDX = how many, a page at
+;      most) -> RAX = the bytes, or E_*
+;    ax_recv(EDI = an end, RSI = to, RDX = room, a page at most, RCX = TSC
+;      deadline or 0) -> RAX = the next message's bytes, once it comes, or
+;      E_* (E_PEER: the other end is closed, and nothing waits)
 ;  Globals: ax_sb (the start block), ax_ring, ax_ring_va, ax_console, ax_io
-;  and ax_io_va (a page of memory to write from), ax_tsc_us.
+;  and ax_io_va (a page of memory to write from), ax_tsc_us, ax_gift (what
+;  the task that started it gave it, 0 if nothing).
 ;  Each preserves RBX, RBP, R12-R15, as the kernel's functions do.
 ; =============================================================================
 
@@ -52,6 +61,8 @@ ax_start:
     mov [ax_console], eax
     mov rax, [rdi + SB_TSC_PER_US]
     mov [ax_tsc_us], rax
+    mov eax, [rdi + SB_GIFT]
+    mov [ax_gift], eax
     mov edi, 4096                       ; a page to write from
     mov eax, SYS_MEM_NEW
     syscall
@@ -267,6 +278,133 @@ ax_us:
     imul rax, rdi
     ret
 
+; ax_spawn(RSI = "program arguments", EDI = a handle to give, or 0)
+ax_spawn:
+    push rbx
+    mov ebx, edi
+    mov rdi, [ax_io_va]                 ; the text, from the page
+    xor ecx, ecx
+.copy:
+    mov al, [rsi + rcx]
+    test al, al
+    jz .copied
+    mov [rdi + rcx], al
+    inc ecx
+    cmp ecx, 4095
+    jb .copy
+.copied:
+    mov edi, [ax_io]
+    xor esi, esi
+    mov edx, ecx
+    mov r10d, ebx
+    mov eax, SYS_SPAWN
+    syscall
+    pop rbx
+    ret
+
+; ax_send(EDI = a channel's end, RSI = bytes, RDX = how many)
+ax_send:
+    push rbx
+    push r12
+    mov ebx, edi
+    mov r12, rdx
+    mov rdi, [ax_io_va]
+    mov rcx, rdx
+    rep movsb
+    sub rsp, SQ_SIZE
+    call ax_entry
+    mov byte [rsp + SQ_OP], RO_SEND
+    mov [rsp + SQ_HANDLE], ebx
+    mov eax, [ax_io]
+    mov [rsp + SQ_HANDLE2], eax
+    mov [rsp + SQ_A1], r12
+    mov rdi, rsp
+    call ax_do
+    add rsp, SQ_SIZE
+    pop r12
+    pop rbx
+    ret
+
+; ax_recv(EDI = an end, RSI = to, RDX = room, RCX = deadline): RO_WAIT on
+; it, linked to RO_RECV into a page of its own, then copied out
+ax_recv:
+    push rbx
+    push r12
+    push r13
+    push r14
+    mov ebx, edi
+    mov r12, rsi
+    mov r13, rdx
+    mov r14, rcx
+    cmp qword [ax_rx_va], 0             ; the page, the first time
+    jne .page
+    mov edi, 4096
+    mov eax, SYS_MEM_NEW
+    syscall
+    test rax, rax
+    js .out
+    mov [ax_rx], eax
+    mov edi, eax
+    mov eax, SYS_MAP
+    syscall
+    test rax, rax
+    js .out
+    mov [ax_rx_va], rax
+.page:
+    sub rsp, SQ_SIZE + 16
+    call ax_entry
+    mov byte [rsp + SQ_OP], RO_WAIT
+    mov byte [rsp + SQ_FLAGS], SQF_LINK
+    mov [rsp + SQ_HANDLE], ebx
+    mov [rsp + SQ_DEADLINE], r14
+    mov qword [rsp + SQ_DATA], 1
+    mov rdi, rsp
+    call ax_submit
+    call ax_entry
+    mov byte [rsp + SQ_OP], RO_RECV
+    mov [rsp + SQ_HANDLE], ebx
+    mov eax, [ax_rx]
+    mov [rsp + SQ_HANDLE2], eax
+    mov [rsp + SQ_A1], r13
+    mov qword [rsp + SQ_DATA], 2
+    mov rdi, rsp
+    call ax_submit
+    mov edi, 2
+    mov esi, 2
+    call ax_enter
+    call ax_reap                        ; both, in whichever order
+    mov [rsp + SQ_SIZE], rax
+    mov [rsp + SQ_SIZE + 8], rcx
+    call ax_reap
+    cmp rcx, 2
+    je .result
+    mov rax, [rsp + SQ_SIZE]            ; the receive was the first
+.result:
+    add rsp, SQ_SIZE + 16
+    test rax, rax
+    js .out
+    mov rsi, [ax_rx_va]
+    mov rdi, r12
+    mov rcx, rax
+    rep movsb
+.out:
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+; ax_entry: the entry at [RSP + 8] (the caller's [RSP]) zeroed. Preserves
+; all but RCX and RDI.
+ax_entry:
+    push rax
+    lea rdi, [rsp + 16]
+    xor eax, eax
+    mov ecx, SQ_SIZE / 8
+    rep stosq
+    pop rax
+    ret
+
 AX_LINE_MAX     equ 512
 
 section .rodata
@@ -279,9 +417,12 @@ ax_sb:          resq 1
 ax_ring_va:     resq 1
 ax_io_va:       resq 1
 ax_tsc_us:      resq 1
+ax_rx_va:       resq 1
 ax_ring:        resd 1
 ax_console:     resd 1
 ax_io:          resd 1
+ax_gift:        resd 1
+ax_rx:          resd 1
 ax_len:         resd 1
 ax_digits:      resb 24
 ax_line:        resb AX_LINE_MAX

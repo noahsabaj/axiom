@@ -2,7 +2,7 @@
 
 An operating system written entirely in x86-64 assembly, booting straight from
 UEFI onto the hardware that is actually present. No C, no libc, no GRUB, no
-borrowed kernel: about fifty-one thousand lines of NASM, top to bottom.
+borrowed kernel: about fifty-three thousand lines of NASM, top to bottom.
 
 Why it exists and where it is going: [docs/VISION.md](docs/VISION.md).
 How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
@@ -83,10 +83,14 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   `/EFI/AXIOM/<PROGRAM>.AXE` from the boot stick into a task with page
   tables of its own (code read-only, data not executable, a guarded stack)
   and runs it on any CPU. A program reaches the kernel by `SYSCALL`, and
-  for most things through its ring, the console included. A fault in a
-  program ends that program, says what it ran into, and nothing else
-  notices; ctrl+C kills one. `hello`, `test`, `fault` and `spin` come with
-  it (`src/user/`); `user test` runs them all, with a fault of every kind.
+  for most things through its ring, the console included. Programs start
+  programs and hand them a handle, talk over channels (messages between
+  tasks, waited for on the ring), and map and unmap memory; a mapping goes
+  when its handle is closed, revoked or given away. A fault in a program
+  ends that program, says what it ran into, and nothing else notices;
+  killing one (ctrl+C, or a program killing its child) ends every program
+  it started too. `hello`, `test`, `child`, `fault` and `spin` come with it
+  (`src/user/`); `user test` runs them all, with a fault of every kind.
 - ACPI (MADT, MCFG, FADT, the DSDT's `_S5_`), SMBIOS, PCI Express enumeration,
   x2APIC (falling back to xAPIC), I/O APIC, TSC-deadline timer, and a panic
   screen that stops every other CPU.

@@ -1,7 +1,8 @@
 ; =============================================================================
 ;  test.asm - ring 3 checks itself: the start block, the ring, system calls
 ;  (registers kept, refusals), events, threads, timeouts, memory, its own
-;  sections. Says "test: all N checks passed" and returns 0, or says which
+;  sections (over 64 KiB of them), unmapping, channels, programs it starts
+;  (CHILD), how deep they go, and killing them. Says "test: all N checks passed" and returns 0, or says which
 ;  check failed and returns its number. 'user test' runs it.
 ; =============================================================================
 
@@ -10,7 +11,10 @@
 ADDS            equ 100000              ; each adder's increments
 ADDERS          equ 4
 THREAD_STACK    equ 16384
-CHECKS          equ 15
+CHECKS          equ 21
+BIG_PAGES       equ 20                  ; pages of constants: the file is over 64 KiB
+PINGS           equ 8                   ; numbers CHILD echoes
+SPAWN_DEEPEST   equ 7                   ; 'child deep' under TEST: 8 programs above the last
 
 main:
     push rbx
@@ -301,6 +305,287 @@ main:
     test eax, eax
     jnz fail
 
+    mov r15d, 16                        ; a program over 64 KiB, all of it there
+    xor ecx, ecx
+.big:
+    imul eax, ecx, 0x01010101
+    add eax, 0x11
+    mov edx, ecx
+    shl edx, 12
+    lea rsi, [big]
+    cmp [rsi + rdx], eax
+    jne fail
+    cmp [rsi + rdx + 4092], eax
+    jne fail
+    inc ecx
+    cmp ecx, BIG_PAGES
+    jb .big
+
+    mov r15d, 17                        ; unmapped, and mapped again elsewhere
+    mov edi, 8192
+    call mem_map
+    test rax, rax
+    js fail
+    mov r13, rax
+    mov r12d, edx
+    mov qword [r13 + 4096], 1234
+    mov edi, r12d                       ; mapped already: where it is
+    mov eax, SYS_MAP
+    syscall
+    cmp rax, r13
+    jne fail
+    mov edi, r12d
+    mov eax, SYS_UNMAP
+    syscall
+    test rax, rax
+    jnz fail
+    mov edi, r12d                       ; not twice
+    mov eax, SYS_UNMAP
+    syscall
+    cmp rax, E_ARG
+    jne fail
+    mov edi, [ax_console]               ; nor what was never mapped
+    mov eax, SYS_UNMAP
+    syscall
+    cmp rax, E_ARG
+    jne fail
+    mov edi, r12d
+    mov eax, SYS_MAP
+    syscall
+    test rax, rax
+    js fail
+    cmp rax, r13
+    je fail
+    cmp qword [rax + 4096], 1234        ; the same memory
+    jne fail
+    mov ebp, 40                         ; more often than a task holds mappings
+.remap:
+    mov edi, r12d
+    mov eax, SYS_UNMAP
+    syscall
+    test rax, rax
+    jnz fail
+    mov edi, r12d
+    mov eax, SYS_MAP
+    syscall
+    test rax, rax
+    js fail
+    dec ebp
+    jnz .remap
+
+    mov r15d, 18                        ; a channel, both ends here
+    mov eax, SYS_CHANNEL_NEW
+    syscall
+    test rax, rax
+    js fail
+    mov r12d, eax
+    mov r13d, edx
+    mov edi, r13d                       ; nothing yet
+    mov ecx, 16
+    call recv_now
+    cmp rax, E_EMPTY
+    jne fail
+    mov edi, r12d
+    lea rsi, [s_hi]
+    mov edx, 2
+    call ax_send
+    cmp rax, 2
+    jne fail
+    mov edi, r13d                       ; too long for the room: it stays
+    mov ecx, 1
+    call recv_now
+    cmp rax, E_RANGE
+    jne fail
+    mov edi, r13d
+    lea rsi, [buffer]
+    mov edx, 16
+    xor ecx, ecx
+    call ax_recv
+    cmp rax, 2
+    jne fail
+    cmp word [buffer], 'hi'
+    jne fail
+    mov edi, r13d                       ; the other way, then one end closed
+    lea rsi, [s_hi]
+    mov edx, 2
+    call ax_send
+    cmp rax, 2
+    jne fail
+    mov edi, r12d
+    call close
+    test rax, rax
+    jnz fail
+    mov edi, r13d
+    lea rsi, [s_hi]
+    mov edx, 2
+    call ax_send
+    cmp rax, E_PEER
+    jne fail
+    mov edi, r13d
+    lea rsi, [buffer]
+    mov edx, 16
+    xor ecx, ecx
+    call ax_recv
+    cmp rax, E_PEER
+    jne fail
+    mov edi, r13d
+    call close
+
+    mov r15d, 19                        ; a program it starts, talking back
+    mov eax, SYS_CHANNEL_NEW
+    syscall
+    test rax, rax
+    js fail
+    mov r12d, eax
+    mov r13d, edx
+    lea rsi, [s_echo]
+    mov edi, r13d                       ; it gets the other end
+    call ax_spawn
+    test rax, rax
+    js fail
+    mov [child_task], eax
+    mov [child_thread], edx
+    mov edi, r13d                       ; not ours any more
+    call close
+    cmp rax, E_BADH
+    jne fail
+    mov ebp, 1
+.ping:
+    mov [number], rbp
+    mov edi, r12d
+    lea rsi, [number]
+    mov edx, 8
+    call ax_send
+    cmp rax, 8
+    jne fail
+    call soon
+    mov rcx, rax
+    mov edi, r12d
+    lea rsi, [number]
+    mov edx, 8
+    call ax_recv
+    cmp rax, 8
+    jne fail
+    lea rax, [rbp * 2 + 1]
+    cmp [number], rax
+    jne fail
+    inc ebp
+    cmp ebp, PINGS
+    jbe .ping
+    mov qword [number], 0               ; enough
+    mov edi, r12d
+    lea rsi, [number]
+    mov edx, 8
+    call ax_send
+    cmp rax, 8
+    jne fail
+    mov edi, [child_thread]
+    call join
+    test rax, rax
+    jnz fail
+    cmp rdx, PINGS
+    jne fail
+    call soon                           ; its end went with it
+    mov rcx, rax
+    mov edi, r12d
+    lea rsi, [number]
+    mov edx, 8
+    call ax_recv
+    cmp rax, E_PEER
+    jne fail
+    mov edi, r12d
+    call close
+    mov edi, [child_task]
+    call close
+    mov edi, [child_thread]
+    call close
+
+    mov r15d, 20                        ; what may not start, and how deep
+    lea rsi, [s_nothing]
+    xor edi, edi
+    call ax_spawn
+    test rax, rax
+    jns fail
+    lea rsi, [s_echo]                   ; a gift it does not have
+    mov edi, 0x7FFF0001
+    call ax_spawn
+    cmp rax, E_BADH
+    jne fail
+    lea rsi, [s_deep]
+    xor edi, edi
+    call ax_spawn
+    test rax, rax
+    js fail
+    mov r12d, eax
+    mov r13d, edx
+    mov edi, r13d
+    call join
+    test rax, rax
+    jnz fail
+    cmp rdx, SPAWN_DEEPEST
+    jne fail
+    mov edi, r12d
+    call close
+    mov edi, r13d
+    call close
+
+    mov r15d, 21                        ; killed, with what it started
+    mov eax, SYS_CHANNEL_NEW
+    syscall
+    test rax, rax
+    js fail
+    mov r12d, eax
+    mov r13d, edx
+    lea rsi, [s_hold]                   ; its child gets the other end
+    mov edi, r13d
+    call ax_spawn
+    test rax, rax
+    js fail
+    mov [child_task], eax
+    mov [child_thread], edx
+    call soon                           ; once the grandchild is there
+    mov rcx, rax
+    mov edi, r12d
+    lea rsi, [buffer]
+    mov edx, 16
+    call ax_recv
+    cmp rax, 5
+    jne fail
+    call entry_new
+    mov byte [rdi + SQ_OP], RO_KILL
+    mov eax, [child_task]
+    mov [rdi + SQ_HANDLE], eax
+    call ax_do
+    test rax, rax
+    jnz fail
+    mov edi, [child_thread]
+    call join
+    test rax, rax
+    jnz fail
+    cmp rdx, E_KILLED
+    jne fail
+    call soon                           ; and the grandchild with it
+    mov rcx, rax
+    mov edi, r12d
+    lea rsi, [buffer]
+    mov edx, 16
+    call ax_recv
+    cmp rax, E_PEER
+    jne fail
+    call entry_new                      ; a memory handle is no task
+    mov byte [rdi + SQ_OP], RO_KILL
+    mov eax, [ax_io]
+    mov [rdi + SQ_HANDLE], eax
+    call ax_do
+    cmp rax, E_TYPE
+    jne fail
+    mov edi, r12d
+    call close
+    mov edi, [child_task]
+    call close
+    mov edi, [child_thread]
+    call close
+
     lea rsi, [s_passed]
     call ax_add
     mov edi, CHECKS
@@ -350,6 +635,49 @@ mem_map:
     syscall
     pop rdx
 .out:
+    ret
+
+; recv_now(EDI = a channel's end, ECX = room) -> RAX: RO_RECV alone, into
+; ax_io, not waiting
+recv_now:
+    push rdi
+    push rcx
+    call entry_new
+    pop rcx
+    pop rax
+    mov byte [rdi + SQ_OP], RO_RECV
+    mov [rdi + SQ_HANDLE], eax
+    mov eax, [ax_io]
+    mov [rdi + SQ_HANDLE2], eax
+    mov [rdi + SQ_A1], rcx
+    jmp ax_do
+
+; close(EDI = a handle) -> RAX
+close:
+    push rdi
+    call entry_new
+    pop rax
+    mov byte [rdi + SQ_OP], RO_CLOSE
+    mov [rdi + SQ_HANDLE], eax
+    jmp ax_do
+
+; join(EDI = a thread) -> RAX = 0, RDX = what it returned
+join:
+    push rdi
+    call entry_new
+    pop rax
+    mov byte [rdi + SQ_OP], RO_JOIN
+    mov [rdi + SQ_HANDLE], eax
+    jmp ax_do
+
+; soon -> RAX = the TSC five seconds from now
+soon:
+    call ax_now
+    push rax
+    mov edi, 5000000
+    call ax_us
+    pop rcx
+    add rax, rcx
     ret
 
 ; regs_kept -> EAX = 0 if a system call kept every register it should, and
@@ -488,6 +816,18 @@ s_passed:       db 'test: all ', 0
 s_passed_end:   db ' checks passed', 0
 s_check:        db 'test: check ', 0
 s_failed:       db ' failed', 0
+s_hi:           db 'hi'
+s_echo:         db 'child echo', 0
+s_deep:         db 'child deep', 0
+s_hold:         db 'child hold', 0
+s_nothing:      db 'nothing', 0
+align 4096
+big:                                    ; page p: its dwords p * 0x01010101 + 0x11
+%assign p 0
+%rep BIG_PAGES
+                times 1024 dd p * 0x01010101 + 0x11
+%assign p p + 1
+%endrep
 
 section .data
 align 8
@@ -498,6 +838,10 @@ alignb 8
 shared:         resq 1
 counter:        resq 1
 adders:         resd ADDERS
+number:         resq 1
+child_task:     resd 1
+child_thread:   resd 1
+buffer:         resb 16
 entry:          resb SQ_SIZE
 alignb 4096
 zeroes:         resb 8192

@@ -16,7 +16,8 @@
 ;  a window no wider (handle_dup, handle_window); hands one to another task
 ;  (handle_give); and takes back every capability derived from one, wherever
 ;  it went (handle_revoke): a revoked handle says so until its holder closes
-;  it. Each capability is in the tree of the one it came from; closing one
+;  it. A capability to memory its holder has mapped (user.asm) takes the
+;  mapping with it when it goes, is revoked, or is given away. Each capability is in the tree of the one it came from; closing one
 ;  moves those derived from it up to its parent, so a revoke still reaches
 ;  them.
 ;
@@ -294,6 +295,29 @@ obj_unlink:
 ; Both preserve all.
 obj_get:
     lock inc dword [rdi + OB_REFS]
+    ret
+
+; obj_tryget(RDI = an object found on its type's list, that lock held) ->
+; one more reference, or CF if it has none left (it is on its way out).
+; Preserves all.
+obj_tryget:
+    push rax
+    push rcx
+    mov eax, [rdi + OB_REFS]
+.again:
+    test eax, eax
+    jz .gone
+    lea ecx, [rax + 1]
+    lock cmpxchg [rdi + OB_REFS], ecx
+    jne .again
+    pop rcx
+    pop rax
+    clc
+    ret
+.gone:
+    pop rcx
+    pop rax
+    stc
     ret
 
 obj_put:
@@ -1009,7 +1033,6 @@ cap_derive:
 
 handle_give:
     push rbx
-    push rbp
     push r12
     push r13
     push r14
@@ -1017,7 +1040,6 @@ handle_give:
     mov r14d, esi
     call cur_task
     mov r12, rax
-.retry:
     CAP_LOCK
     mov esi, r14d
     call cap_find                       ; the task
@@ -1028,7 +1050,41 @@ handle_give:
     call cap_check
     cmp rax, E_ANY
     jae .refused
-    mov rbp, [rax + CAP_OBJ]
+    mov rbx, [rax + CAP_OBJ]
+    mov rdi, rbx
+    call obj_get                        ; alive while it is given to
+    CAP_UNLOCK
+    mov rdi, r12
+    mov esi, r13d
+    mov rdx, rbx
+    call task_give
+    mov rdi, rbx
+    call obj_put
+    jmp .out
+.refused:
+    AUDIT AO_GIVE, rax, 0, r13, 0, 0
+    CAP_UNLOCK
+.out:
+    call op_done
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+; task_give(RDI = a task, ESI = a handle of its, RDX = another task, kept
+; alive by the caller) -> RAX = the handle the other has now (needs RT_GIVE):
+; handle_give, for whichever task. Mapped in the first: no more.
+task_give:
+    push rbx
+    push rbp
+    push r12
+    push r13
+    mov r12, rdi
+    mov r13d, esi
+    mov rbp, rdx
+.retry:
+    CAP_LOCK
     mov esi, r13d
     call cap_find                       ; what goes to it
     cmp rax, E_ANY
@@ -1049,22 +1105,28 @@ handle_give:
     test eax, eax
     jz .grow
     push rax
-    mov eax, [rbx + CAP_SLOT]           ; out of ours
+    mov rdi, rbx                        ; mapped in the giver's: no more
+    call cap_unmap
+    mov eax, [rbx + CAP_SLOT]           ; out of its table
     call ht_release
     pop rax
     push r12
     mov r12, rbp
-    call ht_set                         ; into theirs
+    call ht_set                         ; into the other's
     pop r12
     AUDIT AO_GIVE, 0, qword [rbx + CAP_OBJ], r13, qword [rbx + CAP_RIGHTS], qword [rbp + OB_ID]
+    mov rdi, [rbx + CAP_OBJ]
+    xor esi, esi
+    xor edx, edx
+    xchg rsi, [rbx + CAP_MAPVA]         ; the other's now: what is left to do, ours
+    xchg rdx, [rbx + CAP_MAPLEN]
     CAP_UNLOCK
+    call unmap_flush
     jmp .out
 .grow:
-    mov rdi, rbp
-    call obj_get                        ; alive while its table grows
     CAP_UNLOCK
+    mov rdi, rbp
     call ht_grow
-    call obj_put
     test rax, rax
     jz .retry
     jmp .out
@@ -1072,8 +1134,6 @@ handle_give:
     AUDIT AO_GIVE, rax, 0, r13, 0, 0
     CAP_UNLOCK
 .out:
-    call op_done
-    pop r14
     pop r13
     pop r12
     pop rbp
@@ -1122,6 +1182,7 @@ handle_revoke:
     add rax, [rsi + TK_SLOTS]
     mov qword [rax + HS_CAP], 0
     mov word [rax + HS_STATE], HSS_REVOKED
+    call cap_unmap                      ; and mapped no more (user.asm)
     mov rax, [rdi + CAP_OBJ]
     lock dec dword [rax + OB_CAPS]
     mov [rdi + CAP_PARENT], r14
@@ -1135,6 +1196,8 @@ handle_revoke:
 .free:
     test r14, r14
     jz .freed
+    mov rdi, r14
+    call cap_flush
     mov rdi, [r14 + CAP_OBJ]
     call obj_put
     mov rdi, r14
@@ -1172,6 +1235,7 @@ handle_close:
     mov rbx, rax
     mov rdi, rbx
     call cap_unlink                     ; those derived from it move up
+    call cap_unmap
     mov rdx, [rbx + CAP_OBJ]
     lock dec dword [rdx + OB_CAPS]
     setz byte [rbx + CAP_LAST]
@@ -1179,6 +1243,8 @@ handle_close:
     call ht_release
     AUDIT AO_CLOSE, 0, rdx, r13, qword [rbx + CAP_RIGHTS], 0
     CAP_UNLOCK
+    mov rdi, rbx
+    call cap_flush
     mov rdi, [rbx + CAP_OBJ]
     cmp byte [rbx + CAP_LAST], 0
     je .put
@@ -1230,6 +1296,7 @@ cap_drop_all:
     jz .next
     mov qword [rax + HS_CAP], 0
     call cap_unlink
+    call cap_unmap
     mov rdx, [rdi + CAP_OBJ]
     lock dec dword [rdx + OB_CAPS]
     setz byte [rdi + CAP_LAST]
@@ -1248,6 +1315,8 @@ cap_drop_all:
 .put:
     test r13, r13
     jz .out
+    mov rdi, r13
+    call cap_flush
     mov rdi, [r13 + CAP_OBJ]
     cmp byte [r13 + CAP_LAST], 0
     je .drop
@@ -1393,6 +1462,9 @@ str_rt_signal:  db 'signal', 0
 str_rt_read:    db 'read', 0
 str_rt_write:   db 'write', 0
 str_rt_enter:   db 'enter', 0
+str_rt_kill:    db 'kill', 0
+str_rt_send:    db 'send', 0
+str_rt_recv:    db 'receive', 0
 str_e_ok:       db 'ok', 0
 str_e_badh:     db 'no such handle', 0
 str_e_type:     db 'the wrong type', 0
@@ -1407,16 +1479,18 @@ str_e_arg:      db 'a bad argument', 0
 str_e_canceled: db 'canceled', 0
 str_e_killed:   db 'killed', 0
 str_e_fault:    db 'a fault in ring 3', 0
+str_e_peer:     db 'the other end is closed', 0
+str_e_empty:    db 'nothing to receive', 0
 str_e_unknown:  db 'an unknown error', 0
 
 align 8
 err_names:      dq str_e_ok, str_e_badh, str_e_type, str_e_rights, str_e_expired
                 dq str_e_revoked, str_e_range, str_e_nomem, str_e_full, str_e_timeout, str_e_arg
-                dq str_e_canceled, str_e_killed, str_e_fault
+                dq str_e_canceled, str_e_killed, str_e_fault, str_e_peer, str_e_empty
 rt_names_none:  dq str_rt_dup, str_rt_give, str_rt_info, 0, 0, 0, 0, 0
                 dq 0, 0, 0, 0, 0, 0, 0, 0
 rt_names_task:  dq str_rt_dup, str_rt_give, str_rt_info, 0, 0, 0, 0, 0
-                dq str_rt_handles, str_rt_spawn, 0, 0, 0, 0, 0, 0
+                dq str_rt_handles, str_rt_spawn, str_rt_kill, 0, 0, 0, 0, 0
 rt_names_thread: dq str_rt_dup, str_rt_give, str_rt_info, 0, 0, 0, 0, 0
                 dq str_rt_wait, 0, 0, 0, 0, 0, 0, 0
 rt_names_event: dq str_rt_dup, str_rt_give, str_rt_info, 0, 0, 0, 0, 0
@@ -1427,6 +1501,8 @@ rt_names_ring:  dq str_rt_dup, str_rt_give, str_rt_info, 0, 0, 0, 0, 0
                 dq str_rt_enter, 0, 0, 0, 0, 0, 0, 0
 rt_names_console: dq str_rt_dup, str_rt_give, str_rt_info, 0, 0, 0, 0, 0
                 dq str_rt_write, 0, 0, 0, 0, 0, 0, 0
+rt_names_channel: dq str_rt_dup, str_rt_give, str_rt_info, 0, 0, 0, 0, 0
+                dq str_rt_send, str_rt_recv, 0, 0, 0, 0, 0, 0
 
 section .data
 align 8
@@ -1439,6 +1515,7 @@ ty_event:       dq str_ot_event, obj_free, 0, 0, 0, 0, rt_names_event, 0
 ty_memory:      dq str_ot_memory, mem_destroy, 0, 0, 0, 0, rt_names_memory, 0
 ty_ring:        dq str_ot_ring, ring_destroy, 0, 0, 0, 0, rt_names_ring, ring_orphan
 ty_console:     dq str_ot_console, obj_free, 0, 0, 0, 0, rt_names_console, 0
+ty_channel:     dq str_ot_channel, ch_destroy, 0, 0, 0, 0, rt_names_channel, ch_orphan
 
 thread_list     equ ty_thread + TY_LIST
 thread_count    equ ty_thread + TY_LIVE

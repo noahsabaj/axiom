@@ -31,7 +31,8 @@ OUT = ROOT / "build" / "test" / "user"
 FAILS = 0
 READY = ["until log: kept in"]                  # the boot stick is mounted
 TEST = ["type user test\\n", "until user test: passed", "wait 0.3"]
-FAULTS = ("null", "write", "exec", "kernel", "priv", "ud", "div", "stack", "gp", "int", "io")
+FAULTS = ("null", "write", "exec", "kernel", "priv", "ud", "div", "stack", "gp", "int", "io",
+          "unmap", "close", "revoke")
 SPINS = ("4", "3 wait", "3 calls", "3 fault")
 
 
@@ -45,7 +46,7 @@ def result(ok, text):
 def check_test(log, label):
     """What 'user test' prints, and what it must say."""
     result("test: arguments 'one two  three'" in log, f"{label}: TEST got its arguments")
-    result(log.count("test: all 15 checks passed") >= 2, f"{label}: TEST passed its 15 checks, "
+    result(log.count("test: all 21 checks passed") >= 2, f"{label}: TEST passed its 21 checks, "
                                                          "twice")
     for kind in FAULTS:
         result(f"user test: fault {kind}: the task ended, the kernel went on" in log,
@@ -69,8 +70,8 @@ def check_test(log, label):
     m = re.search(r"user test: (\d+) tasks \((\d+) before\), (\d+) threads \((\d+)\), (\d+) blocks "
                   r"of memory \((\d+)\), (\d+) rings \((\d+)\), (\d+) heap objects \((\d+)\), (\d+) "
                   r"vm mappings \((\d+)\), (\d+) user pages \((\d+)\), (\d+) user page tables "
-                  r"\((\d+)\)", log)
-    result(m and all(m.group(i) == m.group(i + 1) for i in range(1, 17, 2))
+                  r"\((\d+)\), (\d+) channel ends \((\d+)\)", log)
+    result(m and all(m.group(i) == m.group(i + 1) for i in range(1, 19, 2))
            and m.group(13) == "0" and m.group(15) == "0"
            and "not all of it came back" not in log, f"{label}: everything given back")
     result("user test: passed" in log and "FAILED" not in log, f"{label}: user test passed")
@@ -97,7 +98,7 @@ def jobs(opts):
         "type run hello one two\\n", "until run: HELLO exited",
         "type run nothing\\n", "until nothing called",
         "type run /NOTAPROG.TXT\\n", "until not an Axiom program",
-        "type run /EFI/BOOT/BOOTX64.EFI\\n", "until larger than",
+        "type run /EFI/BOOT/BOOTX64.EFI\\n", "until BOOTX64.EFI is not",
         "type run /EFI/AXIOM/HELLO.AXE by path\\n", "until run: HELLO exited",
         "type run spin 2\\n", "until spin: 2 threads", "wait 0.3",
         "sendkey ctrl-c", "until run: SPIN stopped",
@@ -107,6 +108,7 @@ def jobs(opts):
         "type run fault\\n", "until run: FAULT exited",
         "type user\\n", "until their pages",
         *TEST,
+        "type run test\\n", "until run: TEST exited",
         "type user\\n", "wait 0.3",
         "type user nonsense\\n", "wait 0.3",
         "type objects\\n", "until refused", "wait 0.3",
@@ -137,7 +139,8 @@ def four(logs):
     result("hello: arguments: by path" in log, "a program by its path")
     result("nothing called 'NOTHING.AXE' there" in log, "a program that is not there")
     result("run: /NOTAPROG.TXT is not an Axiom program" in log, "a file that is not one")
-    result("run: /EFI/BOOT/BOOTX64.EFI is larger than 65536 bytes" in log, "one too large")
+    result("run: /EFI/BOOT/BOOTX64.EFI is not an Axiom program" in log,
+           "a file over 64 KiB: read whole, and not one")
     result(log.count("run: SPIN stopped") == 2, "ctrl+C stopped 'run spin', twice")
     result(re.search(r"FAULT: Page fault at 0x\w+: a write to 0x\w+, which is read-only", log)
            is not None and "run: FAULT ended by a fault" in log, "run fault write: said, and ended")
@@ -150,6 +153,12 @@ def four(logs):
     result(re.search(r"their pages: 0, and 0 page tables", log) is not None,
            "'user': no pages left once programs end")
     check_test(log, "4 CPUs")
+    result("run: TEST exited with 0" in log and log.count("test: all 21 checks passed") >= 3,
+           "'run test': its children started from the main loop")
+    m = re.findall(r"programs: (\d+) started", log)
+    result(len(m) >= 2 and int(m[-1]) - int(m[0]) >= 3 * 12,
+           f"'user': programs started by programs counted ({m[0]} then {m[-1]})" if m
+           else "'user': programs started by programs counted")
     result("usage: user [test]" in log, "'user nonsense': the usage")
     result(re.search(r"^\s+console\s+1\s+1$", log, re.M) is not None, "'objects': one console")
     result("QEMU ended by itself" in err, "4 CPUs: powered off")

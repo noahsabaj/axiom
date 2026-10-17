@@ -81,7 +81,8 @@ OT_EVENT        equ 3
 OT_MEMORY       equ 4
 OT_RING         equ 5
 OT_CONSOLE      equ 6                   ; the screen and the serial log (user.asm)
-OT_TYPES        equ 7                   ; with 0, none
+OT_CHANNEL      equ 7                   ; one end of a channel (channel.asm)
+OT_TYPES        equ 8                   ; with 0, none
 
 ; what a capability allows (RT_*): three for any object, the rest by type
 RT_DUP          equ 1 << 0              ; derive more from it
@@ -89,6 +90,7 @@ RT_GIVE         equ 1 << 1              ; hand it to another task
 RT_INFO         equ 1 << 2              ; see what the object is
 RT_TASK_HANDLES equ 1 << 8              ; a task: give it handles
 RT_TASK_SPAWN   equ 1 << 9              ; start threads in it
+RT_TASK_KILL    equ 1 << 10             ; kill it (and the tasks it started)
 RT_THREAD_WAIT  equ 1 << 8              ; a thread: wait for it to end
 RT_EV_SIGNAL    equ 1 << 8              ; an event: signal or reset it
 RT_EV_WAIT      equ 1 << 9              ; wait for it
@@ -96,6 +98,8 @@ RT_MEM_READ     equ 1 << 8              ; memory: read it
 RT_MEM_WRITE    equ 1 << 9              ; write it
 RT_RING_ENTER   equ 1 << 8              ; a ring: submit to it, wait on it
 RT_CON_WRITE    equ 1 << 8              ; the console: write lines to it
+RT_CH_SEND      equ 1 << 8              ; a channel's end: send from it
+RT_CH_RECV      equ 1 << 9              ; receive at it, and wait to
 RT_ALL          equ 0xFFFF
 
 ; what handle operations return when they fail
@@ -112,7 +116,9 @@ E_ARG           equ -10
 E_CANCELED      equ -11
 E_KILLED        equ -12                 ; a thread whose task was killed
 E_FAULT         equ -13                 ; one that faulted in ring 3
-E_COUNT         equ 14                  ; with 0, none
+E_PEER          equ -14                 ; a channel's other end is closed
+E_EMPTY         equ -15                 ; nothing to receive yet
+E_COUNT         equ 16                  ; with 0, none
 E_ANY           equ -4096               ; what returns a pointer or an E_*: an
                                         ; error is RAX >= E_ANY, unsigned (the
                                         ; kernel's pointers are negative too)
@@ -205,13 +211,26 @@ CAP_SIBLING     equ 48                  ; the next derived from its parent
 CAP_OFF         equ 56                  ; memory: the window it allows
 CAP_LEN         equ 64
 CAP_LAST        equ 72                  ; byte: closing it left its object none
-CAP_SIZE        equ 80
+CAP_MAPVA       equ 80                  ; memory: where its holder has it mapped, 0 if not
+CAP_MAPLEN      equ 88                  ; and how many bytes (user.asm)
+CAP_SIZE        equ 96
 
 ; an event (kobj.asm), an object
 EV_STATE        equ 64                  ; dword: 1 = signalled
 EV_WQ           equ 72                  ; WQ_SIZE
 EV_SIGNALS      equ 88                  ; times signalled
 EV_SIZE         equ 96
+
+; one end of a channel (channel.asm), an object
+CH_PEER         equ 64                  ; the other end, 0 once either is closed
+CH_HEAD         equ 72                  ; messages sent to this end, oldest first
+CH_TAIL         equ 80
+CH_COUNT        equ 88                  ; dword: how many
+CH_READY        equ 92                  ; dword: 1 = one waits, or the peer is gone
+CH_WQ           equ 96                  ; WQ_SIZE: requests waiting for CH_READY
+CH_SENT         equ 112                 ; messages sent from it, ever
+CH_RECEIVED     equ 120                 ; received at it
+CH_SIZE         equ 128
 
 ; a block of memory (kobj.asm), an object
 MO_BASE         equ 64                  ; its pages, in the vm region
@@ -289,7 +308,13 @@ RO_REVOKE       equ 10                  ; handle
 RO_CANCEL       equ 11                  ; a0: the data of requests to cancel
 RO_WRITE        equ 12                  ; handle = the console, handle2 + a0: a1
                                         ; bytes of text -> the bytes
-RO_COUNT        equ 13
+RO_SEND         equ 13                  ; handle = a channel, handle2 + a0: a1
+                                        ; bytes, a message -> the bytes
+RO_RECV         equ 14                  ; handle, the next message into handle2 +
+                                        ; a0, a1 bytes at most -> its bytes, or
+                                        ; E_EMPTY (RO_WAIT on it waits for one)
+RO_KILL         equ 15                  ; handle = a task
+RO_COUNT        equ 16
 
 TS_NEW          equ 0
 TS_READY        equ 1
@@ -305,6 +330,7 @@ TF_IDLE         equ 1
 TF_MAIN         equ 2
 TF_WORKER       equ 4
 TF_USER         equ 8                   ; runs in ring 3 (user.asm)
+TF_FIRST        equ 16                  ; its task's first: when it ends, the task does
 
 ; 64-bit TSS
 TSS_RSP0        equ 4
@@ -397,6 +423,7 @@ AXE_HDR         equ 48
 SB_RING         equ 0                   ; dword: a handle to the task's ring
 SB_RING_MEM     equ 4                   ; dword: to the ring's memory
 SB_CONSOLE      equ 8                   ; dword: to the console
+SB_GIFT         equ 12                  ; dword: what the task that started it gave, or 0
 SB_RING_VA      equ 16                  ; where the ring's memory is mapped
 SB_TSC_PER_US   equ 24                  ; for deadlines
 SB_ARGS_LEN     equ 32                  ; dword
@@ -413,7 +440,12 @@ SYS_MAP         equ 4                   ; (memory) -> where it is mapped now
 SYS_EVENT_NEW   equ 5                   ; -> an event
 SYS_THREAD_NEW  equ 6                   ; (entry, RSP, RDI) -> a thread, started
 SYS_YIELD       equ 7
-SYS_COUNT       equ 8
+SYS_UNMAP       equ 8                   ; (memory): its mapping goes
+SYS_SPAWN       equ 9                   ; (memory, offset, bytes of "program args",
+                                        ; a handle to give it or 0) -> RAX = the
+                                        ; task, RDX = its first thread
+SYS_CHANNEL_NEW equ 10                  ; -> RAX, RDX = the two ends of a channel
+SYS_COUNT       equ 11
 
 ; UEFI memory types
 MT_RESERVED     equ 0

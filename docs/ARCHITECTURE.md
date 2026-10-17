@@ -330,16 +330,32 @@ or idles.
   the constants read-only, the data and zeroes writable and not executable,
   a 64 KiB stack under `USER_STACK_TOP` with nothing below it, and a
   read-only start block at `USER_START` (`SB_*`: handles to the task's ring,
-  its memory and the console, where the ring is, the TSC rate, the
-  arguments). The first thread starts at the entry with RDI = the start
-  block, every other register 0.
+  its memory and the console, what the task that started it gave it, where
+  the ring is, the TSC rate, the arguments). The first thread starts at the
+  entry with RDI = the start block, every other register 0. A file larger
+  than `fat_file` (64 KiB) is read whole into a buffer of its own, up to
+  `USER_IMAGE_MAX`.
+- **Programs start programs.** `SYS_SPAWN` takes "program arguments" from
+  a block of memory and a handle to give: the main thread alone reads the
+  boot stick, so the request goes to it (`spawn_list`; the main loop, or
+  `user_wait` when the main thread is waiting for a program itself, loads
+  it) and the caller waits, not to be cut short meanwhile. The new task is
+  the caller's child (`TK_PARENT`); the gift moves to it before it runs
+  (`task_give`), its number in `SB_GIFT`, and the caller gets handles to the
+  task (`RT_TASK_KILL` among its rights, for `RO_KILL`) and its first thread
+  (`RO_JOIN`). Eight programs deep, no more.
 - **Every set of page tables shares the kernel's upper half**: a new PML4
   copies entries 256 to 511 of the kernel's, which never change after boot.
   The lower half is the task's: user pages are never global. Blocks of
   memory a task maps (`SYS_MAP`) go from `USER_MAPS` up, a guard page after
   each, and are the memory object's own pages, so the kernel and the task
-  see the same bytes; a mapping holds a reference to its object until the
-  task goes. `sched_switch` loads the next thread's tables (the kernel's for
+  see the same bytes. **A mapping is its capability's** (`CAP_MAPVA`): it
+  goes, and every CPU's TLB forgets it before the memory can, when that
+  handle is closed, revoked from the one it was derived from, given to
+  another task, or unmapped (`SYS_UNMAP`); the PTEs are cleared under
+  `cap_lock` (then the address space's lock) and the shootdown and the
+  reference wait until it is let go. Addresses are never used twice, so
+  nothing stale can point at a new mapping. `sched_switch` loads the next thread's tables (the kernel's for
   a kernel thread) before it lets go of the one before, so tables are freed
   only once no CPU can be on them, and sets the TSS's RSP0 and the per-CPU
   SYSCALL stack to the next thread's kernel stack.
@@ -348,7 +364,8 @@ or idles.
   (`FR_*`, vector `VEC_SYSCALL`), interrupts back on, and out by `SYSRET`.
   Arguments in RDI, RSI, RDX and R10; RAX and RDX back; RCX and R11 lost;
   everything else kept. They are only what a ring cannot do: enter it, make
-  rings, memory, events and threads, map memory, yield, exit. The rest is an
+  rings, memory, events, threads and channels, map and unmap memory, start
+  a program, yield, exit. The rest is an
   entry on a ring: a program writes to the console with `RO_WRITE` (a
   handle to the console, `OT_CONSOLE`, with `RT_CON_WRITE`, and text in a
   block of memory). The kernel never touches a program's pages at their
@@ -362,18 +379,43 @@ or idles.
   next time it would go back to ring 3 (`user_leave`, on the way out of
   every system call and every interrupt from ring 3), one parked is woken
   (`wq_wait_fn` waits no more for a thread whose task is killed), and one
-  running on another CPU gets a reschedule IPI. When a task's first thread
-  ends, the rest are killed; when the last has gone and the last reference
-  with it, its pages, page tables and mappings go too.
+  running on another CPU gets a reschedule IPI; and every task it started is
+  killed, and theirs. When a task's first thread ends (`TF_FIRST`), the task
+  is killed; once a killed task's last thread has gone, its handles are
+  closed even while others hold handles to it, and when the last reference
+  goes, its pages, page tables and mappings go too.
 - `run` runs in the background (a thread `run` waits for it, and the main
   loop says how it ended); ctrl+C kills it. `user` counts programs and their
   pages. `user test` runs TEST.AXE (which checks the start block, its ring,
   registers kept across calls, refusals, events, a thread of its own, four
   more on a shared counter, a timeout, 64 KiB copied by the kernel, its own
-  sections, a second ring, the console's refusals, and SIMD registers kept
-  across yields), FAULT.AXE with each kind of fault, and SPIN.AXE spinning,
-  parked in its ring, calling the kernel, and with a thread that faults,
-  each killed and timed; then that nothing is left over.
+  sections, a second ring, the console's refusals, SIMD registers kept
+  across yields, 80 KiB of constants loaded whole, unmapping and mapping
+  again, a channel between its own two ends, CHILD.AXE started with a
+  channel's end and echoing over it, programs that may not start, programs
+  starting programs eight deep, and a child killed with the grandchild it
+  started), FAULT.AXE with each kind of fault (memory touched after its
+  mapping was unmapped, closed or revoked among them), and SPIN.AXE
+  spinning, parked in its ring, calling the kernel, and with a thread that
+  faults, each killed and timed; then that nothing is left over.
+
+## Channels: `channel.asm`
+
+- **A channel is two ends**, each an object (`OT_CHANNEL`, `CH_*`); what one
+  sends waits at the other, oldest first, a copy of its bytes (`CM_*`, from
+  the heap, `CH_MSG_MAX` bytes and `CH_QUEUE_MAX` waiting at most).
+  `SYS_CHANNEL_NEW` makes both; a task hands one on by `RO_GIVE` or as a
+  program's gift. `RO_SEND` copies from a block of memory; `RO_RECV` copies
+  the next message out, or says `E_EMPTY`, or `E_RANGE` (and leaves it)
+  when it does not fit. `RO_WAIT` on an end waits, blocking nothing, for
+  `CH_READY` (a message waits, or the other end is gone), so `RO_WAIT`
+  linked to `RO_RECV` receives the next message when it comes.
+- When either end's last handle goes (`TY_ORPHAN`) or the end itself does,
+  the two are cut apart (`CH_PEER` = 0) and whatever waits at either is
+  woken: the other's sends say `E_PEER`, and its receives do once what was
+  sent before is read. `ch_lock` covers every end and queue; no memory is
+  copied with it held, and a message the receiver could not take goes back
+  first in line.
 
 ## Processors: `smp.asm`
 
@@ -772,8 +814,8 @@ from `_S5_`) for power-off, then QEMU's port 0x604.
   screen; `SPRINTF buf, "fmt", args...` formats into memory. Arguments are
   64-bit registers, immediates or `qword [mem]`.
 - Structures are `equ` offsets (`PC_*`, `TH_*`, `OB_*`, `TK_*`, `CAP_*`,
-  `HS_*`, `EV_*`, `MO_*`, `RG_*`, `RA_*`, `SQ_*`, `CQ_*`, `RQ_*`, `TM_*`, `AS_*`, `AXE_*`,
-  `SB_*`, `PE_*`, `XC_*`, `DV_*`, `NV_*`, `DK_*`, `VO_*`, `VF_*`). Programs include
+  `HS_*`, `EV_*`, `MO_*`, `RG_*`, `RA_*`, `SQ_*`, `CQ_*`, `RQ_*`, `TM_*`, `AS_*`, `AM_*`, `AXE_*`,
+  `SB_*`, `SR_*`, `CH_*`, `CM_*`, `PE_*`, `XC_*`, `DV_*`, `NV_*`, `DK_*`, `VO_*`, `VF_*`). Programs include
   `defs.inc` too: it is their ABI.
 - No code a system call or an interrupt reaches uses SIMD, so neither saves
   a program's SIMD registers; the scheduler keeps each thread's. SIMD stays

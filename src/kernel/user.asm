@@ -24,7 +24,8 @@
 ;  SYSCALL comes in at syscall_entry: onto the thread's kernel stack, a frame
 ;  as an interrupt's (FR_*), interrupts on, the call, then back by SYSRET.
 ;  The calls (SYS_*) are what a ring cannot do for a task: enter the ring,
-;  make memory and map it, make rings, events and threads, yield, exit.
+;  make memory and map and unmap it, make rings, events, threads and
+;  channels, start a program, yield, exit.
 ;  Everything else is an entry on a ring, writing to the console (RO_WRITE)
 ;  too. The kernel never touches a task's pages at their user addresses, and
 ;  SMAP would stop it: a ring and a block of memory are pages in the vm
@@ -35,8 +36,15 @@
 ;  its threads ends the next time it would go back to ring 3 (one parked is
 ;  woken, one running on another CPU is interrupted). When the first thread
 ;  ends, the rest are killed. A task's pages, its page tables and its
-;  mappings go when the task does; a mapping lasts as long as its task, even
-;  when the handle it was made from is closed or revoked.
+;  mappings go when the task does. A mapping is its capability's: it goes
+;  when that handle is closed, revoked or given away, or by SYS_UNMAP, and
+;  the task's TLBs are flushed before the memory can go.
+;
+;  A program starts another with SYS_SPAWN, and may give it a handle (its
+;  number in SB_GIFT): the main thread loads it (the boot stick is read
+;  there alone), a child of the task that asked, which gets handles to it
+;  and its first thread. Killing a task kills its children, and theirs; a
+;  killed task with no thread left closes its handles at once.
 ;
 ;  Neither a system call nor an interrupt saves SIMD state: nothing they run
 ;  uses SIMD (macros.inc), and the scheduler keeps each thread's. The FS and
@@ -44,9 +52,11 @@
 ;  (FSGSBASE is off).
 ;
 ;    run <program> [arguments]: in the background; ctrl+C kills it
-;    user_load(RDI = path, RSI = arguments, RDX = name) -> RAX = a task (a
-;      reference), RDX = its first thread, started (a reference, for
-;      user_wait); RAX = 0 if it could not be loaded (said why)
+;    user_load(RDI = path, RSI = arguments, RDX = name, RCX = the task
+;      starting it or 0 for the current one, R8D = a handle of that task's
+;      to give it or 0) -> RAX = a task (a reference), RDX = its first
+;      thread, started (a reference, for user_wait); RAX = 0 if it could not
+;      be loaded (said why), RDX = E_*
 ;    user_wait(RDI = task, RSI = its first thread) -> RAX = what that thread
 ;      returned, once it and every other thread of the task have ended
 ;    task_kill(RDI = task)
@@ -58,9 +68,13 @@ AS_CR3          equ 8
 AS_LOCK         equ 16                  ; dword
 AS_NMAPS        equ 20                  ; dword
 AS_NEXT         equ 24                  ; where the next mapping goes
-AS_MAPS         equ 32                  ; AS_MAX of {the memory (a reference), where}
+AS_MAPS         equ 32                  ; AS_MAX of AM_SIZE
 AS_MAX          equ 32
-AS_SIZE         equ AS_MAPS + AS_MAX * 16
+AS_SIZE         equ AS_MAPS + AS_MAX * AM_SIZE
+AM_OBJ          equ 0                   ; a mapping: the memory (a reference)
+AM_VA           equ 8                   ; where
+AM_LEN          equ 16                  ; bytes
+AM_SIZE         equ 32
 
 PTE_U           equ 1 << 2              ; ring 3 may use it
 UF_CODE         equ PTE_P | PTE_U | PTE_A
@@ -74,6 +88,21 @@ USER_RING_N     equ 64                  ; entries in a program's ring
 CON_WRITE_MAX   equ 4096                ; bytes in one RO_WRITE
 CON_LINE        equ 200                 ; a longer line is cut in pieces
 USER_NAME_MAX   equ 64
+
+; a program's request for another (sys_spawn), on its kernel stack until done
+SR_NEXT         equ 0
+SR_TASK         equ 8                   ; the task asking
+SR_TEXT         equ 16                  ; "program arguments", NUL-ended, from the heap
+SR_GIFT         equ 24                  ; dword: a handle of its to give
+SR_DONE         equ 28                  ; dword: 1 once done
+SR_THREAD       equ 32                  ; the thread asking
+SR_RAX          equ 40                  ; what it gets back
+SR_RDX          equ 48
+SR_SIZE         equ 64
+SPAWN_TEXT_MAX  equ 255
+SPAWN_DEPTH     equ 8                   ; programs started by programs, this deep
+SPAWN_TASK_RIGHTS equ RT_DUP | RT_GIVE | RT_INFO | RT_TASK_HANDLES | RT_TASK_KILL
+SPAWN_THREAD_RIGHTS equ RT_DUP | RT_GIVE | RT_INFO | RT_THREAD_WAIT
 UT_KILL_US      equ 1000000             ; how long a killed task may take to end (TCG, busy hosts)
 
 section .text
@@ -200,8 +229,12 @@ syscall_entry:
     mov rsp, [rsp + 24]
     swapgs
     o64 sysret
-.bad_rip:
+.bad_rip:                               ; as a fault
     sti
+    mov rax, [gs:PC_CURRENT]
+    mov rdi, [rax + TH_TASK]
+    lock bts dword [rdi + TK_KILL], 1
+    call task_kill
     mov rdi, E_FAULT
     jmp thread_exit
 
@@ -311,7 +344,7 @@ user_fault:
 
 ; task_kill(RDI = task): each of its threads ends when next it would go back
 ; to ring 3; those parked are woken, those running elsewhere interrupted.
-; Preserves all.
+; The tasks it started are killed too, and theirs. Preserves all.
 task_kill:
     push rax
     push rbx
@@ -352,6 +385,36 @@ task_kill:
     lea rdi, [threads_lock]
     call spin_unlock
     popfq
+.children:                              ; a task it started, not killed yet
+    pushfq
+    cli
+    lea rdi, [ty_task + TY_LOCK]
+    call spin_lock
+    mov rbx, [ty_task + TY_LIST]
+.child:
+    test rbx, rbx
+    jz .looked
+    cmp [rbx + TK_PARENT], r12
+    jne .next_child
+    test byte [rbx + TK_KILL], 1
+    jnz .next_child
+    mov rdi, rbx
+    call obj_tryget                     ; not one on its way out
+    jnc .looked
+.next_child:
+    mov rbx, [rbx + OB_NEXT]
+    jmp .child
+.looked:
+    lea rdi, [ty_task + TY_LOCK]
+    call spin_unlock
+    popfq
+    test rbx, rbx
+    jz .killed
+    mov rdi, rbx
+    call task_kill
+    call obj_put
+    jmp .children
+.killed:
     pop r12
     pop rdi
     pop rsi
@@ -366,6 +429,14 @@ task_kill:
 ; -----------------------------------------------------------------------------
 
 sys_exit:
+    mov rax, [gs:PC_CURRENT]
+    test byte [rax + TH_FLAGS], TF_FIRST
+    jz .exit
+    push rdi                            ; the first: its task ends with it
+    mov rdi, [rax + TH_TASK]
+    call task_kill
+    pop rdi
+.exit:
     jmp thread_exit
 
 sys_ring_enter:
@@ -451,6 +522,239 @@ sys_thread_new:
     pop rbx
     ret
 
+sys_channel_new:
+    jmp h_channel_new
+
+; h_task_kill(EDI = a task with an address space) -> RAX = 0 (needs
+; RT_TASK_KILL): it, and the tasks it started
+h_task_kill:
+    mov esi, OT_TASK
+    mov edx, RT_TASK_KILL
+    call handle_get
+    cmp rax, E_ANY
+    jae .out
+    mov rdi, rax
+    mov rax, E_TYPE
+    cmp qword [rdi + TK_AS], 0
+    je .put
+    call task_kill
+    xor eax, eax
+.put:
+    call obj_put
+.out:
+    ret
+
+; sys_spawn(EDI = memory, RSI = offset, RDX = bytes there of "program
+; arguments", RCX = a handle to give it, or 0) -> RAX = a handle to the task
+; it started, RDX = to its first thread (RO_JOIN for what it returns). The
+; main thread reads the file, so it does the loading; this thread waits for
+; it, and is not cut short meanwhile.
+sys_spawn:
+    push rbx
+    push r12
+    push r13
+    sub rsp, SR_SIZE
+    mov rbx, rsp                        ; RBX = the request
+    mov [rbx + SR_GIFT], ecx
+    mov qword [rbx + SR_TEXT], 0
+    mov r12d, edi
+    mov r13, rsi
+    mov rax, E_ARG
+    test rdx, rdx
+    jz .out
+    cmp rdx, SPAWN_TEXT_MAX
+    ja .out
+    push rdx
+    lea rdi, [rdx + 1]                  ; zeroed: NUL-ended
+    call kmalloc
+    pop rcx
+    test rax, rax
+    jz .nomem
+    mov [rbx + SR_TEXT], rax
+    mov edi, r12d
+    mov rsi, r13
+    mov rdx, rax
+    call h_mem_read
+    cmp rax, E_ANY
+    jae .free
+    call cur_task
+    mov [rbx + SR_TASK], rax
+    mov rcx, rax
+    mov rax, E_KILLED
+    test byte [rcx + TK_KILL], 1
+    jnz .free
+    xor edx, edx                        ; how many programs above it
+.depth:
+    mov rcx, [rcx + TK_PARENT]
+    test rcx, rcx
+    jz .shallow
+    cmp qword [rcx + TK_AS], 0
+    je .shallow
+    inc edx
+    cmp edx, SPAWN_DEPTH
+    jb .depth
+    mov rax, E_FULL
+    jmp .free
+.shallow:
+    mov dword [rbx + SR_DONE], 0
+    mov rax, [gs:PC_CURRENT]
+    mov [rbx + SR_THREAD], rax
+    pushfq
+    cli
+    lea rdi, [spawn_lock]
+    call spin_lock
+    mov rax, [spawn_tail]               ; last in line
+    mov qword [rbx + SR_NEXT], 0
+    test rax, rax
+    jz .first
+    mov [rax + SR_NEXT], rbx
+    jmp .queued
+.first:
+    mov [spawn_list], rbx
+.queued:
+    mov [spawn_tail], rbx
+    lea rdi, [spawn_lock]
+    call spin_unlock
+    popfq
+    mov rdi, [main_thread]
+    call thread_unpark
+.wait:
+    cmp dword [rbx + SR_DONE], 0
+    jne .done
+    call thread_park
+    jmp .wait
+.done:
+    mov rax, [rbx + SR_RAX]
+    mov rdx, [rbx + SR_RDX]
+    jmp .free_rdx
+.free:
+    xor edx, edx
+.free_rdx:
+    push rax
+    push rdx
+    mov rdi, [rbx + SR_TEXT]
+    call kfree
+    pop rdx
+    pop rax
+    jmp .back
+.nomem:
+    mov rax, E_NOMEM
+.out:
+    xor edx, edx
+.back:
+    add rsp, SR_SIZE
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+; spawn_service: on the main thread, each program a program asked for, loaded
+spawn_service:
+    push rbx
+    push r12
+.next:
+    cmp qword [spawn_list], 0
+    je .out
+    pushfq
+    cli
+    lea rdi, [spawn_lock]
+    call spin_lock
+    mov rbx, [spawn_list]
+    test rbx, rbx
+    jz .unlock
+    mov rax, [rbx + SR_NEXT]
+    mov [spawn_list], rax
+    test rax, rax
+    jnz .unlock
+    mov [spawn_tail], rax
+.unlock:
+    lea rdi, [spawn_lock]
+    call spin_unlock
+    popfq
+    test rbx, rbx
+    jz .out
+    call spawn_one
+    mov r12, [rbx + SR_THREAD]          ; the request is gone once it is done
+    mov rdi, r12
+    call obj_get
+    mov dword [rbx + SR_DONE], 1
+    call thread_unpark
+    call obj_put
+    jmp .next
+.out:
+    pop r12
+    pop rbx
+    ret
+
+; spawn_one(RBX = a request): its program loaded, a child of the task that
+; asked, which gets handles to it and its first thread
+spawn_one:
+    push r12
+    push r13
+    mov qword [rbx + SR_RDX], 0
+    mov rsi, [rbx + SR_TEXT]
+    call arg_split
+    mov rax, E_ARG
+    cmp byte [rsi], 0
+    je .said
+    mov r12, rdi                        ; its arguments
+    call user_path
+    mov rcx, [rbx + SR_TASK]
+    mov rax, E_KILLED
+    test byte [rcx + TK_KILL], 1
+    jnz .said
+    lea rdi, [user_path_buf]
+    mov rsi, r12
+    lea rdx, [user_name_buf]
+    mov r8d, [rbx + SR_GIFT]
+    call user_load
+    test rax, rax
+    jz .failed
+    mov r12, rax                        ; the task, R13 its first thread
+    mov r13, rdx
+    mov rdi, r12
+    call obj_get                        ; ours, while we look
+    mov rdi, [rbx + SR_TASK]
+    mov rsi, r12
+    mov edx, SPAWN_TASK_RIGHTS
+    call cap_new
+    mov [rbx + SR_RAX], rax
+    cmp rax, E_ANY
+    jae .no_task
+    mov rdi, [rbx + SR_TASK]
+    mov rsi, r13
+    mov edx, SPAWN_THREAD_RIGHTS
+    call cap_new
+    mov [rbx + SR_RDX], rax
+    cmp rax, E_ANY
+    jae .no_thread
+    mov rax, [rbx + SR_TASK]            ; killed meanwhile: so is this
+    test byte [rax + TK_KILL], 1
+    jz .put
+    jmp .kill
+.no_thread:                             ; the task's handle stays, and says it was killed
+    mov [rbx + SR_RAX], rax
+    mov qword [rbx + SR_RDX], 0
+    jmp .kill
+.no_task:
+    mov rdi, r13
+    call obj_put
+.kill:
+    mov rdi, r12
+    call task_kill
+.put:
+    mov rdi, r12
+    call obj_put
+    jmp .out
+.failed:
+    mov rax, rdx
+.said:
+    mov [rbx + SR_RAX], rax
+.out:
+    pop r13
+    pop r12
+    ret
+
 ; user_thread(RDI = entry, RSI = RSP, RDX = RDI, RCX = task) -> RAX = a
 ; thread of that task to run in ring 3, not started, with its own reference
 ; and the caller's; 0 if out of memory
@@ -492,50 +796,138 @@ user_thread:
 
 ; user_map(EDI = a handle to memory) -> RAX = where the current task has its
 ; window now: writable if the handle allows writing (it must allow reading),
-; whole pages only
+; whole pages only. Mapped already: where it is. The mapping is the
+; capability's (CAP_MAPVA), and goes with it.
 user_map:
     push rbx
+    push rbp
     push r12
     push r13
-    mov r12d, edi
-    call handle_info                    ; RDX = its rights
-    cmp rax, E_ANY
-    jae .out
-    mov r13d, edx
-    mov edi, r12d
+    push r14
+    push r15
+    push rdi                            ; [rsp] = the handle
     mov esi, OT_MEMORY
     mov edx, RT_MEM_READ
     call handle_get                     ; RDX, RCX = the window
     cmp rax, E_ANY
     jae .out
-    mov rbx, rax
+    mov rbx, rax                        ; RBX = the memory, a reference
+    mov r14, rdx
+    mov r15, rcx
     mov rax, E_ARG
-    test rcx, rcx
+    test r15, r15
     jz .put
-    mov r8, rdx
-    or r8, rcx
+    mov r8, r14
+    or r8, r15
     test r8d, 0xFFF
     jnz .put
     call cur_task
-    mov rdi, [rax + TK_AS]
+    mov r12, rax                        ; R12 = this task, for cap_find
+    mov rbp, [r12 + TK_AS]
     mov rax, E_ARG
-    test rdi, rdi
+    test rbp, rbp
     jz .put                             ; a task with no address space
+    CAP_LOCK                            ; mapped already? and its rights
+    mov esi, [rsp + 8]
+    call cap_find
+    cmp rax, E_ANY
+    jae .early
+    mov r13d, [rax + CAP_RIGHTS]
+    mov rax, [rax + CAP_MAPVA]
+.early:
+    CAP_UNLOCK
+    test rax, rax
+    jnz .put                            ; refused just now, or mapped: that
+    mov rdi, rbp
     mov rsi, rbx
+    mov rdx, r14
+    mov rcx, r15
     mov r8d, UF_RO
     test r13d, RT_MEM_WRITE
     jz .flags
     mov r8d, UF_RW
 .flags:
     or r8, [vmm_nx]
-    call as_map_mem
+    call as_map_mem                     ; the reference goes into the mapping
     cmp rax, E_ANY
-    jb .out                             ; the reference went into the mapping
+    jae .put
+    mov r14, rax                        ; R14 = where
+    CAP_LOCK                            ; the capability's, if it is still there
+    mov esi, [rsp + 8]
+    call cap_find
+    cmp rax, E_ANY
+    jae .lost
+    cmp [rax + CAP_OBJ], rbx
+    mov rcx, E_BADH
+    jne .lost_rcx
+    mov rcx, [rax + CAP_MAPVA]          ; another thread mapped it meanwhile
+    test rcx, rcx
+    jnz .lost_rcx
+    mov [rax + CAP_MAPVA], r14
+    mov [rax + CAP_MAPLEN], r15
+    CAP_UNLOCK
+    mov rax, r14
+    jmp .out
+.lost_rcx:
+    mov rax, rcx
+.lost:                                  ; RAX = what to say: ours goes again
+    CAP_UNLOCK
+    push rax
+    mov rdi, rbp
+    mov rsi, r14
+    call as_take
+    mov rdx, rax
+    mov rdi, rbx
+    mov rsi, r14
+    call unmap_flush
+    pop rax
+    jmp .out
 .put:
+    push rax
     mov rdi, rbx
     call obj_put
+    pop rax
 .out:
+    pop rdi
+    pop r15
+    pop r14
     pop r13
+    pop r12
+    pop rbp
+    pop rbx
+    ret
+
+; sys_unmap(EDI = a handle to memory this task has mapped) -> RAX = 0: the
+; mapping goes, and the handle stays
+sys_unmap:
+    push rbx
+    push r12
+    call cur_task
+    mov r12, rax
+    CAP_LOCK
+    mov esi, edi
+    call cap_find
+    cmp rax, E_ANY
+    jae .refused
+    mov rdi, rax
+    mov rax, E_ARG
+    cmp qword [rdi + CAP_MAPVA], 0
+    je .refused
+    call cap_unmap
+    mov rbx, [rdi + CAP_OBJ]
+    xor esi, esi
+    xor edx, edx
+    xchg rsi, [rdi + CAP_MAPVA]
+    xchg rdx, [rdi + CAP_MAPLEN]
+    CAP_UNLOCK
+    mov rdi, rbx
+    call unmap_flush
+    xor eax, eax
+    jmp .out
+.refused:
+    CAP_UNLOCK
+.out:
+    xor edx, edx
     pop r12
     pop rbx
     ret
@@ -588,9 +980,8 @@ as_destroy:
 .map:
     cmp r12d, [rbx + AS_NMAPS]
     jae .tables
-    mov eax, r12d
-    shl eax, 4
-    mov rdi, [rbx + rax + AS_MAPS]
+    imul eax, r12d, AM_SIZE
+    mov rdi, [rbx + rax + AS_MAPS + AM_OBJ]
     call obj_put
     inc r12d
     jmp .map
@@ -815,10 +1206,10 @@ as_map_mem:
     add rcx, 4096
     jmp .page
 .mapped:
-    mov eax, [rbx + AS_NMAPS]
-    shl eax, 4
-    mov [rbx + rax + AS_MAPS], r12
-    mov [rbx + rax + AS_MAPS + 8], rbp
+    imul eax, [rbx + AS_NMAPS], AM_SIZE
+    mov [rbx + rax + AS_MAPS + AM_OBJ], r12
+    mov [rbx + rax + AS_MAPS + AM_VA], rbp
+    mov [rbx + rax + AS_MAPS + AM_LEN], r14
     inc dword [rbx + AS_NMAPS]
     lea rax, [rbp + r14 + 4096]         ; and a guard page
     mov [rbx + AS_NEXT], rax
@@ -836,6 +1227,145 @@ as_map_mem:
     pop r12
     pop rbp
     pop rbx
+    ret
+
+; as_take(RDI = address space, RSI = where a mapping is) -> RAX = its bytes,
+; 0 if there is none: its PTEs cleared and it gone, its reference the
+; caller's to drop once the TLBs are flushed (unmap_flush). cap_lock may be
+; held. Preserves others.
+as_take:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    mov rbx, rdi
+    pushfq
+    cli
+    lea rdi, [rbx + AS_LOCK]
+    call spin_lock
+    xor ecx, ecx
+.find:
+    cmp ecx, [rbx + AS_NMAPS]
+    jae .none
+    imul eax, ecx, AM_SIZE
+    lea r8, [rbx + rax + AS_MAPS]
+    cmp [r8 + AM_VA], rsi
+    je .found
+    inc ecx
+    jmp .find
+.found:
+    mov rdx, [r8 + AM_LEN]
+    xor ecx, ecx
+.page:
+    cmp rcx, rdx
+    jae .cleared
+    push rsi
+    add rsi, rcx
+    mov rdi, rbx
+    call as_pte                         ; its tables are there: never 0
+    pop rsi
+    mov qword [rax], 0
+    add rcx, 4096
+    jmp .page
+.cleared:
+    dec dword [rbx + AS_NMAPS]          ; the last one into its place
+    imul eax, [rbx + AS_NMAPS], AM_SIZE
+    lea rcx, [rbx + rax + AS_MAPS]
+    mov rax, [rcx + AM_OBJ]
+    mov [r8 + AM_OBJ], rax
+    mov rax, [rcx + AM_VA]
+    mov [r8 + AM_VA], rax
+    mov rax, [rcx + AM_LEN]
+    mov [r8 + AM_LEN], rax
+    mov rax, rdx
+    jmp .unlock
+.none:
+    xor eax, eax
+.unlock:
+    lea rdi, [rbx + AS_LOCK]
+    call spin_unlock
+    popfq
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; cap_unmap(RDI = a capability), cap_lock held: if its holder has it mapped,
+; the mapping's PTEs go, and CAP_MAPLEN says what cap_flush is to flush (0:
+; nothing was there). Preserves all.
+cap_unmap:
+    cmp qword [rdi + CAP_MAPVA], 0
+    je .out
+    push rax
+    push rsi
+    push rdi
+    mov rsi, [rdi + CAP_MAPVA]
+    mov rax, [rdi + CAP_TASK]
+    mov rdi, [rax + TK_AS]
+    call as_take
+    pop rdi
+    mov [rdi + CAP_MAPLEN], rax
+    pop rsi
+    pop rax
+.out:
+    ret
+
+; cap_flush(RDI = a capability cap_unmap took the mapping of, no lock held):
+; the TLBs flushed, then the mapping's reference dropped. Preserves all.
+cap_flush:
+    push rdx
+    push rsi
+    push rdi
+    xor esi, esi
+    xor edx, edx
+    xchg rsi, [rdi + CAP_MAPVA]
+    xchg rdx, [rdi + CAP_MAPLEN]
+    mov rdi, [rdi + CAP_OBJ]
+    call unmap_flush
+    pop rdi
+    pop rsi
+    pop rdx
+    ret
+
+; unmap_flush(RDI = memory, RSI = where it was mapped, RDX = bytes, 0 for
+; nothing): every CPU forgets it, then the mapping's reference goes. No lock
+; held. Preserves all.
+unmap_flush:
+    test rsi, rsi
+    jz .out
+    test rdx, rdx
+    jz .out
+    push rax
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push rdi
+    mov rdi, rsi
+    mov rsi, rdx
+    shr rsi, 12
+    call tlb_shootdown
+    pop rdi
+    call obj_put
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rax
+.out:
     ret
 
 ; -----------------------------------------------------------------------------
@@ -956,12 +1486,16 @@ user_load:
     push r13
     push r14
     push r15
-    sub rsp, 8
-    mov r12, rdi
-    mov r13, rsi
-    mov r15, rdx
+    sub rsp, 56                         ; [rsp] = the entry, [rsp + 8] = a
+    mov r12, rdi                        ; buffer of its own, [rsp + 16] = the
+    mov r13, rsi                        ; buffer's size, [rsp + 24] = what to
+    mov r15, rdx                        ; say if it fails, [rsp + 32] = the
+    mov [rsp + 32], rcx                 ; task starting it, [rsp + 40] = the
+    mov [rsp + 40], r8                  ; gift
+    mov qword [rsp + 24], E_ARG
     xor r14d, r14d                      ; no task yet
     xor ebp, ebp                        ; no start block yet
+    mov [rsp + 8], r14
     push r14
     call log_volume                     ; the boot stick, or the volume chosen
     jnc .volume
@@ -973,15 +1507,32 @@ user_load:
     mov ecx, FAT_FILE_MAX
     call fat_read_file
     jc .no_volume
-    pop r14
+    lea rbx, [fat_file]
+    mov qword [rsp + 24], FAT_FILE_MAX
     cmp rdx, FAT_FILE_MAX
-    ja .too_big
-    lea rbx, [fat_file]                 ; the header, then
-    cmp rax, AXE_HDR
+    jbe .read
+    cmp rdx, USER_IMAGE_MAX             ; larger: a buffer of its own
+    ja .too_big_pop
+    lea rdi, [rdx + 8191]               ; a page to spare
+    and rdi, -4096
+    mov [rsp + 24], rdi
+    call vm_alloc
+    test rax, rax
+    jz .nomem_pop
+    mov [rsp + 16], rax
+    mov rbx, rax
+    mov rsi, r12
+    mov rdi, rbx
+    mov rcx, [rsp + 24]
+    call fat_read_file
+    jc .no_volume
+.read:
+    pop r14
+    cmp rax, AXE_HDR                    ; the header, then
     jb .not_axe
     lea rdi, [rbx + rax]                ; past the end of the file, zeroes (a
-    mov ecx, FAT_FILE_MAX               ; section may end before its page does)
-    sub ecx, eax
+    mov rcx, [rsp + 16]                 ; section may end before its page does)
+    sub rcx, rax
     xor eax, eax
     rep stosb
     mov rax, 'AXIOMEX1'
@@ -1009,7 +1560,7 @@ user_load:
     ja .not_axe
     mov r11, rdx                        ; the file holds all but the zeroes
     sub r11, r10
-    cmp r11, FAT_FILE_MAX
+    cmp r11, [rsp + 16]
     ja .not_axe
     mov r11, [rbx + AXE_ENTRY]          ; and the entry is code
     lea r10, [r10 + AXE_HDR]
@@ -1018,8 +1569,12 @@ user_load:
     cmp r11, rax
     jae .not_axe
 
-    call cur_task                       ; the task
+    mov rsi, [rsp + 32]                 ; the task
+    test rsi, rsi
+    jnz .parent
+    call cur_task
     mov rsi, rax
+.parent:
     mov rdi, r15
     call task_new
     test rax, rax
@@ -1075,7 +1630,8 @@ user_load:
     test rax, rax
     jnz .nomem
     mov rax, [rbx + AXE_ENTRY]
-    mov [rsp], rax                      ; (the file buffer is free from here)
+    mov [rsp], rax                      ; the file's buffer is free from here
+    call user_load_free
 
     mov edi, 4096                       ; the start block
     call kmalloc
@@ -1121,6 +1677,16 @@ user_load:
     jae .as_us
     mov [rbp + SB_CONSOLE], eax
     xor eax, eax
+    mov esi, [rsp + 8 + 40]             ; and what it is given
+    test esi, esi
+    jz .as_us
+    mov rdi, [rsp + 8 + 32]
+    mov rdx, r14
+    call task_give
+    cmp rax, E_ANY
+    jae .as_us
+    mov [rbp + SB_GIFT], eax
+    xor eax, eax
 .as_us:
     mov rcx, [gs:PC_CURRENT]
     pop qword [rcx + TH_TASK]
@@ -1148,6 +1714,7 @@ user_load:
     test rax, rax
     jz .nomem
     mov rbx, rax
+    or qword [rbx + TH_FLAGS], TF_FIRST
     mov rdi, rbx
     call thread_start
     lock inc qword [user_started]
@@ -1155,23 +1722,31 @@ user_load:
     mov rdx, rbx
     jmp .out
 
+.too_big_pop:
+    pop r14
+    KLOG "run: %s is larger than %u bytes", r12, qword USER_IMAGE_MAX
+    mov qword [rsp + 24], E_RANGE
+    jmp .fail
+.nomem_pop:
+    pop r14
+    jmp .nomem
 .no_volume:
     pop r14
-    jmp .fail
-.too_big:
-    KLOG "run: %s is larger than %u bytes", r12, qword FAT_FILE_MAX
     jmp .fail
 .not_axe:
     KLOG "run: %s is not an Axiom program", r12
     jmp .fail
 .refused:
+    mov [rsp + 24], rax
     mov rdi, rax
     call err_text
     KLOG "run: %s", rax
     jmp .fail
 .nomem:
     KLOG "run: out of memory"
+    mov qword [rsp + 24], E_NOMEM
 .fail:
+    call user_load_free
     test rbp, rbp
     jz .no_block
     mov rdi, rbp
@@ -1183,8 +1758,9 @@ user_load:
     call obj_put
 .none:
     xor eax, eax
+    mov rdx, [rsp + 24]
 .out:
-    add rsp, 8
+    add rsp, 56
     pop r15
     pop r14
     pop r13
@@ -1193,17 +1769,52 @@ user_load:
     pop rbx
     ret
 
+; user_load_free: from user_load, its buffer for a file larger than
+; fat_file, if it has one (at its [rsp + 8]). Preserves all.
+user_load_free:
+    push rax
+    push rdi
+    xor edi, edi
+    xchg rdi, [rsp + 32]
+    test rdi, rdi
+    jz .out
+    call vm_free
+.out:
+    pop rdi
+    pop rax
+    ret
+
 user_wait:
     push rbx
     push r12
     mov rbx, rdi
-    mov rdi, rsi
+    mov r12, rsi
+.join:                                  ; on the main thread, it loads what the
+    mov rax, [gs:PC_CURRENT]            ; program starts meanwhile
+    cmp rax, [main_thread]
+    jne .joined
+    call spawn_service
+    RDTSC64
+    imul rdx, [tsc_per_us], 1000
+    add rdx, rax
+    lea rdi, [r12 + TH_WQ]
+    lea rsi, [r12 + TH_ENDED]
+    call wq_wait
+    test eax, eax
+    jz .join
+.joined:
+    mov rdi, r12
     call thread_join                    ; gives the reference back
     mov r12, rax
     mov rdi, rbx                        ; the first thread ended: so do the rest
     call task_kill
 .reap:
     call sched_reap
+    mov rax, [gs:PC_CURRENT]
+    cmp rax, [main_thread]
+    jne .reaped
+    call spawn_service
+.reaped:
     cmp dword [rbx + TK_THREADS], 0
     je .ended
     mov edi, 100
@@ -1252,6 +1863,8 @@ cmd_run:
     lea rdi, [user_path_buf]
     mov rsi, r12
     lea rdx, [user_name_buf]
+    xor ecx, ecx
+    xor r8d, r8d
     call user_load
     test rax, rax
     jz .out
@@ -1396,6 +2009,7 @@ user_waiter:
 
 ; user_service: from the main loop. A program that ended is said, and goes.
 user_service:
+    call spawn_service
     cmp byte [user_pending], 0
     je .out
     mov byte [user_pending], 0
@@ -1526,9 +2140,20 @@ user_test:
     jmp .kill
 
 .leaks:
+    mov r12d, 100                       ; tasks a program started end after it
+.settle:
+    call sched_reap
+    mov rax, [ty_task + TY_LIVE]
+    cmp rax, [ut_base]
+    jbe .settled
+    mov edi, 10000
+    call thread_sleep_us
+    dec r12d
+    jnz .settle
+.settled:
     lea rdi, [ut_now]
     call ut_counts
-    KLOG "user test: %u tasks (%u before), %u threads (%u), %u blocks of memory (%u), %u rings (%u), %u heap objects (%u), %u vm mappings (%u), %u user pages (%u), %u user page tables (%u)", qword [ut_now], qword [ut_base], qword [ut_now + 8], qword [ut_base + 8], qword [ut_now + 16], qword [ut_base + 16], qword [ut_now + 24], qword [ut_base + 24], qword [ut_now + 32], qword [ut_base + 32], qword [ut_now + 40], qword [ut_base + 40], qword [ut_now + 48], qword [ut_base + 48], qword [ut_now + 56], qword [ut_base + 56]
+    KLOG "user test: %u tasks (%u before), %u threads (%u), %u blocks of memory (%u), %u rings (%u), %u heap objects (%u), %u vm mappings (%u), %u user pages (%u), %u user page tables (%u), %u channel ends (%u)", qword [ut_now], qword [ut_base], qword [ut_now + 8], qword [ut_base + 8], qword [ut_now + 16], qword [ut_base + 16], qword [ut_now + 24], qword [ut_base + 24], qword [ut_now + 32], qword [ut_base + 32], qword [ut_now + 40], qword [ut_base + 40], qword [ut_now + 48], qword [ut_base + 48], qword [ut_now + 56], qword [ut_base + 56], qword [ut_now + 64], qword [ut_base + 64]
     xor ecx, ecx
 .compare:
     lea rdx, [ut_now]
@@ -1577,6 +2202,8 @@ ut_run:
     lea rdi, [user_path_buf]
     mov rsi, r12
     lea rdx, [user_name_buf]
+    xor ecx, ecx
+    xor r8d, r8d
     call user_load
     test rax, rax
     jz .none
@@ -1657,8 +2284,10 @@ ut_counts:
     mov [rdi + 48], rax
     mov rax, [user_tables]
     mov [rdi + 56], rax
+    mov rax, [ty_channel + TY_LIVE]
+    mov [rdi + 64], rax
     ret
-UT_COUNTS       equ 8
+UT_COUNTS       equ 9
 
 section .rodata
 str_ot_console: db 'console', 0
@@ -1684,6 +2313,9 @@ str_utf_stack:  db 'stack', 0
 str_utf_gp:     db 'gp', 0
 str_utf_int:    db 'int', 0
 str_utf_io:     db 'io', 0
+str_utf_unmap:  db 'unmap', 0
+str_utf_close:  db 'close', 0
+str_utf_revoke: db 'revoke', 0
 str_uts_4:      db '4', 0
 str_uts_wait:   db '3 wait', 0
 str_uts_fault:  db '3 fault', 0
@@ -1691,7 +2323,7 @@ str_uts_syscalls: db '3 calls', 0
 align 8
 ut_faults_list: dq str_utf_null, str_utf_write, str_utf_exec, str_utf_kernel, str_utf_priv
                 dq str_utf_ud, str_utf_div, str_utf_stack, str_utf_gp, str_utf_int
-                dq str_utf_io, 0
+                dq str_utf_io, str_utf_unmap, str_utf_close, str_utf_revoke, 0
 ; each: its arguments, what it returns, its kill bit 1, microseconds to the kill
 ut_kill_list:   dq str_uts_4, E_KILLED, 0, 20000         ; spinning in ring 3
                 dq str_uts_wait, E_KILLED, 0, 20000      ; parked in its ring
@@ -1699,11 +2331,16 @@ ut_kill_list:   dq str_uts_4, E_KILLED, 0, 20000         ; spinning in ring 3
                 dq str_uts_fault, E_KILLED, 2, 0         ; another thread faults: no kill
                 dq 0
 sys_table:      dq sys_exit, sys_ring_enter, sys_ring_new, sys_mem_new, sys_map
-                dq sys_event_new, sys_thread_new, sys_yield
+                dq sys_event_new, sys_thread_new, sys_yield, sys_unmap
+                dq sys_spawn, sys_channel_new
 
 section .bss
 alignb 8
 console_obj:    resq 1
+spawn_list:     resq 1                  ; requests for the main thread, oldest first
+spawn_tail:     resq 1
+spawn_lock:     resd 1
+alignb 8
 user_task:      resq 1                  ; the program 'run' started, a reference
 user_first:     resq 1                  ; its first thread, until user_wait
 user_exit:      resq 1

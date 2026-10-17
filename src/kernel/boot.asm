@@ -182,6 +182,8 @@ main_loop:
     jne .awake
     cmp byte [user_pending], 0
     jne .awake
+    cmp qword [spawn_list], 0           ; a program starting another
+    jne .awake
     mov rax, [next_refresh]             ; the next thing we have to do
     cmp byte [demo_on], 0
     je .arm

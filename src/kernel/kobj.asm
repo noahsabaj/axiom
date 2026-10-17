@@ -3,8 +3,9 @@
 ;  operations on them by handle
 ;
 ;  A task is who acts: it holds a handle table, and threads act for it. It
-;  ends once no thread acts for it and no handle to it is left: every handle
-;  it held is closed then (task_end), though what still refers to it (a
+;  ends once no thread acts for it and no handle to it is left, or once a
+;  task killed (user.asm) has no thread left: every handle it held is closed
+;  then (task_end), though what still refers to it (a
 ;  request waiting on a ring) keeps the object until it lets go.
 ;
 ;  An event is a flag threads wait for: signalled, it stays so until reset,
@@ -106,8 +107,11 @@ task_hold:
 task_release:
     lock dec dword [rdi + TK_THREADS]
     jnz obj_put
+    test byte [rdi + TK_KILL], 1        ; killed: no thread will act for it again
+    jnz .end
     cmp dword [rdi + OB_CAPS], 0
     jne obj_put
+.end:
     call task_end                       ; its last thread, and no handle to it
     jmp obj_put
 
