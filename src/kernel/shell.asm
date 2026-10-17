@@ -1,5 +1,5 @@
 ; =============================================================================
-;  shell.asm - a small command line in the console panel
+;  shell.asm - a small command line, one in each terminal (term.asm)
 ; =============================================================================
 
 LINE_MAX        equ 1000
@@ -18,51 +18,39 @@ shell_prompt:
     call kputs
     mov edi, COL_TEXT
     call con_set_color
-    call sh_flush
     pop rdi
     ret
 
-; sh_echo(AL): one character to the console, shown at once. Preserves all.
+; sh_echo(AL): one character to the terminal. Preserves all.
 sh_echo:
-    push rdi
-    pushfq
-    cli
-    lea rdi, [print_lock]
-    call spin_lock
-    call con_putc
-    call con_flush
-    lea rdi, [print_lock]
-    call spin_unlock
-    popfq
-    pop rdi
-    ret
+    jmp con_putc
 
-sh_flush:
-    push rdi
-    pushfq
-    cli
-    lea rdi, [print_lock]
-    call spin_lock
-    call con_flush
-    lea rdi, [print_lock]
-    call spin_unlock
-    popfq
-    pop rdi
-    ret
-
-; shell_wait: the command runs on (a fetch); the prompt waits for
-; shell_resume, and keys but ctrl+C are ignored meanwhile. Preserves all.
+; shell_wait: the command runs on (a fetch); the prompt of the terminal it
+; prints to waits for shell_resume, and keys but ctrl+C are ignored
+; meanwhile. Preserves all.
 shell_wait:
-    mov byte [sh_wait], 1
+    push rax
+    call con_target
+    test rax, rax
+    jz .out
+    mov byte [rax + TW_SH_WAIT], 1
+.out:
+    pop rax
     ret
 
-; shell_resume: what the prompt waited for is over. Preserves all.
+; shell_resume: what the prompt of the terminal this thread prints to
+; waited for is over. Preserves all.
 shell_resume:
-    cmp byte [sh_wait], 0
+    push rax
+    call con_target
+    test rax, rax
+    jz .out
+    cmp byte [rax + TW_SH_WAIT], 0
     je .out
-    mov byte [sh_wait], 0
+    mov byte [rax + TW_SH_WAIT], 0
     call shell_prompt
 .out:
+    pop rax
     ret
 
 ; sh_secret(RDI = line) -> CF if it sets a secret ('claude key <key>'):
@@ -107,12 +95,20 @@ sh_secret:
     pop rsi
     ret
 
-; shell_key(EAX = key code)
+; shell_key(EDI = key code), for the terminal this thread prints to (its
+; window has the keys)
 shell_key:
     push rbx
+    mov eax, edi
+    push rax
+    call con_target
+    mov rbx, rax
+    pop rax
+    test rbx, rbx
+    jz .out
     cmp eax, 3                          ; ctrl+C, always
     je .cancel
-    cmp byte [sh_wait], 0
+    cmp byte [rbx + TW_SH_WAIT], 0
     jne .out
     cmp eax, 10
     je .enter
@@ -126,14 +122,14 @@ shell_key:
     jb .out
     cmp eax, 126
     ja .out
-    mov ecx, [sh_len]
+    mov ecx, [rbx + TW_SH_LEN]
     cmp ecx, LINE_MAX
     jae .out
-    lea rdx, [sh_line]
+    lea rdx, [rbx + TW_SH_LINE]
     mov [rdx + rcx], al
     mov byte [rdx + rcx + 1], 0
-    inc dword [sh_len]
-    lea rdi, [sh_line]
+    inc dword [rbx + TW_SH_LEN]
+    lea rdi, [rbx + TW_SH_LINE]
     call sh_secret                      ; the key itself is not shown
     jnc .echo
     mov al, '*'
@@ -141,40 +137,42 @@ shell_key:
     call sh_echo
     jmp .out
 .backspace:
-    cmp dword [sh_len], 0
+    cmp dword [rbx + TW_SH_LEN], 0
     je .out
-    dec dword [sh_len]
+    dec dword [rbx + TW_SH_LEN]
     mov al, 8
     call sh_echo
     jmp .out
 .history:
     call sh_erase_line
-    lea rdi, [sh_line]
-    lea rsi, [sh_history]
+    lea rdi, [rbx + TW_SH_LINE]
+    lea rsi, [rbx + TW_SH_HIST]
     mov ecx, LINE_MAX
     rep movsb
-    xor ebx, ebx
+    xor ecx, ecx
 .retype:
-    lea rdx, [sh_line]
-    mov al, [rdx + rbx]
+    lea rdx, [rbx + TW_SH_LINE]
+    mov al, [rdx + rcx]
     test al, al
     jz .retyped
     call sh_echo
-    inc ebx
+    inc ecx
     jmp .retype
 .retyped:
-    mov [sh_len], ebx
+    mov [rbx + TW_SH_LEN], ecx
     jmp .out
 .clear:
     call con_clear
-    mov dword [sh_len], 0
+    mov dword [rbx + TW_SH_LEN], 0
     call shell_prompt
     jmp .out
 .cancel:
-    mov byte [sh_wait], 0               ; (the prompt comes back below)
-    call net_cancel                     ; a ping, a lookup or a fetch stops
-    call user_cancel                    ; and a program
-    mov dword [sh_len], 0
+    mov byte [rbx + TW_SH_WAIT], 0      ; (the prompt comes back below)
+    mov rdi, rbx                        ; what this terminal started stops:
+    call net_forget                     ; a ping, a lookup or a fetch,
+    mov rdi, rbx
+    call user_forget                    ; and a program
+    mov dword [rbx + TW_SH_LEN], 0
     lea rdi, [str_ctrl_c]
     call kputs
     call shell_prompt
@@ -182,15 +180,19 @@ shell_key:
 .enter:
     mov al, 10
     call sh_echo
-    mov ecx, [sh_len]
-    lea rdx, [sh_line]
+    mov ecx, [rbx + TW_SH_LEN]
+    lea rdx, [rbx + TW_SH_LINE]
     mov byte [rdx + rcx], 0
     test ecx, ecx
     jz .empty
+    lea rdi, [sh_line]                  ; the command line, for the command
+    lea rsi, [rbx + TW_SH_LINE]
+    mov ecx, LINE_MAX + 1
+    rep movsb
     lea rdi, [sh_line]
     call sh_secret
     jc .secret
-    lea rdi, [sh_history]
+    lea rdi, [rbx + TW_SH_HIST]
     lea rsi, [sh_line]
     mov ecx, LINE_MAX + 1
     rep movsb
@@ -201,24 +203,25 @@ shell_key:
     lea rdi, [str_sh_secret]
     call log_command
 .exec:
+    mov dword [rbx + TW_SH_LEN], 0
     call shell_exec
-    mov dword [sh_len], 0
-    cmp byte [sh_wait], 0
+    cmp byte [rbx + TW_SH_WAIT], 0
     jne .out
     call shell_prompt
     jmp .out
 .empty:
-    mov dword [sh_len], 0
+    mov dword [rbx + TW_SH_LEN], 0
     call shell_prompt
 .out:
     pop rbx
     ret
 
+; sh_erase_line (RBX = terminal): what was typed, rubbed out
 sh_erase_line:
 .next:
-    cmp dword [sh_len], 0
+    cmp dword [rbx + TW_SH_LEN], 0
     je .done
-    dec dword [sh_len]
+    dec dword [rbx + TW_SH_LEN]
     mov al, 8
     call sh_echo
     jmp .next
@@ -527,6 +530,8 @@ section .data
 align 8
 commands:
     COMMAND 'help',     cmd_help,     'this list'
+    COMMAND 'shell',    cmd_shell,    'a new shell, in a window of its own'
+    COMMAND 'win',      cmd_win,      'win [move <n> <x> <y> | size <n> <w> <h> | raise <n> | min <n> | close <n>]: the windows'
     COMMAND 'info',     cmd_info,     'what this machine is'
     COMMAND 'cpus',     cmd_cpus,     'each logical CPU: kind, clock, heat, work'
     COMMAND 'mem',      cmd_mem,      'mem [test | <hex address>]: memory by type and use, a self-test, or what is at an address'
@@ -597,13 +602,10 @@ mem_type_names:
 demo_on:        db 0
 
 section .bss
-sh_len:         resd 1
-sh_wait:        resb 1
 alignb 8
 sh_args:        resq 1
 sh_word:        resb 32
 sh_line:        resb LINE_MAX + 8
-sh_history:     resb LINE_MAX + 8
 
 section .bss
 sh_clock:       resb 16

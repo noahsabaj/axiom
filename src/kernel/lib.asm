@@ -464,8 +464,9 @@ format:
     ret
 
 ; -----------------------------------------------------------------------------
-;  kprint(RSI fmt, RDX args): format a log line, send it to the serial port and,
-;  during boot, to the screen. Safe from any CPU. Preserves all.
+;  kprint(RSI fmt, RDX args): format a log line, send it to the serial port,
+;  the log and the terminal this thread prints to. Safe from any CPU.
+;  Preserves all.
 ; -----------------------------------------------------------------------------
 kprint:
     push rax
@@ -481,16 +482,15 @@ kprint:
     cmp byte [log_to_screen], 0
     je .unlock
     call con_write
-    call con_flush
 .unlock:
     lea rdi, [print_lock]
     call spin_unlock
     popfq
     pop rdi
     pop rax
-    ret
+    jmp con_flush
 
-; kputs(RDI string): text to the console only (shell output). Preserves all.
+; kputs(RDI string): text to the terminal only (shell output). Preserves all.
 kputs:
     push rdi
     pushfq

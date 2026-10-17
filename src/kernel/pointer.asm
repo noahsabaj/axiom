@@ -1,13 +1,10 @@
 ; =============================================================================
 ;  pointer.asm - the mouse pointer. HID drivers (USB or Bluetooth) post
 ;  movement with pointer_event from interrupt context; the main loop applies
-;  it in pointer_service, moves the cursor and turns buttons and the wheel
-;  into actions. The cursor lives only on the screen: gfx_blit repaints it
-;  over whatever it copies, so the back buffer never contains it.
-;
-;  Mouse actions on the Mandelbrot view: left click centres on the point,
-;  the wheel zooms around it, right click holds or resumes the zoom, middle
-;  click goes back to the start.
+;  it in pointer_service, moves the cursor and hands buttons, the wheel and
+;  movement to the desk (desk.asm). The cursor lives only on the screen:
+;  gfx_blit repaints it over whatever it copies, so the back buffer never
+;  contains it.
 ; =============================================================================
 
 PTR_RING        equ 64                  ; events, 16 bytes each
@@ -99,38 +96,54 @@ pointer_service:
     add [ptr_y], rax
 .moved:
     call pointer_clamp
+    mov byte [ptr_moved], 1
     pop rcx
-    mov eax, ecx                        ; buttons pressed in this event
-    mov edx, [ptr_buttons]
-    not edx
-    and eax, edx
-    mov [ptr_buttons], ecx
-    test eax, 1
-    jz .right
-    push rax
-    mov edx, 1
-    call pointer_click
-    pop rax
-.right:
-    test eax, 2
-    jz .middle
-    push rax
-    mov edx, 2
-    call pointer_click
-    pop rax
-.middle:
-    test eax, 4
+    mov eax, ecx                        ; buttons that changed
+    xor eax, [ptr_buttons]
     jz .wheel
-    mov edx, 3
-    call pointer_click
+    push rax
+    push rcx
+    call desk_motion                    ; where it went first
+    mov byte [ptr_moved], 0
+    pop rcx
+    pop rax
+    mov [ptr_buttons], ecx
+    xor edx, edx                        ; each of the three
+.button:
+    inc edx
+    bt eax, 0
+    jnc .same
+    push rax
+    push rcx
+    push rdx
+    bt ecx, 0
+    jnc .let_go
+    call desk_press
+    jmp .told
+.let_go:
+    call desk_release
+.told:
+    pop rdx
+    pop rcx
+    pop rax
+.same:
+    shr eax, 1
+    shr ecx, 1
+    cmp edx, 3
+    jb .button
 .wheel:
     movsx edx, r14w
     test edx, edx
     jz .next
-    call pointer_wheel
+    call desk_wheel
     jmp .next
 .drained:
     sti
+    cmp byte [ptr_moved], 0
+    je .still
+    mov byte [ptr_moved], 0
+    call desk_motion
+.still:
     call cursor_move
     pop r14
     pop r13
@@ -187,41 +200,6 @@ pointer_clamp:
     cmp rax, rcx
     cmovg rax, rcx
     mov [ptr_y], rax
-    ret
-
-; pointer_in_view -> CF = 0 and RDI, RSI = position inside the Mandelbrot view
-pointer_in_view:
-    mov rdi, [ptr_x]
-    sub rdi, [m_view_x]
-    jb .out
-    cmp rdi, [m_width]
-    jae .no
-    mov rsi, [ptr_y]
-    sub rsi, [m_view_y]
-    jb .out
-    cmp rsi, [m_height]
-    jae .no
-    clc
-    ret
-.no:
-    stc
-.out:
-    ret
-
-; pointer_click(EDX = button 1 left, 2 right, 3 middle)
-pointer_click:
-    call pointer_in_view
-    jc .out
-    call mandel_click
-.out:
-    ret
-
-; pointer_wheel(EDX = signed notches, up is positive)
-pointer_wheel:
-    call pointer_in_view
-    jc .out
-    call mandel_wheel
-.out:
     ret
 
 ; -----------------------------------------------------------------------------
@@ -408,6 +386,7 @@ cursor_art:
 
 section .data
 cursor_shown:   db 0
+ptr_moved:      db 0                    ; since the desk last heard
 
 section .bss
 alignb 8

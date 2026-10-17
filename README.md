@@ -2,7 +2,7 @@
 
 An operating system written entirely in x86-64 assembly, booting straight from
 UEFI onto the hardware that is actually present. No C, no libc, no GRUB, no
-borrowed kernel: about sixty-three thousand lines of NASM, top to bottom.
+borrowed kernel: about seventy-three thousand lines of NASM, top to bottom.
 
 Why it exists and where it is going: [docs/VISION.md](docs/VISION.md).
 How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
@@ -17,10 +17,18 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   sensor) and package power (RAPL).
 - A Mandelbrot zoom in AVX2 + FMA running on all cores at once, with a
   one-core-versus-all benchmark.
+- **A desktop of windows**: System, Processors, the Mandelbrot and each
+  shell are overlapping windows, dragged by their title bars, resized from
+  the corner, raised and given the keys by a click, minimised and closed by
+  their buttons; a bar across the top lists them. `+ shell` on the bar (or
+  `shell`) opens another shell, each with its own output, scroll-back (the
+  wheel), history and commands running; what a command prints later goes to
+  the shell it was typed in. `win` lists the windows and moves, sizes,
+  raises, minimises or closes one.
 - **USB** on every xHCI controller: hubs (nested, USB 2 and 3), hot-plug, and a
   HID report parser for keyboards (6-key and N-key rollover), mice and tablets.
-  A mouse cursor: click to recentre the Mandelbrot, wheel to zoom, right click
-  to hold, middle click to start over.
+  A mouse cursor: in the Mandelbrot's window, click to recentre it, wheel to
+  zoom, right click to hold, middle click to start over.
 - **NVMe SSDs**, an I/O queue pair per CPU, each completing on its own CPU's
   interrupt (`nvme`, `nvme test`), and **USB sticks** (hot-plug too), GPT and
   MBR partitions, and
@@ -59,7 +67,7 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   and PSS) and ECDSA on P-256 and P-384. The crypto is checked against the published vectors at
   every boot; `crypto` repeats the check and times each.
 - A shell over a USB keyboard, a PS/2 keyboard or the serial port. Commands:
-  `help info cpus mem threads objects rings run user pci acpi iommu usb disks nvme store vol ls cd cat cp
+  `help info cpus mem threads objects rings run user win shell pci acpi iommu usb disks nvme store vol ls cd cat cp
   write mkdir rm date net ip ip6 dhcp ping host arp http httpd ask claude tcp crypto log demo bench
   uptime echo clear panic reboot poweroff`.
 - **A log on the boot stick**: everything Axiom prints, the commands typed
@@ -152,7 +160,10 @@ and the shell answers between frames, so type `demo` to stop the zoom.
 Headless runs wait for the shell's first prompt line instead of a fixed time,
 and `until TEXT` in `--script` waits for TEXT to appear in the log after the
 last text typed. `type TEXT` sends TEXT down the serial port all at once, as
-a terminal would; `press TEXT` types it on the keyboard, key by key. With
+a terminal would; `press TEXT` types it on the keyboard, key by key. `abs X Y [button]`,
+`drag X1 Y1 X2 Y2` and `wheel X Y N` work a USB tablet (QEMU's 0..32767 on
+each axis; add it with `--extra "-device qemu-xhci,id=ux -device
+usb-tablet,bus=ux.0"`), as `tools/test/desk` does. With
 `--port 0` a run takes ports nobody uses and firmware variables of its own,
 so several can boot side by side. A scripted check that used to sleep
 through a minute takes a few seconds:
@@ -261,7 +272,7 @@ Tested target: HP Victus 15L (i7-14700F, 64 GB, RTX 4060 Ti), AMI UEFI.
    On the Victus it already is.
 4. Plug in the stick, power on and tap **F9** for the boot menu. Pick the USB
    stick (the "UEFI" entry).
-5. The dashboard should appear within a second. Type `help` on the keyboard.
+5. The desktop should appear within a second. Type `help` on the keyboard.
 
 Axiom reads the boot stick and the NVMe drive (`disks`, `ls`, `cat`) and
 starts on the stick's volume, but writes nothing until you unlock a volume

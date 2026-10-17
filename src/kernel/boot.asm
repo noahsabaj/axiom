@@ -119,6 +119,7 @@ kernel_main:
     call ui_ready
     call shell_init
     sti
+    mov byte [ints_on], 1
     call store_init                     ; interrupts on: the drive completes by them
 
     RDTSC64
@@ -148,9 +149,12 @@ main_loop:
     call kbd_getc
     test eax, eax
     jz .refresh
-    call shell_key
+    call desk_key                       ; to the window with the keys
     jmp .input
 .refresh:
+    call desk_service                   ; windows closing go
+    call term_service                   ; what was printed, drawn
+    call desk_update                    ; and what changed, shown
     RDTSC64
     cmp rax, [next_refresh]
     jb .demo
@@ -158,6 +162,8 @@ main_loop:
     mov [next_refresh], rax
     call ui_refresh
 .demo:
+    call ui_demo_shown                  ; minimised: nothing to draw
+    jz .sleep
     cmp byte [mandel_dirty], 0          ; the mouse moved the view
     jne .render
     cmp byte [demo_on], 0
@@ -185,6 +191,12 @@ main_loop:
     jne .awake
     cmp byte [user_pending], 0
     jne .awake
+    cmp byte [term_dirty], 0            ; printed, from another CPU
+    jne .awake
+    call desk_pending                   ; drawn, by a program
+    jnz .awake
+    cmp byte [desk_reap], 0
+    jne .awake
     cmp qword [spawn_list], 0           ; a program starting another
     jne .awake
     mov rcx, [iommu_fault_count]        ; a device refused, not said yet
@@ -195,6 +207,10 @@ main_loop:
     je .arm
     cmp byte [m_hold], 0
     jne .arm
+    push rax
+    call ui_demo_shown
+    pop rax
+    jz .arm
     mov rcx, [next_frame]
     cmp rcx, rax
     cmovb rax, rcx

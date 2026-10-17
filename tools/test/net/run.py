@@ -254,7 +254,8 @@ def main():
     result(heard and heard[0] == sent, f"plain get: the server heard {heard[0] if heard else None!r}")
     want = f"net| you sent {len(sent)} bytes\nnet| sha256 {hashlib.sha256(sent).hexdigest()}\nnet| bye\nnet: 81 bytes, ended\nrun: NET exited with 0"
     want = want.replace("81", str(len(b"you sent %d bytes\r\nsha256 %s\r\nbye\n" % (len(sent), hashlib.sha256(sent).hexdigest().encode()))))
-    result(want in log, "plain get: its answer, a line at a time, then the end")
+    quiet = "\n".join(l for l in log.split("\n") if not l.startswith("ip6: "))  # (said meanwhile)
+    result(want in quiet, "plain get: its answer, a line at a time, then the end")
     result(re.search(r"net: failed, state 6, why 13, TLS error 14\nrun: NET exited with 3", log),
            "TLS checked: refused, the certificate (NETW_TLS, TLE_CERT)")
     n = len(b"over TLS: hi there\nline two\nline three\n")

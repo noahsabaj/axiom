@@ -1,7 +1,8 @@
 ; =============================================================================
-;  ui.asm - the dashboard: header, system panel, console, one tile per
-;  logical processor, the demo view; and the panic screen.
-;  Everything is laid out in font cells so it scales from 1280x800 to 4K.
+;  ui.asm - the first windows on the desk (desk.asm): the first shell, the
+;  system's facts, one tile per logical processor, the demo; the bar's
+;  telemetry; and the panic screen. Everything is laid out in font cells
+;  so it scales from 1280x800 to 4K.
 ; =============================================================================
 
 SYS_LINES       equ 13
@@ -185,81 +186,29 @@ ui_init:
     sub rdx, rax
     mov [conp_h], rdx
 
-    xor edi, edi                        ; background and header
-    xor esi, esi
-    mov rdx, [scr_w]
-    mov rcx, [scr_h]
-    mov r8d, COL_BG
-    call gfx_fill
-    call ui_draw_header
-
-    mov rdi, [sys_x]
-    mov rsi, [sys_y]
-    mov rdx, [left_w]
-    mov rcx, [sys_h]
-    lea r8, [str_t_system]
-    call ui_panel
-    mov rdi, [sys_x]
+    call desk_init                      ; the desk, and the first shell
+    mov rdi, [sys_x]                    ; where the console was
     mov rsi, [conp_y]
     mov rdx, [left_w]
+    sub rdx, [fr_b]
+    sub rdx, [fr_b]
     mov rcx, [conp_h]
-    lea r8, [str_t_console]
-    call ui_panel
-    mov rdi, [right_x]                  ; the right column waits for the CPUs
-    mov rsi, [body_y]
-    mov rdx, [right_w]
-    mov rcx, [body_bottom]
-    sub rcx, rsi
-    lea r8, [str_t_processors]
-    call ui_panel
-
-    mov dword [con_bg], COL_PANEL       ; the console lives inside its panel
-    mov rdi, [sys_x]
-    add rdi, [font_cw]
-    mov rsi, [conp_y]
-    add rsi, [title_h]
-    mov rdx, [left_w]
-    mov rax, [font_cw]
-    sub rdx, rax
-    sub rdx, rax
-    mov rcx, [conp_h]
-    sub rcx, [title_h]
-    mov rax, [font_ch]
-    shr rax, 2
-    sub rcx, rax
-    call con_init
-    call gfx_blit_all
+    sub rcx, [fr_t]
+    sub rcx, [fr_b]
+    sub rcx, [fr_b]
+    call term_open
+    mov [con_first], rax
     pop rbx
     ret
 
-ui_draw_header:
-    xor edi, edi
-    xor esi, esi
-    mov rdx, [scr_w]
-    mov rcx, [hdr_h]
-    mov r8d, COL_PANEL
-    call gfx_fill
-    xor edi, edi
-    mov rsi, [hdr_h]
-    sub rsi, [ui_line]
-    mov rdx, [scr_w]
-    mov rcx, [ui_line]
-    mov r8d, COL_LINE
-    call gfx_fill
-    mov rdi, [font_cw]
-    mov rsi, [font_ch]
-    shr rsi, 1
-    lea rdx, [str_brand]
-    mov ecx, COL_ACCENT
-    mov r8d, COL_PANEL
-    call ui_text
-    mov rdi, rax
-    mov rsi, [font_ch]
-    shr rsi, 1
-    lea rdx, [str_tagline]
-    mov ecx, COL_DIM
-    mov r8d, COL_PANEL
-    call ui_text
+; ui_client(R8 x, R9 y, RDX w, RCX h of a frame) -> RDX, RCX: its client's
+; size. Preserves others.
+ui_client:
+    sub rdx, [fr_b]
+    sub rdx, [fr_b]
+    sub rcx, [fr_t]
+    sub rcx, [fr_b]
+    sub rcx, [fr_b]
     ret
 
 ; -----------------------------------------------------------------------------
@@ -321,59 +270,102 @@ ui_ready:
     sub rax, rcx
     mov [demo_h], rax
 
-    mov rdi, [right_x]                  ; repaint the right column
-    mov rsi, [body_y]
-    mov rdx, [right_w]
-    mov rcx, [body_bottom]
-    sub rcx, rsi
-    mov r8d, COL_BG
-    call gfx_fill
-    mov rdi, [right_x]
-    mov rsi, [body_y]
+    call ui_system_info
+    lea rdi, [sys_ops]                  ; the windows, where the panels were
+    lea rsi, [str_t_system]
+    mov r8, [sys_x]
+    mov r9, [sys_y]
+    mov rdx, [left_w]
+    mov rcx, [sys_h]
+    call ui_client
+    mov r10d, WF_RESIZE
+    call win_new
+    mov [sys_win], rax
+    lea rdi, [cpu_ops]
+    lea rsi, [str_t_processors]
+    mov r8, [right_x]
+    mov r9, [body_y]
     mov rdx, [right_w]
     mov rcx, [cores_h]
-    lea r8, [str_t_processors]
-    call ui_panel
-    lea rdi, [ui_buf]                   ; demo panel title
+    call ui_client
+    mov r10d, WF_RESIZE
+    call win_new
+    mov [cpu_win], rax
+    lea rdi, [demo_base]                ; the demo's title
     cmp byte [mandel_ok], 0
     je .no_avx
     mov eax, [cpus_online]
-    SPRINTF rdi, {"MANDELBROT ", G_MIDDOT, " AVX2 + FMA ", G_MIDDOT, " %u threads"}, rax
-    jmp .demo_panel
+    SPRINTF rdi, {"Mandelbrot ", G_MIDDOT, " AVX2 + FMA ", G_MIDDOT, " %u threads"}, rax
+    jmp .demo
 .no_avx:
-    SPRINTF rdi, "MANDELBROT (needs AVX2 + FMA)"
-.demo_panel:
-    mov rdi, [right_x]
-    mov rsi, [demo_y]
+    SPRINTF rdi, "Mandelbrot (needs AVX2 + FMA)"
+.demo:
+    lea rdi, [demo_ops]
+    lea rsi, [demo_base]
+    mov r8, [right_x]
+    mov r9, [demo_y]
     mov rdx, [right_w]
     mov rcx, [demo_h]
-    lea r8, [ui_buf]
-    call ui_panel
-    mov rdi, [right_x]                  ; the fractal fills the panel
-    add rdi, [font_cw]
-    mov rsi, [demo_y]
-    add rsi, [title_h]
-    mov rdx, [right_w]
-    mov rax, [font_cw]
-    sub rdx, rax
-    sub rdx, rax
-    mov rcx, [demo_h]
-    sub rcx, [title_h]
-    mov rax, [font_ch]
-    shr rax, 1
-    sub rcx, rax
-    jns .view_ok
-    xor ecx, ecx
-.view_ok:
-    call mandel_set_view
-
-    call ui_system_info
-    call ui_draw_tiles
-    call gfx_blit_all
+    call ui_client
+    mov r10d, WF_RESIZE
+    call win_new
+    mov [demo_win], rax
     pop r12
     pop rbx
     ret
 
+; -----------------------------------------------------------------------------
+;  The demo's window
+; -----------------------------------------------------------------------------
+
+; demo_paint (OP_PAINT, RBX = window): black, and the view that size
+demo_paint:
+    lea rdi, [rbx + WN_SF]
+    call gfx_target
+    xor edi, edi
+    xor esi, esi
+    mov rdx, [rbx + WN_W]
+    mov rcx, [rbx + WN_H]
+    mov r8d, MANDEL_INSIDE
+    call gfx_fill
+    call gfx_target_back
+    mov rdi, [rbx + WN_SF + SF_PTR]
+    mov rsi, [rbx + WN_SF + SF_PITCH]
+    mov rdx, [rbx + WN_W]
+    mov rcx, [rbx + WN_H]
+    call mandel_set_view
+    mov byte [mandel_dirty], 1
+    ret
+
+; demo_click (OP_CLICK): a button pressed acts on the view
+demo_click:
+    test ecx, ecx
+    jz .out
+    jmp mandel_click
+.out:
+    ret
+
+; demo_wheel (OP_WHEEL)
+demo_wheel:
+    jmp mandel_wheel
+
+; mandel_show: a frame was drawn into the window
+mandel_show:
+    mov rdi, [demo_win]
+    test rdi, rdi
+    jz .out
+    jmp win_damage_all
+.out:
+    ret
+
+; ui_demo_shown -> ZF clear if the demo's window is on the screen
+ui_demo_shown:
+    mov rax, [demo_win]
+    test rax, rax
+    jz .out
+    test dword [rax + WN_FLAGS], WF_SHOWN
+.out:
+    ret
 ; -----------------------------------------------------------------------------
 ;  System facts: composed once into info_lines, drawn into the system panel
 ; -----------------------------------------------------------------------------
@@ -544,15 +536,31 @@ ui_system_info:
     mov r10, rax
     SPRINTF rdi, {"firmware %t s ", G_MIDDOT, " loader %u ms ", G_MIDDOT, " kernel %u ms"}, r8, r9, r10
 
-    xor r12d, r12d                      ; draw them
-.draw:
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+; sys_paint (the System window's OP_PAINT, RBX = window): the facts
+sys_paint:
+    push r12
+    push r13
+    lea rdi, [rbx + WN_SF]
+    call gfx_target
+    xor edi, edi
+    xor esi, esi
+    mov rdx, [rbx + WN_W]
+    mov rcx, [rbx + WN_H]
+    mov r8d, COL_PANEL
+    call gfx_fill
+    xor r12d, r12d
+.line:
+    mov r13, [font_ch]
+    imul r13, r12
     mov rax, [font_ch]
-    imul rax, r12
-    add rax, [title_h]
-    add rax, [sys_y]
-    mov r13, rax
-    mov rdi, [sys_x]
-    add rdi, [font_cw]
+    shr rax, 2
+    add r13, rax                        ; y
+    mov rdi, [font_cw]
     mov rsi, r13
     lea rdx, [info_labels]
     mov rdx, [rdx + r12 * 8]
@@ -561,32 +569,51 @@ ui_system_info:
     call ui_text
     mov rdi, [font_cw]                  ; values start at column 11
     imul rdi, rdi, 11
-    add rdi, [sys_x]
     mov rsi, r13
     imul rdx, r12, INFO_LEN
     lea rax, [info_lines]
     add rdx, rax
-    mov rax, [left_w]                   ; clip to the panel
-    xor ecx, ecx
-    push rdx
-    xor edx, edx
-    div qword [font_cw]
-    pop rdx
-    sub rax, 12
-    jg .clip_ok
-    mov eax, 1
-.clip_ok:
-    mov r9, rax
     mov ecx, COL_TEXT
     mov r8d, COL_PANEL
-    call ui_text_max
+    call ui_text
     inc r12
     cmp r12, SYS_LINES
-    jb .draw
+    jb .line
+    call gfx_target_back
     pop r13
     pop r12
-    pop rbx
     ret
+
+; cpu_paint (the Processors window's OP_PAINT, RBX = window): the tiles,
+; as many to a row as fit
+cpu_paint:
+    lea rdi, [rbx + WN_SF]
+    call gfx_target
+    xor edi, edi
+    xor esi, esi
+    mov rdx, [rbx + WN_W]
+    mov rcx, [rbx + WN_H]
+    mov r8d, COL_PANEL
+    call gfx_fill
+    mov rax, [rbx + WN_W]               ; columns that fit
+    mov rcx, [font_cw]
+    sub rax, rcx
+    sub rax, rcx
+    add rax, [tile_gap_x]
+    jg .room
+    xor eax, eax
+.room:
+    mov rcx, [tile_w]
+    add rcx, [tile_gap_x]
+    xor edx, edx
+    div rcx
+    test rax, rax
+    jnz .cols_ok
+    inc eax
+.cols_ok:
+    mov [tile_cols], rax
+    call ui_draw_tiles
+    jmp gfx_target_back
 
 ; ui_device_line(EDI = PCI class, R12D = info line)
 ui_device_line:
@@ -642,14 +669,14 @@ ui_draw_tiles:
     mov rcx, [tile_h]
     add rcx, [tile_gap_y]
     imul rax, rcx
-    add rax, [title_h]
-    add rax, [body_y]
-    mov r14, rax                        ; tile y
+    mov rcx, [font_ch]
+    shr rcx, 2
+    add rax, rcx
+    mov r14, rax                        ; tile y, in the window
     mov rax, [tile_w]
     add rax, [tile_gap_x]
     imul rax, rdx
     add rax, [font_cw]
-    add rax, [right_x]
     mov r13, rax                        ; tile x
 
     mov r15d, COL_BLUE                  ; kind color
@@ -888,37 +915,16 @@ ui_refresh:
 .no_power:
     SPRINTF rdi, "up %u:%02u:%02u", r10, r9, r8
 
-    mov rdi, [scr_w]                    ; repaint the right half of the header
-    shr rdi, 1
-    xor esi, esi
-    mov rdx, [scr_w]
-    shr rdx, 1
-    mov rcx, [hdr_h]
-    sub rcx, [ui_line]
-    mov r8d, COL_PANEL
-    call gfx_fill
-    mov rdi, [scr_w]
-    sub rdi, [font_cw]
-    mov rsi, [font_ch]
-    shr rsi, 1
-    lea rdx, [ui_buf]
-    mov ecx, COL_TEXT
-    mov r8d, COL_PANEL
-    call ui_text_right
-    xor edi, edi
-    xor esi, esi
-    mov rdx, [scr_w]
-    mov rcx, [hdr_h]
-    call gfx_blit
-
-    cmp qword [tile_cols], 0            ; tiles exist once ui_ready ran
-    je .out
-    call ui_draw_tiles
-    mov rdi, [right_x]
-    mov rsi, [body_y]
-    mov rdx, [right_w]
-    mov rcx, [cores_h]
-    call gfx_blit
+    lea rsi, [ui_buf]                   ; at the right of the bar
+    call desk_status
+    mov rbx, [cpu_win]                  ; the tiles, if they are seen
+    test rbx, rbx
+    jz .out
+    test dword [rbx + WN_FLAGS], WF_SHOWN
+    jz .out
+    call cpu_paint
+    mov rdi, rbx
+    call win_damage_all
 .out:
     pop r14
     pop r13
@@ -968,33 +974,17 @@ ui_demo_stats:
 .rate_done:
     add rdi, rax
     SPRINTF rdi, {"zoom %u", G_TIMES, " ", G_MIDDOT, " %u iter max"}, r10, qword [m_last_maxiter]
-    mov rdi, [right_x]                  ; clear the right part of the title row
-    mov rax, [right_w]
-    shr rax, 1
-    add rdi, rax
-    mov rsi, [demo_y]
-    add rsi, [ui_line]
-    mov rdx, rax
-    sub rdx, [ui_line]
-    mov rcx, [title_h]
-    sub rcx, [ui_line]
-    mov r8d, COL_PANEL
-    call gfx_fill
-    mov rdi, [right_x]
-    add rdi, [right_w]
-    sub rdi, [font_cw]
-    mov rsi, [font_ch]
-    shr rsi, 2
-    add rsi, [demo_y]
+    mov rdi, [demo_win]                 ; in the window's title
+    test rdi, rdi
+    jz .out
+    lea rdi, [ui_buf2]
+    lea rax, [demo_base]
     lea rdx, [ui_buf]
-    mov ecx, COL_DIM
-    mov r8d, COL_PANEL
-    call ui_text_right
-    mov rdi, [right_x]
-    mov rsi, [demo_y]
-    mov rdx, [right_w]
-    mov rcx, [title_h]
-    call gfx_blit
+    SPRINTF rdi, {"%s ", G_MIDDOT, " %s"}, rax, rdx
+    mov rdi, [demo_win]
+    lea rsi, [ui_buf2]
+    call win_title
+.out:
     pop rbx
     ret
 
@@ -1006,6 +996,7 @@ panic_paint:
     je .out
     push rbx
     push r12
+    call gfx_target_back                ; over everything, whatever was drawing
     xor edi, edi
     xor esi, esi
     mov rdx, [scr_w]
@@ -1074,10 +1065,8 @@ panic_paint:
 
 section .rodata
 str_brand:          db 'AXIOM', 0
-str_tagline:        db '  0.1 ', G_MIDDOT, ' first light', 0
-str_t_system:       db 'SYSTEM', 0
-str_t_console:      db 'CONSOLE', 0
-str_t_processors:   db 'PROCESSORS', 0
+str_t_system:       db 'System', 0
+str_t_processors:   db 'Processors', 0
 str_off:            db 'off', 0
 str_hwp_on:         db 'on, EPP 0 (performance)', 0
 str_x2apic:         db 'x2APIC', 0
@@ -1099,6 +1088,9 @@ str_l_network:      db 'network', 0
 str_l_isa:          db 'isa', 0
 str_l_boot:         db 'boot', 0
 align 8
+sys_ops:        dq sys_paint, 0, 0, 0, 0, 0
+cpu_ops:        dq cpu_paint, 0, 0, 0, 0, 0
+demo_ops:       dq demo_paint, 0, demo_click, demo_wheel, 0, 0
 info_labels:
     dq str_l_machine, str_l_firmware, str_l_cpu, str_l_cores, str_l_clocks
     dq str_l_memory, str_l_display, str_l_acpi, str_l_pci, str_l_storage
@@ -1129,6 +1121,10 @@ tile_gap_y:     resq 1
 tile_cols:      resq 1
 tile_max_items: resq 1
 tile_bar_end:   resq 1
+sys_win:        resq 1
+cpu_win:        resq 1
+demo_win:       resq 1
+demo_base:      resb 96                 ; the demo's title, without its numbers
 ui_buf:         resb 256
 ui_buf2:        resb 256
 info_lines:     resb SYS_LINES * INFO_LEN

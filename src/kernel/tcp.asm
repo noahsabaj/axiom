@@ -113,6 +113,7 @@ TC_LISTENER     equ 176                 ; what accepted it, or will
 TC_MAX          equ 184                 ; dword: past the furthest ever sent
 TC_V6           equ 188                 ; dword: 1 over IPv6
 TC_RA           equ 192                 ; the other side's address (16 bytes)
+TC_CON          equ 208                 ; the terminal its handlers print to
 TC_SIZE         equ 256
 
 ; a listener
@@ -122,7 +123,8 @@ LS_OPS          equ 8                   ; the handlers its connections get
 LS_ACCEPT       equ 16
 LS_USER         equ 24                  ; the owner's
 LS_ACCEPTED     equ 32                  ; qword: how many
-LS_SIZE         equ 40
+LS_CON          equ 40                  ; the terminal its connections print to
+LS_SIZE         equ 48
 
 section .text
 
@@ -138,6 +140,8 @@ tcp_connect:
     pop rsi
     mov [r12 + TC_RPORT], esi
     mov [r12 + TC_OPS], rdx
+    call con_owner
+    mov [r12 + TC_CON], rax
     call tcp_port
     mov [r12 + TC_LPORT], eax
     call net_random
@@ -321,6 +325,8 @@ tcp_listen:
     mov [r8 + LS_ACCEPT], rdx
     mov [r8 + LS_USER], rcx
     mov qword [r8 + LS_ACCEPTED], 0
+    call con_owner
+    mov [r8 + LS_CON], rax
     mov rax, r8
     clc
     jmp .out
@@ -564,7 +570,9 @@ tcp_free:
     test rcx, rcx
     jz .out
     mov rdi, r12
-    call [rcx + TH_GONE]
+    mov rax, [rcx + TH_GONE]
+    mov r11, [r12 + TC_CON]
+    call con_call
 .out:
     pop r11
     pop r10
@@ -618,7 +626,9 @@ tcp_time_wait:
     jz .out
     mov rdi, r12
     xor esi, esi
-    call [rcx + TH_GONE]
+    mov rax, [rcx + TH_GONE]
+    mov r11, [r12 + TC_CON]
+    call con_call
 .out:
     pop r11
     pop r10
@@ -647,7 +657,9 @@ tcp_event:
     test rcx, rcx
     jz .out
     mov rdi, r12
-    call [rcx + rax]
+    mov rax, [rcx + rax]                ; printing where it was opened
+    mov r11, [r12 + TC_CON]
+    call con_call
 .out:
     pop r11
     pop r10
@@ -1684,6 +1696,8 @@ tcp_arrive_half:
     je .refuse
     mov rax, [rsi + LS_OPS]
     mov [r12 + TC_OPS], rax
+    mov rax, [rsi + LS_CON]
+    mov [r12 + TC_CON], rax
     inc qword [rsi + LS_ACCEPTED]
     push rcx
     push rdx

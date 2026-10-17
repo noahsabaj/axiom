@@ -1411,7 +1411,9 @@ h_con_write:
     jae .free
     mov rdi, rbx
     mov rsi, rax
-    call con_lines
+    mov r11, [user_con]                 ; where the program was run
+    lea rax, [con_lines]
+    call con_call
     mov rax, r14
 .free:
     push rax
@@ -1878,6 +1880,8 @@ cmd_run:
     jz .out
     mov [user_task], rax
     mov [user_first], rdx
+    call con_owner                      ; its lines are shown there
+    mov [user_con], rax
     lea rdi, [user_waiter]
     xor esi, esi
     lea rdx, [str_user_wait]
@@ -2023,15 +2027,26 @@ user_service:
     mov byte [user_pending], 0
     mov rdi, [user_task]
     mov rsi, [user_exit]
-    call user_said
+    mov r11, [user_con]                 ; said where it was run
+    lea rax, [user_said]
+    call con_call
     xor edi, edi
     xchg rdi, [user_task]
     call obj_put
-    call shell_resume
+    mov r11, [user_con]
+    lea rax, [shell_resume]
+    call con_call
 .out:
     ret
 
-; user_cancel: ctrl+C. The program running is killed.
+; user_forget(RDI = a terminal): the program run there is killed (ctrl+C
+; there, or it closed)
+user_forget:
+    cmp rdi, [user_con]
+    je user_cancel
+    ret
+
+; user_cancel: the program running is killed.
 user_cancel:
     mov rdi, [user_task]
     test rdi, rdi
@@ -2345,6 +2360,7 @@ sys_table:      dq sys_exit, sys_ring_enter, sys_ring_new, sys_mem_new, sys_map
 section .bss
 alignb 8
 console_obj:    resq 1
+user_con:       resq 1                  ; the terminal the program was run in
 spawn_list:     resq 1                  ; requests for the main thread, oldest first
 spawn_tail:     resq 1
 spawn_lock:     resd 1

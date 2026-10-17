@@ -81,18 +81,14 @@ mandel_reset:
     mov qword [m_frame], MANDEL_START
     ret
 
-; mandel_set_view(RDI x, RSI y, RDX w, RCX h): where on screen to draw
+; mandel_set_view(RDI = pixels, RSI = bytes per row, RDX w, RCX h): what
+; to draw into (the demo's window)
 mandel_set_view:
     and rdx, ~7                         ; eight pixels per step
-    mov [m_view_x], rdi
-    mov [m_view_y], rsi
+    mov [m_dst], rdi
+    mov [m_pitch], rsi
     mov [m_width], rdx
     mov [m_height], rcx
-    mov rax, rsi
-    imul rax, [scr_pitch]
-    lea rax, [rax + rdi * 4]
-    add rax, [bb_ptr]
-    mov [m_dst], rax
     ret
 
 ; mandel_prepare: pixel geometry for the current zoom (the scale is the
@@ -150,7 +146,7 @@ mandel_row_job:
     jmp mandel_row
 
 ; -----------------------------------------------------------------------------
-;  mandel_row(RDI = row): render one row of the view into the back buffer
+;  mandel_row(RDI = row): render one row of the view into its window
 ; -----------------------------------------------------------------------------
 mandel_row:
     push rbx
@@ -176,7 +172,7 @@ mandel_row:
     vbroadcastsd ymm15, [m_four]
 
     mov r12, rdi                        ; destination pixels
-    imul r12, [scr_pitch]
+    imul r12, [m_pitch]
     add r12, [m_dst]
     mov r13, [m_width]
     shr r13, 3                          ; groups of eight
@@ -283,11 +279,7 @@ mandel_frame:
     mov [m_last_maxiter], rax
     movsd xmm0, [m_scale]
     movsd [m_last_scale], xmm0
-    mov rdi, [m_view_x]
-    mov rsi, [m_view_y]
-    mov rdx, [m_width]
-    mov rcx, [m_height]
-    call gfx_blit
+    call mandel_show
     mov byte [mandel_dirty], 0
     cmp byte [m_hold], 0                ; held or paused: stay on this frame
     jne .out
@@ -441,11 +433,7 @@ mandel_bench:
     movsd [m_scale], xmm0
     mov rax, [m_saved_frame]
     mov [m_frame], rax
-    mov rdi, [m_view_x]
-    mov rsi, [m_view_y]
-    mov rdx, [m_width]
-    mov rcx, [m_height]
-    call gfx_blit
+    call mandel_show
 .out:
     pop r12
     pop rbx
@@ -505,8 +493,7 @@ m_x0:           resq 1
 m_y0:           resq 1
 m_maxiter:      resq 1
 m_phase:        resq 1
-m_view_x:       resq 1
-m_view_y:       resq 1
+m_pitch:        resq 1                  ; bytes per row where it draws
 m_width:        resq 1
 m_height:       resq 1
 m_dst:          resq 1

@@ -7,6 +7,13 @@
 ;  blitting. Drawing is meant for one CPU at a time.
 ; =============================================================================
 
+SF_PTR          equ 0                   ; a surface: its pixels
+SF_PITCH        equ 8                   ; bytes per row
+SF_W            equ 16
+SF_H            equ 24
+SF_CAP          equ 32                  ; bytes of memory it has
+SF_SIZE         equ 40
+
 section .text
 
 gfx_init:
@@ -40,6 +47,14 @@ gfx_init:
     jz .no_memory
     add rax, [phys_base]
     mov [bb_ptr], rax
+    mov [back_sf + SF_PTR], rax         ; the back buffer as a surface
+    mov rax, [scr_pitch]
+    mov [back_sf + SF_PITCH], rax
+    mov rax, [scr_w]
+    mov [back_sf + SF_W], rax
+    mov rax, [scr_h]
+    mov [back_sf + SF_H], rax
+    call gfx_target_back
 
     xor ecx, ecx                        ; largest font that still gives 50 rows
     xor r8d, r8d
@@ -93,9 +108,162 @@ gfx_set_font:
     ret
 
 ; -----------------------------------------------------------------------------
-;  clip(RDI x, RSI y, RDX w, RCX h) -> clipped in place; ZF set when empty
+;  Surfaces: what drawing goes into. The back buffer is one (back_sf); each
+;  window has its own. gfx_fill and gfx_glyph draw into the target.
 ; -----------------------------------------------------------------------------
-gfx_clip:
+
+; gfx_target(RDI = surface): draw into it from now on. Preserves all.
+gfx_target:
+    push rax
+    mov rax, [rdi + SF_PTR]
+    mov [tg_ptr], rax
+    mov rax, [rdi + SF_PITCH]
+    mov [tg_pitch], rax
+    mov rax, [rdi + SF_W]
+    mov [tg_w], rax
+    mov rax, [rdi + SF_H]
+    mov [tg_h], rax
+    mov [tg_cy1], rax
+    mov rax, [tg_w]
+    mov [tg_cx1], rax
+    mov qword [tg_cx0], 0
+    mov qword [tg_cy0], 0
+    pop rax
+    ret
+
+; gfx_save, gfx_restore: the target, its clip and the text colors, kept
+; and put back (one deep), around drawing that interrupts other drawing.
+; Preserve all.
+gfx_save:
+    push rax
+    push rcx
+    push rsi
+    push rdi
+    lea rsi, [tg_ptr]
+    lea rdi, [gfx_saved]
+    mov ecx, 8
+    rep movsq
+    mov eax, [text_fg]
+    mov [gfx_saved + 64], eax
+    mov eax, [text_bg]
+    mov [gfx_saved + 68], eax
+    pop rdi
+    pop rsi
+    pop rcx
+    pop rax
+    ret
+
+gfx_restore:
+    push rcx
+    push rsi
+    push rdi
+    lea rsi, [gfx_saved]
+    lea rdi, [tg_ptr]
+    mov ecx, 8
+    rep movsq
+    mov edi, [gfx_saved + 64]
+    mov esi, [gfx_saved + 68]
+    call gfx_color
+    pop rdi
+    pop rsi
+    pop rcx
+    ret
+
+; gfx_target_back: draw into the back buffer. Preserves all.
+gfx_target_back:
+    push rdi
+    lea rdi, [back_sf]
+    call gfx_target
+    pop rdi
+    ret
+
+; sf_size(RDI = surface, RSI = width, RDX = height) -> CF if there is no
+; memory for it (then it is as it was). Its memory grows, never shrinks;
+; what it shows afterwards is undefined. Preserves all but RAX.
+sf_size:
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    mov r8, rdi
+    test rsi, rsi                       ; at least a pixel
+    jnz .w_ok
+    inc esi
+.w_ok:
+    test rdx, rdx
+    jnz .h_ok
+    inc edx
+.h_ok:
+    lea rax, [rsi * 4]
+    imul rax, rdx                       ; bytes
+    cmp rax, [r8 + SF_CAP]
+    jbe .fits
+    push rsi
+    push rdx
+    push rax
+    add rax, 0xFFFF                     ; in steps of 64 KiB
+    and rax, -0x10000
+    push rax
+    mov rdi, rax
+    call vm_alloc
+    pop rcx
+    test rax, rax
+    jz .none
+    push rax
+    push rcx
+    mov rdi, [r8 + SF_PTR]
+    test rdi, rdi
+    jz .no_old
+    call vm_free
+.no_old:
+    pop rcx
+    pop rax
+    mov [r8 + SF_PTR], rax
+    mov [r8 + SF_CAP], rcx
+    pop rax
+    pop rdx
+    pop rsi
+.fits:
+    mov [r8 + SF_W], rsi
+    mov [r8 + SF_H], rdx
+    lea rax, [rsi * 4]
+    mov [r8 + SF_PITCH], rax
+    clc
+    jmp .out
+.none:
+    pop rax
+    pop rdx
+    pop rsi
+    stc
+.out:
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    ret
+
+; sf_free(RDI = surface): its memory goes. Preserves all.
+sf_free:
+    push rax
+    push rdi
+    mov rax, rdi
+    mov rdi, [rax + SF_PTR]
+    mov qword [rax + SF_PTR], 0
+    mov qword [rax + SF_CAP], 0
+    mov qword [rax + SF_W], 0
+    mov qword [rax + SF_H], 0
+    test rdi, rdi
+    jz .out
+    call vm_free
+.out:
+    pop rdi
+    pop rax
+    ret
+
+; gfx_clip_screen: as gfx_clip, to the screen
+gfx_clip_screen:
     cmp rdi, [scr_w]
     jae .empty
     cmp rsi, [scr_h]
@@ -113,7 +281,77 @@ gfx_clip:
     test rcx, rcx
     ret
 .empty:
+    xor eax, eax
+    ret
+
+; -----------------------------------------------------------------------------
+;  clip(RDI x, RSI y, RDX w, RCX h) -> clipped in place to the target; ZF
+;  set when empty
+; -----------------------------------------------------------------------------
+gfx_clip:
+    push r11
+    lea rax, [rdi + rdx]                ; right and bottom edges
+    lea r11, [rsi + rcx]
+    cmp rdi, [tg_cx0]                   ; (signed: a rectangle may start
+    jge .left                           ; off the target)
+    mov rdi, [tg_cx0]
+.left:
+    cmp rsi, [tg_cy0]
+    jge .top
+    mov rsi, [tg_cy0]
+.top:
+    cmp rax, [tg_cx1]
+    jle .right
+    mov rax, [tg_cx1]
+.right:
+    cmp r11, [tg_cy1]
+    jle .bottom
+    mov r11, [tg_cy1]
+.bottom:
+    sub rax, rdi
+    jle .empty
+    sub r11, rsi
+    jle .empty
+    mov rdx, rax
+    mov rcx, r11
+    pop r11
+    test rdx, rdx                       ; ZF = 0
+    ret
+.empty:
+    pop r11
     xor eax, eax                        ; ZF = 1
+    ret
+
+; gfx_set_clip(RDI x, RSI y, RDX w, RCX h): drawing into the target stays
+; inside this rectangle (and the target). Preserves all.
+gfx_set_clip:
+    push rax
+    push rdi
+    push rsi
+    push rdx
+    push rcx
+    mov qword [tg_cx0], 0
+    mov qword [tg_cy0], 0
+    mov rax, [tg_w]
+    mov [tg_cx1], rax
+    mov rax, [tg_h]
+    mov [tg_cy1], rax
+    call gfx_clip
+    jnz .set
+    xor edx, edx                        ; nothing
+    xor ecx, ecx
+.set:
+    mov [tg_cx0], rdi
+    mov [tg_cy0], rsi
+    add rdi, rdx
+    mov [tg_cx1], rdi
+    add rsi, rcx
+    mov [tg_cy1], rsi
+    pop rcx
+    pop rdx
+    pop rsi
+    pop rdi
+    pop rax
     ret
 
 ; gfx_fill(RDI x, RSI y, RDX w, RCX h, R8D color). Preserves all.
@@ -128,16 +366,16 @@ gfx_fill:
     call gfx_clip
     jz .out
     mov rax, rsi
-    imul rax, [scr_pitch]
+    imul rax, [tg_pitch]
     lea r9, [rax + rdi * 4]
-    add r9, [bb_ptr]                    ; first pixel
+    add r9, [tg_ptr]                    ; first pixel
     mov r10, rcx                        ; rows
     mov eax, r8d
 .row:
     mov rdi, r9
     mov rcx, rdx
     rep stosd
-    add r9, [scr_pitch]
+    add r9, [tg_pitch]
     dec r10
     jnz .row
 .out:
@@ -167,7 +405,7 @@ gfx_blit_raw:
     push r9
     push r10
     push r11
-    call gfx_clip
+    call gfx_clip_screen
     jz .out
     mov rax, rsi
     imul rax, [scr_pitch]
@@ -304,6 +542,8 @@ gfx_glyph:
     push r9
     push r10
     push r11
+    push r12
+    push r13
     movzx edx, dl
     cmp edx, 32
     jb .unknown
@@ -320,26 +560,50 @@ gfx_glyph:
 .ascii:
     sub edx, 32
 .index:
-    mov rax, [scr_w]                    ; whole glyph must fit
-    sub rax, [font_cw]
-    cmp rdi, rax
-    ja .out
-    mov rax, [scr_h]
-    sub rax, [font_ch]
-    cmp rsi, rax
-    ja .out
     imul rdx, [font_glyph_bytes]
     add rdx, [font_glyphs]              ; coverage bytes
+    mov rax, [font_cw]                  ; the cell, clipped: right, bottom
+    add rax, rdi
+    mov rcx, [font_ch]
+    add rcx, rsi
+    cmp rax, [tg_cx1]
+    jle .right
+    mov rax, [tg_cx1]
+.right:
+    cmp rcx, [tg_cy1]
+    jle .bottom
+    mov rcx, [tg_cy1]
+.bottom:
+    mov rbx, [tg_cy0]                   ; top: skip rows of coverage
+    sub rbx, rsi
+    jle .top
+    add rsi, rbx
+    imul rbx, [font_cw]
+    add rdx, rbx
+.top:
+    mov rbx, [tg_cx0]                   ; left: skip columns
+    sub rbx, rdi
+    jle .left
+    add rdi, rbx
+    add rdx, rbx
+.left:
+    sub rax, rdi
+    jle .out
+    sub rcx, rsi
+    jle .out
+    mov r12, rax                        ; columns drawn
+    mov r13, [font_cw]
+    sub r13, rax                        ; coverage skipped after each row
+    mov r9, rcx                         ; rows
     mov rax, rsi
-    imul rax, [scr_pitch]
+    imul rax, [tg_pitch]
     lea r8, [rax + rdi * 4]
-    add r8, [bb_ptr]                    ; destination
-    mov r9, [font_ch]
+    add r8, [tg_ptr]                    ; destination
     lea r11, [text_ramp]
     cmp dword [text_bg], GFX_CLEAR
     je .blend_row
 .opaque_row:
-    mov rcx, [font_cw]
+    mov rcx, r12
     mov rdi, r8
 .opaque_px:
     movzx eax, byte [rdx]
@@ -349,12 +613,13 @@ gfx_glyph:
     add rdi, 4
     dec rcx
     jnz .opaque_px
-    add r8, [scr_pitch]
+    add rdx, r13
+    add r8, [tg_pitch]
     dec r9
     jnz .opaque_row
     jmp .out
 .blend_row:
-    mov rcx, [font_cw]
+    mov rcx, r12
     mov rdi, r8
 .blend_px:
     movzx r10d, byte [rdx]
@@ -397,10 +662,13 @@ gfx_glyph:
     add rdi, 4
     dec rcx
     jnz .blend_px
-    add r8, [scr_pitch]
+    add rdx, r13
+    add r8, [tg_pitch]
     dec r9
     jnz .blend_row
 .out:
+    pop r13
+    pop r12
     pop r11
     pop r10
     pop r9
@@ -465,3 +733,13 @@ font_ch:        resq 1
 font_glyph_bytes: resq 1
 alignb 16
 text_ramp:      resd 256
+back_sf:        resb SF_SIZE
+tg_ptr:         resq 1                  ; the target: what gfx_fill and gfx_glyph draw into
+tg_pitch:       resq 1
+tg_w:           resq 1
+tg_h:           resq 1
+tg_cx0:         resq 1                  ; and the clip within it: left, top,
+tg_cy0:         resq 1
+tg_cx1:         resq 1                  ; right, bottom (exclusive)
+tg_cy1:         resq 1
+gfx_saved:      resb 72

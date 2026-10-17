@@ -45,7 +45,6 @@ section .text
 %include "idt.asm"
 %include "pmm.asm"
 %include "gfx.asm"
-%include "console.asm"
 %include "acpi.asm"
 %include "smbios.asm"
 %include "apic.asm"
@@ -105,6 +104,8 @@ section .text
 %include "mandel.asm"
 %include "ui.asm"
 %include "shell.asm"
+%include "desk.asm"
+%include "term.asm"
 %include "power.asm"
 %include "boot.asm"
 

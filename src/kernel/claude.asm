@@ -1196,6 +1196,7 @@ cl_word_flush:
 ; cl_view_sync: before the first character of a batch, the column is the
 ; console's (something else may have printed since)
 cl_view_sync:
+    call con_metrics
     cmp qword [cl_vlen], 0
     jne .out
     push rax
@@ -1244,7 +1245,7 @@ cl_view_flush:
     lea rdi, [cl_view]
     mov byte [rdi + rcx], 0
     call kputs
-    call sh_flush
+    call con_flush
     mov qword [cl_vlen], 0
 .out:
     pop rdi

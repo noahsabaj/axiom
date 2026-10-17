@@ -38,7 +38,8 @@ DQ_FOUND        equ 38                  ; byte: the shell's, an address said
 DQ_SERVER       equ 40                  ; whom it asked (16 bytes)
 DQ_ADDR         equ 56                  ; what it found (16 bytes)
 DQ_NAME         equ 72                  ; NUL-ended
-DQ_SIZE         equ 328
+DQ_CON          equ 328                 ; the terminal that asked (term.asm)
+DQ_SIZE         equ 336
 DQ_SOCKET       equ 3
 
 ; why a lookup ended without an address
@@ -62,17 +63,22 @@ net_link_up:
 .out:
     ret
 
-; net_cancel: ctrl+C at the prompt. Preserves all.
-net_cancel:
+; net_forget(RDI = a terminal): what it started stops: ctrl+C there, or
+; it closed. Preserves all.
+net_forget:
     push rbx
     push rcx
-    lea rbx, [dns_slots]                ; the shell's lookup
+    push r12
+    mov r12, rdi
+    lea rbx, [dns_slots]                ; its lookups
     mov ecx, DNS_SLOTS
 .slot:
     cmp dword [rbx + DQ_STATE], 0
     je .next
     cmp dword [rbx + DQ_THEN], DQ_SOCKET
     je .next
+    cmp [rbx + DQ_CON], r12
+    jne .next
     mov dword [rbx + DQ_STATE], 0
     call dns_arm
     KLOG "host: stopped"
@@ -101,10 +107,18 @@ net_cancel:
     add rbx, DQ_SIZE
     dec ecx
     jnz .slot
+    cmp r12, [http_con]                 ; its fetch
+    jne .ping
+    call http_cancel
+.ping:
+    cmp r12, [ping_con]                 ; its ping
+    jne .out
+    call ping_end
+.out:
+    pop r12
     pop rcx
     pop rbx
-    call http_cancel
-    jmp ping_end
+    ret
 
 ; -----------------------------------------------------------------------------
 ;  DHCP
@@ -555,6 +569,10 @@ dns_lookup:
     jc .refused
     mov [rbx + DQ_THEN], r9d
     mov [rbx + DQ_USER], rcx
+    push rax
+    call con_owner                      ; what it finds is said there
+    mov [rbx + DQ_CON], rax
+    pop rax
     push rsi
     lea rsi, [dns_server]
     lea rdi, [rbx + DQ_SERVER]
@@ -1036,8 +1054,15 @@ dns_skip_name:
     pop rax
     ret
 
-; dns_done(RBX = the slot, its lookup over; RAX = the address found)
+; dns_done(RBX = the slot, its lookup over; RAX = the address found), said
+; where it was asked
 dns_done:
+    mov rdi, rax
+    mov r11, [rbx + DQ_CON]
+    lea rax, [.as]
+    jmp con_call
+.as:
+    mov rax, rdi
     mov ecx, [rbx + DQ_THEN]
     cmp ecx, DQ_SOCKET
     je .socket
@@ -1056,6 +1081,12 @@ dns_done:
 ; dns_failed(RBX = the slot, its lookup over; ESI = why, DNS_*; EAX = the
 ; server's code for DNS_REFUSED): the shell's say so; whoever waited hears
 dns_failed:
+    mov edi, eax
+    mov r11, [rbx + DQ_CON]
+    lea rax, [.as]
+    jmp con_call
+.as:
+    mov eax, edi
     cmp dword [rbx + DQ_THEN], 0
     jne .not_host
     cmp byte [rbx + DQ_FOUND], 0        ; 'host' has said an address already
@@ -1146,6 +1177,10 @@ ping_begin:
     push rcx
     push rsi
     push rdi
+    push rax
+    call con_owner                      ; its replies are said there
+    mov [ping_con], rax
+    pop rax
     mov rsi, rax
     lea rdi, [ping_addr]
     call addr_copy
@@ -1241,8 +1276,16 @@ ping_send:
     pop rcx
     ret
 
+; ping_as(RAX = function): call it printing where the ping was started
+ping_as:
+    mov r11, [ping_con]
+    jmp con_call
+
 ; ping_tick: a second after each request, the next (or the end)
 ping_tick:
+    lea rax, [.as]
+    jmp ping_as
+.as:
     mov rax, [ping_next]
     test rax, rax
     jz .out
@@ -1267,6 +1310,9 @@ ping_tick:
 ; ping_reply(RBX, RSI = message, ECX = bytes, RDX = the sender's address,
 ; R8D = the time to live, or hop limit, it came with): an echo reply
 ping_reply:
+    lea rax, [.as]
+    jmp ping_as
+.as:
     cmp dword [ping_active], 0
     je .out
     cmp ecx, 16
@@ -1319,6 +1365,9 @@ ping_reply:
 ; ping_error(RBX, RSI = message, ECX = bytes, RDI = IP header): unreachable,
 ; or the time to live ran out, about one of our requests?
 ping_error:
+    lea rax, [.as]
+    jmp ping_as
+.as:
     cmp dword [ping_active], 0
     je .out
     cmp ecx, 8 + 20 + 8
@@ -1352,6 +1401,9 @@ ping_error:
 ; ping_error6(RBX, RDI = IPv6 header, RSI = message, ECX = bytes):
 ; unreachable, or the hop limit reached, about one of our requests?
 ping_error6:
+    lea rax, [.as]
+    jmp ping_as
+.as:
     cmp dword [ping_active], 0
     je .out
     cmp ecx, 8 + 40 + 8
@@ -1858,4 +1910,5 @@ alignb 8
 dns_slots:      resb DNS_SLOTS * DQ_SIZE
 alignb 8
 ping_addr:      resb 16
+ping_con:       resq 1                  ; the terminal it was started in
 dns_server:     resb 16

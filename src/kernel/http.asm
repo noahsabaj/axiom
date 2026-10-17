@@ -128,6 +128,10 @@ http_fetch:
     push rsi
     cmp qword [http_app], 0
     jne .busy
+    push rax
+    call con_owner                      ; whose fetch it is (net_forget)
+    mov [http_con], rax
+    pop rax
     mov eax, ecx
     and al, HF_INSECURE
     mov [http_insecure], al
@@ -1535,6 +1539,7 @@ http_hdlen:     resq 1                  ; of http_head
 http_rx:        resq 1                  ; bytes of the answer so far
 http_left:      resq 1                  ; of Content-Length, or of the chunk
 http_idle_until: resq 1                 ; net_clock: a kept one is closed then
+http_con:       resq 1                  ; the terminal the fetch is for
 http_addr:      resb 16                 ; the server's
 http_defport:   resd 1                  ; 80, or 443 for https
 http_status:    resd 1

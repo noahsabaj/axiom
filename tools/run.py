@@ -300,7 +300,8 @@ def main():
                     "by ';' ('wait N' pauses N seconds, 'until TEXT' waits for TEXT in "
                     "the log after the last text typed, 'shot FILE' takes a screenshot, "
                     "'type TEXT' types down the serial port, 'press TEXT' on the "
-                    "keyboard, 'abs X Y [button]' points)")
+                    "keyboard, 'abs X Y [button]' points (and clicks), 'drag X1 Y1 X2 Y2 "
+                    "[button]' drags, 'wheel X Y N' turns the wheel N notches)")
     opts = ap.parse_args()
     fresh = opts.port == 0
 
@@ -389,7 +390,34 @@ def main():
             line = line.strip()
             if opts.trace:
                 print(f"run.py: {time.time() - t0:6.2f} s  {line}", file=sys.stderr)
-            if line.startswith("abs "):
+            if line.startswith("drag "):
+                # drag X1 Y1 X2 Y2 [button]: absolute pointer (0..32767), the
+                # button held from the first point to the second, in steps
+                qmp = qmp or Qmp(MONITOR[1] + 1)
+                parts = line.split()
+                x1, y1, x2, y2 = (int(v) for v in parts[1:5])
+                b = parts[5] if len(parts) > 5 else "left"
+                qmp.abs(x1, y1)
+                time.sleep(0.1)
+                qmp.abs(x1, y1, [(b, True)])
+                for i in range(1, 9):
+                    time.sleep(0.05)
+                    qmp.abs(x1 + (x2 - x1) * i // 8, y1 + (y2 - y1) * i // 8)
+                time.sleep(0.1)
+                qmp.abs(x2, y2, [(b, False)])
+            elif line.startswith("wheel "):
+                # wheel X Y N: the pointer there, the wheel turned N notches
+                # (up positive)
+                qmp = qmp or Qmp(MONITOR[1] + 1)
+                parts = line.split()
+                x, y, n = int(parts[1]), int(parts[2]), int(parts[3])
+                qmp.abs(x, y)
+                for _ in range(abs(n)):
+                    time.sleep(0.05)
+                    b = "wheel-up" if n > 0 else "wheel-down"
+                    qmp.abs(x, y, [(b, True)])
+                    qmp.abs(x, y, [(b, False)])
+            elif line.startswith("abs "):
                 # abs X Y [left|right|middle]: absolute pointer, 0..32767,
                 # with an optional click there
                 qmp = qmp or Qmp(MONITOR[1] + 1)

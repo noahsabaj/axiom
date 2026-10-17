@@ -59,7 +59,7 @@ loader reads: magic `AXIOMKRN`, entry point, file size, memory size.
 | 2 | `serial.asm`, `lib.asm`, `log.asm` | COM1 log, TSC time base, `sprintf`, `KLOG`; the clock and the boot volume into the log |
 | 3 | `cpu.asm` | CPUID features and brand, hybrid core types, PAT, NX, SSE/AVX through XSETBV, HWP, telemetry MSRs |
 | 4 | `pmm.asm`, `vmm.asm`, `heap.asm` | Bitmap page allocator from the UEFI memory map; the kernel's own page tables (no identity map, W^X), the vm region, the heap |
-| 5 | `gfx.asm`, `console.asm`, `ui.asm` | Framebuffer, alpha-blended glyphs, the dashboard and console |
+| 5 | `gfx.asm`, `desk.asm`, `term.asm`, `ui.asm` | Framebuffer, surfaces, alpha-blended glyphs; the desktop and the first shell's window (the others once the machine is up) |
 | 6 | TSS, IST | Guarded stacks: the BSP moves onto its own, the loader's goes back; #DF, NMI and #MC each get one too |
 | 7 | `acpi.asm`, `smbios.asm` | MADT (CPUs, I/O APICs, overrides), MCFG, FADT, `_S5_`; board, BIOS and memory strings |
 | 8 | `pmm.asm` | Reclaim boot-services memory |
@@ -76,8 +76,11 @@ loader reads: magic `AXIOMKRN`, entry point, file size, memory size.
 
 Then `main_loop`: poll and service USB (enumeration, hot-plug), service the
 network (frames in, link, DHCP/ARP/ping timers), save the log if it grew
-(every 10 s), apply pointer movement, take input, refresh telemetry every 500 ms, render a demo frame at
-most every 16 ms (or at once after a click or the wheel), and otherwise park
+(every 10 s), apply pointer movement (to the window under it), take keys (to
+the window with them), refresh telemetry every 500 ms, render a demo frame at
+most every 16 ms while its window is shown (or at once after a click or the
+wheel), destroy windows that closed, draw what was printed into each
+terminal, compose the screen where it changed, and otherwise park
 the thread `main` (`thread_park_until`) until the next deadline: the next
 refresh or frame, the next key repeat, the next network timer, or 4 ms while
 a USB controller or a network card needs polling. Any device interrupt
@@ -1062,14 +1065,73 @@ A TLS 1.3 client (RFC 8446) and the crypto under it.
   `--live` asks the real API with a made-up key (401) and fetches
   example.com.
 
-## Graphics and text: `gfx.asm`, `console.asm`, `ui.asm`
+## Graphics and text: `gfx.asm`
 
 The framebuffer is mapped write-combining, so stores stream out in 64-byte
-bursts. The font is Cascadia Mono rasterized at three sizes by
+bursts; everything is drawn into memory first and copied out where it
+changed. The font is Cascadia Mono rasterized at three sizes by
 `tools/mkfont.py` into 8-bit coverage maps; glyphs are alpha-blended over the
 background. The kernel picks the largest size that still leaves at least 50
-text rows. The dashboard is laid out in font cells: header, SYSTEM and
-CONSOLE on the left, PROCESSORS tiles and the MANDELBROT view on the right.
+text rows.
+
+- **Surfaces** (`SF_*`): pixels, pitch, width, height, and the bytes
+  allocated (`sf_size` grows them in 64 KiB steps; `sf_free`). The back
+  buffer is one, each window's client another.
+- **The target:** `gfx_fill`, `gfx_glyph` and the text functions draw into
+  the surface `gfx_target` names (`gfx_target_back`: the back buffer),
+  within a clip rectangle (`gfx_set_clip`; signed, so a window half off the
+  screen clips right). `gfx_save`/`gfx_restore` keep the caller's.
+
+## The desktop: `desk.asm`
+
+- **Windows** (`WN_*`): where the frame is, the client's size, its surface,
+  flags (`WF_SHOWN`, `WF_CLOSE`, `WF_RESIZE`, `WF_CLOSING`, `WF_PROGRAM`), an
+  id, a title, and an ops table: paint, key, click (press and release, at a
+  point in the client), wheel, close, move. `win_new` makes one, cascaded
+  unless told where; `win_move`, `win_resize` (`win_fit`: at least its
+  minimum, at most the screen, repainted), `win_focus` (raised, with the
+  keys), `win_minimise`, `win_close` (destroyed by the main loop, after its
+  own close op).
+- **Stacking:** `desk_z` bottom to top, `desk_wins` by slot (the bar's
+  order), `desk_focus` the window with the keys. A title bar always stays
+  on the screen, under the bar.
+- **Damage:** `win_damage` (any thread) adds a rectangle of the screen to a
+  list of 16 under a lock (once it is full, one rectangle around them
+  all).
+  `desk_update`, on the main thread, composes each one into the back buffer
+  (the background, the windows bottom to top, each frame then its client
+  copied in, the bar last) and copies it to the screen.
+- **The frame:** a border, a title bar with a minimise button (and a close
+  button if the window can close), and a grip in the client's corner if it
+  resizes. **The bar** across the top: AXIOM, `+ shell`, a button per window
+  (a click shows, raises or minimises it), the status at the right end.
+- **The pointer** (`desk_press`, `desk_release`, `desk_motion`,
+  `desk_wheel`): a press raises and focuses what is under it; on a title
+  bar it drags, on the grip it resizes, on a button it waits for the release
+  over the same button; in a client it goes to the window's click op, and so
+  does the release. The wheel goes to the client under the pointer.
+- `win` lists the windows (a shell's with its lines and how far it is
+  scrolled back); `win move|size|raise|min|close <n>` acts on one.
+
+## Terminals: `term.asm`
+
+- Each shell is a window with a terminal (`TW_*`): 1000 lines of 256 cells
+  (a character and its colour), the cursor, the scroll-back, its own input
+  line and history (`TW_SH_*`, `shell.asm`), and whether a command is still
+  running in it. `+ shell` or `shell` opens one; its close button closes it.
+- **Where output goes:** a thread's `TH_CON` names the terminal it prints
+  to (`con_target`: if that one is gone, the first shell, else the oldest).
+  Work that answers later records its terminal when it starts (a lookup, a
+  ping, a fetch, a TCP connection or listener, a program) and prints there
+  through `con_call`, which sets `TH_CON` around a call. ctrl+C, or closing
+  a terminal, stops what was started from it (`net_forget`, `user_forget`).
+- `con_write` puts text into a terminal's cells under `print_lock` (from any
+  CPU); `term_service` draws what changed into its window on the main
+  thread, scrolling the surface by moving its rows when it can.
+- **The dashboard** (`ui.asm`): System and Processors are windows too, and
+  the Mandelbrot, which renders straight into its window's surface
+  (`mandel_set_view`) and only while it is shown; its title carries the
+  live statistics.
 
 ## Telemetry: `cpu.asm`
 
@@ -1101,11 +1163,11 @@ from `_S5_`) for power-off, then QEMU's port 0x604.
 - System V-like: arguments in RDI, RSI, RDX, RCX, R8, R9; result in RAX;
   RBX, RBP, R12 to R15 preserved. Many leaf helpers preserve more, and say so
   in their header comment.
-- `KLOG "fmt", args...` logs to serial and, once the console exists, to the
-  screen; `SPRINTF buf, "fmt", args...` formats into memory. Arguments are
+- `KLOG "fmt", args...` logs to serial and, once there is a terminal, to the
+  one the thread prints to; `SPRINTF buf, "fmt", args...` formats into memory. Arguments are
   64-bit registers, immediates or `qword [mem]`.
 - Structures are `equ` offsets (`PC_*`, `TH_*`, `OB_*`, `TK_*`, `CAP_*`,
-  `HS_*`, `EV_*`, `MO_*`, `RG_*`, `RA_*`, `SQ_*`, `CQ_*`, `RQ_*`, `TM_*`, `AS_*`, `AM_*`, `AXE_*`,
+  `HS_*`, `EV_*`, `MO_*`, `RG_*`, `RA_*`, `SQ_*`, `CQ_*`, `RQ_*`, `TM_*`, `AS_*`, `AM_*`, `AXE_*`, `SF_*`, `WN_*`, `TW_*`,
   `SB_*`, `SR_*`, `CH_*`, `CM_*`, `PE_*`, `XC_*`, `DV_*`, `NV_*`, `DK_*`, `VO_*`, `VF_*`). Programs include
   `defs.inc` too: it is their ABI.
 - No code a system call or an interrupt reaches uses SIMD, so neither saves
