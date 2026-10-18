@@ -7,6 +7,10 @@ edition = "2024"
 hearth = { git = "https://github.com/noahsabaj/hearth", branch = "main", default-features = false, features = ["2d_soft"] }
 ab_glyph = "0.2"
 
+# Axiom's target, x86_64-axiom.json, has the vendor `axiom`, which rustc doesn't know of.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_vendor, values("axiom"))'] }
+
 [features]
 default = ["remote"]
 # Lets the `hearth` CLI inspect and drive the app while it runs, over the Hearth Remote Protocol.

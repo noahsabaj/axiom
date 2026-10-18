@@ -102,7 +102,7 @@ fn chess_from_args() -> Chess {
 /// since Axiom opens a window at the size it asks for.
 fn window_size() -> (u32, u32) {
     let (w, h) = (1120u32, 780u32);
-    #[cfg(target_os = "zkvm")]
+    #[cfg(target_vendor = "axiom")]
     if let Ok(look) = hearth::axiom::axiom::Look::get() {
         let scale = look.scale4().max(1) as f32 / 4.0;
         let (sw, sh) = look.screen();
@@ -115,7 +115,7 @@ fn window_size() -> (u32, u32) {
 
 /// Whether the system is in its dark appearance, which the game starts in. Only Axiom says.
 fn system_dark() -> bool {
-    #[cfg(target_os = "zkvm")]
+    #[cfg(target_vendor = "axiom")]
     if let Ok(look) = hearth::axiom::axiom::Look::get() {
         return look.dark();
     }
