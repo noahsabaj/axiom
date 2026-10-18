@@ -1301,6 +1301,8 @@ sched_timer_set:
     mov rcx, [r12 + PC_TIMER_AT]
     test rcx, rcx
     jz .set                             ; none set (or it has fired)
+    cmp rcx, r13
+    jb .set                             ; past due, and no tick yet: again
     test rax, rax
     jz .keep                            ; none wanted: one tick, then none
     cmp rcx, rax
