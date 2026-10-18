@@ -356,7 +356,7 @@ or idles.
   copies entries 256 to 511 of the kernel's, which never change after boot.
   The lower half is the task's: user pages are never global. Blocks of
   memory a task maps (`SYS_MAP`) go from `USER_MAPS` up, a guard page after
-  each, and are the memory object's own pages, so the kernel and the task
+  each, `AS_MAX` (128) of them at once, and are the memory object's own pages, so the kernel and the task
   see the same bytes. **A mapping is its capability's** (`CAP_MAPVA`): it
   goes, and every CPU's TLB forgets it before the memory can, when that
   handle is closed, revoked from the one it was derived from, given to
@@ -1282,6 +1282,37 @@ text rows.
   `vol <n> rw` that would allow it.
 - The user suite makes a folder with Files, names it, and checks the stick
   from the host.
+
+## Programs in Rust: `sdk/rust/`
+
+- **The target** (`x86_64-axiom.json`): x86-64, static, linked by rust-lld
+  with `axiom.ld`, which lays the program out as the kernel loads an .AXE
+  (the header at 0x400000, made by the linker from its symbols; the code,
+  the constants, the data, each from a page; the zeroes) and asserts the
+  header is whole. `tools/mkaxe.py` checks it as the loader will and writes
+  the flat file. Its `os` is `zkvm`: std has no layer for an operating
+  system it does not know, but its zkvm layer calls the platform for what
+  it needs (`sys_write`, `sys_alloc_aligned`, `sys_argv`, `sys_rand`,
+  `sys_panic`, ...), which the crate defines (`zkvm.rs`). std and core are
+  built from rust-src (`-Zbuild-std`), from its vendored crates, offline.
+- **The crate** (`axiom/`), `no_std`: system calls by `SYSCALL`, requests
+  on the task's ring (submitted at its tail, reaped at its head, under a
+  lock, one or a linked pair at a time) with a block of memory to hand
+  the kernel bytes in; `entry!` (a naked `_start` that aligns the stack and
+  calls in; an 8 MiB stack mapped and moved to; main's result as the exit
+  code; `AXE_WANTS` in a section the linker script puts in the header).
+  Windows: `SYS_CHANNEL_NEW`, `SYS_WINDOW_NEW`, the pixels mapped, the
+  look mapped for the screen's size (the stride of a window that can be
+  resized), `RO_WIN_SHOW`, `RO_WIN_TITLE`, events by `RO_RECV`, or
+  `RO_WAIT` linked to it with a deadline. Files: the `RO_FS_*` requests,
+  paths in the io block. Time: the TSC and the start block's rate.
+- **The heap**: few mappings (a task has 128): arenas from 1 MiB doubling
+  to 64 MiB, their pages kept as runs, by address, joined when freed;
+  64 KiB spans of slots of 40 sizes for up to 32 KiB (powers of two
+  aligned to themselves, for alignment); pages beyond, grown in place into
+  the run after them.
+- `tools/test/rust` builds both programs, runs them from the shell, and
+  checks the log and the screen.
 
 ## The browser: `src/user/browse.asm`, `src/user/web/`
 

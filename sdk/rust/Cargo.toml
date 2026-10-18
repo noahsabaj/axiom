@@ -1,0 +1,15 @@
+# Axiom's Rust programs, and the crate they are written with. Built by
+# tools/rust.py: for x86_64-axiom.json, std and core from source, into
+# build/rust; tools/mkaxe.py turns each into an .AXE.
+[workspace]
+members = ["axiom", "hello", "demo"]
+resolver = "3"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+codegen-units = 1
+lto = true

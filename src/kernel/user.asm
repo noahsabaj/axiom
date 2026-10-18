@@ -87,7 +87,7 @@ AS_LOCK         equ 16                  ; dword
 AS_NMAPS        equ 20                  ; dword
 AS_NEXT         equ 24                  ; where the next mapping goes
 AS_MAPS         equ 32                  ; AS_MAX of AM_SIZE
-AS_MAX          equ 32
+AS_MAX          equ 128                 ; blocks mapped at once (a heap, a window, files)
 AS_LX           equ AS_MAPS + AS_MAX * AM_SIZE ; a Linux program's memory (lxmm.asm):
 AS_VMAS         equ AS_LX + 0           ; its areas (VA_SIZE each, by address), or 0
 AS_NVMA         equ AS_LX + 8           ; dword: how many

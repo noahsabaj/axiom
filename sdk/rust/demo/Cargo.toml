@@ -1,0 +1,14 @@
+[package]
+name = "rdemo"
+version = "0.1.0"
+edition = "2024"
+description = "A Rust program with std: a window, drawn each frame, and what happens to it"
+
+[dependencies]
+axiom = { path = "../axiom" }
+
+[[bin]]
+name = "rdemo"
+path = "src/main.rs"
+test = false
+bench = false

@@ -184,6 +184,13 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   `stty`, `less` and others run, and programs using pthreads; ctrl+C sends
   SIGINT. The network and Claude Code itself come next (see
   `docs/VISION.md`).
+- **Programs in Rust, natively** (`sdk/rust`): the `axiom` crate is the
+  system interface for Rust (the ring, windows and their events, files,
+  the clock, a heap), and a program built with it is an `.AXE` like any
+  other, through no Linux layer. With std too: the target is std's zkvm
+  layer, whose few system calls the crate supplies, so `println!`, `Vec`,
+  `HashMap` and the rest work. `rhello` and `rdemo` come with it; `python
+  tools/rust.py` builds them (rustup's nightly with rust-src, offline).
 - ACPI (MADT, MCFG, FADT, the DSDT's `_S5_`), SMBIOS, PCI Express enumeration,
   x2APIC (falling back to xAPIC), I/O APIC, TSC-deadline timer, and a panic
   screen that stops every other CPU.
@@ -203,6 +210,11 @@ assembled side by side, and only what changed (or includes a file that
 changed) is assembled again; `--all` assembles everything. The kernel's
 jumps are left long (`-O1`): sizing each (`-Ox`, `--small`) takes NASM
 some 200 passes, a minute, for a kernel 4% smaller.
+
+The Rust programs (`sdk/rust`) are built apart, with rustup's nightly
+toolchain and its `rust-src`, nothing downloaded: `python tools/rust.py`
+writes `RHELLO.AXE` and `RDEMO.AXE` beside the others. See
+`sdk/rust/README.md`.
 
 ## Run in QEMU
 
@@ -398,6 +410,8 @@ src/boot/uefi.asm       the loader: a hand-built PE32+ UEFI application
 src/kernel/*.asm        the kernel, one flat image at 0xFFFFFFFF80000000
 src/user/               programs for ring 3 (axe.inc: their header and runtime)
 src/include/            structures shared by the two
+sdk/rust/               programs in Rust: the axiom crate, the target, two programs
+tools/rust.py           build them; tools/mkaxe.py turns each into an .AXE
 tools/build.py          assemble everything
 tools/run.py            boot in QEMU; type keys, move the pointer, take screenshots
 tools/mkdisk.py         a GPT + FAT32 test disk (as an NVMe drive or a USB stick)
@@ -435,7 +449,8 @@ tools/test/             host-side tests for self-contained modules (tls: the
                         network, and between two guests on a hub that is
                         their router; linux: Linux programs from
                         Ubuntu, and threads and signals in C, from a
-                        stick with a root on it); all.py
+                        stick with a root on it; rust: the Rust programs,
+                        their heap, files, a window and its events); all.py
                         runs them
                         all at once, and qemu.py boots side by side
 tools/mkfont.py         rasterize the console font into src/kernel/gen/

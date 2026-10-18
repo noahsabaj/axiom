@@ -1,0 +1,14 @@
+[package]
+name = "rhello"
+version = "0.1.0"
+edition = "2024"
+description = "A Rust program without std: the console, the heap, files, the clock"
+
+[dependencies]
+axiom = { path = "../axiom" }
+
+[[bin]]
+name = "rhello"
+path = "src/main.rs"
+test = false
+bench = false
