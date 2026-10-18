@@ -139,11 +139,20 @@ entry:                                      ; RCX = ImageHandle, RDX = SystemTab
     jc .five_level
 
     call setup_display
+    rdtsc
+    mov [bootinfo + BI_TSC_DISPLAY], eax
+    mov [bootinfo + BI_TSC_DISPLAY + 4], edx
     call find_config_tables
     call find_boot_volume
     call calibrate_tsc
+    rdtsc
+    mov [bootinfo + BI_TSC_CALIB], eax
+    mov [bootinfo + BI_TSC_CALIB + 4], edx
     call load_kernel
     call build_page_tables
+    rdtsc
+    mov [bootinfo + BI_TSC_TABLES], eax
+    mov [bootinfo + BI_TSC_TABLES + 4], edx
     lea rdx, [msg_launch]
     call print
     call leave_boot_services
@@ -460,23 +469,69 @@ find_boot_volume:
     ret
 
 ; -----------------------------------------------------------------------------
-;  calibrate_tsc - let the firmware's own timer measure our TSC
+;  calibrate_tsc - the TSC's rate: from CPUID leaf 0x15 (the crystal and
+;  the ratio, exact) when the CPU gives all of it and a 5 ms Stall agrees
+;  within a factor of two; else measured over a 50 ms Stall
 ; -----------------------------------------------------------------------------
 calibrate_tsc:
     sub rsp, 40
+    mov [saved_rbx], rbx
+    mov qword [tsc_cpuid], 0
+    xor eax, eax
+    cpuid
+    cmp eax, 0x15
+    jb .measure
+    mov eax, 0x15
+    xor ecx, ecx
+    cpuid
+    test eax, eax
+    jz .measure
+    test ebx, ebx
+    jz .measure
+    test ecx, ecx
+    jz .measure
+    mov r8d, eax
+    mov eax, ecx                            ; crystal Hz * numerator / denominator
+    mul rbx
+    div r8
+    mov [tsc_cpuid], rax
+    mov ecx, 5000                           ; Stall(5 ms), to check it
+    call stall_ticks
+    imul rax, rax, 200
+    mov rcx, [tsc_cpuid]
+    shr rcx, 1
+    cmp rax, rcx                            ; under half: not this TSC
+    jb .measure
+    shl rcx, 2
+    cmp rax, rcx                            ; over twice
+    ja .measure
+    mov rax, [tsc_cpuid]
+    jmp .set
+.measure:
+    mov ecx, 50000                          ; Stall(50 ms)
+    call stall_ticks
+    imul rax, rax, 20
+.set:
+    mov [bootinfo + BI_TSC_HZ], rax
+    mov rbx, [saved_rbx]
+    add rsp, 40
+    ret
+
+; stall_ticks(ECX = microseconds) -> RAX = TSC ticks the firmware's Stall took
+stall_ticks:
+    sub rsp, 40
+    mov [stall_us], rcx
     rdtsc
     shl rdx, 32
     or rax, rdx
     mov [tsc_mark], rax
-    mov ecx, 50000                          ; Stall(50 ms)
+    mov rcx, [stall_us]
     mov rax, [boot_services]
     call [rax + BS_STALL]
     rdtsc
     shl rdx, 32
     or rax, rdx
     sub rax, [tsc_mark]
-    imul rax, rax, 20
-    mov [bootinfo + BI_TSC_HZ], rax
     add rsp, 40
     ret
 
@@ -859,6 +914,9 @@ gop:                dq 0
 info_size:          dq 0
 info_ptr:           dq 0
 tsc_mark:           dq 0
+tsc_cpuid:          dq 0
+stall_us:           dq 0
+saved_rbx:          dq 0
 alloc_count:        dq 0
 alloc_addr:         dq 0
 kernel_entry:       dq 0

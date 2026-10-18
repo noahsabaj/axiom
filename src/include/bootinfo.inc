@@ -47,4 +47,7 @@ BI_RESV_MAX     equ 16
 BI_FW_VENDOR    equ 416                 ; 64-byte ASCII firmware vendor
 BI_BOOT_SERIAL  equ 480                 ; dword FAT volume serial of the boot volume
 BI_BOOT_FS      equ 484                 ; dword: 32 FAT32, 16 FAT16, 0 unknown
+BI_TSC_DISPLAY  equ 488                 ; TSC: the display's mode set
+BI_TSC_CALIB    equ 496                 ; TSC: the config tables, the boot volume, the TSC
+BI_TSC_TABLES   equ 504                 ; TSC: the kernel copied, its page tables built
 BI_SIZE         equ 512

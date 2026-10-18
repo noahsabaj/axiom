@@ -18,7 +18,10 @@ the firmware left 5-level paging on.
 3. Read the first sector of the volume the loader came from (`LoadedImage`'s
    device handle, its `BlockIo`) and keep its FAT volume serial number, so the
    kernel can find that stick again for its log. Never fatal.
-4. Calibrate the TSC against the firmware's `Stall` (50 ms).
+4. The TSC's rate: from CPUID leaf 0x15 (crystal × ratio) when the CPU
+   gives all of it and a 5 ms `Stall` agrees within a factor of two; else
+   measured against a 50 ms `Stall`. The loader keeps a TSC mark after each
+   step for `bench boot`.
 5. Copy the embedded `kernel.bin` (an `incbin`) into fresh pages, zero its
    `.bss`, and build page tables:
    - `PML4[0]`: identity map of physical memory in 2 MiB pages, needed for
