@@ -27,14 +27,17 @@
 ;  and ax_io_va (a page of memory to write from), ax_tsc_us, ax_gift (what
 ;  the task that started it gave it, 0 if nothing), ax_store (its names in
 ;  the store, under "name/", if there is a store), ax_net (the network, all
-;  of it), ax_desk (the desktop, to open windows on): each 0 unless it was
-;  run from the shell and wanted it, or the shell granted it for that run.
+;  of it), ax_desk (the desktop, to open windows on), ax_settings (the
+;  machine's settings: RO_SET_LIST, RO_SET_CHANGE, RO_WAIT for a change):
+;  each 0 unless it was run from the shell and wanted it, or the shell
+;  granted it for that run.
 ;  Each preserves RBX, RBP, R12-R15, as the kernel's functions do.
 ;
 ;  A program says what it needs, once, anywhere in it:
-;    WANTS AW_DESK | AW_NET      (AW_NET, AW_STORE, AW_DESK; or WANTS nothing)
-;  The shell gives it that and no more; '+net', '+store' and '+desk' before
-;  its name give more, for that run.
+;    WANTS AW_DESK | AW_NET      (AW_NET, AW_STORE, AW_DESK, AW_SETTINGS; or
+;                                 WANTS nothing)
+;  The shell gives it that and no more; '+net', '+store', '+desk' and
+;  '+settings' before its name give more, for that run.
 ; =============================================================================
 
 %include "defs.inc"
@@ -87,6 +90,8 @@ ax_start:
     mov [ax_net], eax
     mov eax, [rdi + SB_DESK]
     mov [ax_desk], eax
+    mov eax, [rdi + SB_SETTINGS]
+    mov [ax_settings], eax
     mov edi, 4096                       ; a page to write from
     mov eax, SYS_MEM_NEW
     syscall
@@ -449,6 +454,7 @@ ax_gift:        resd 1
 ax_store:       resd 1
 ax_net:         resd 1
 ax_desk:        resd 1
+ax_settings:    resd 1
 ax_rx:          resd 1
 ax_len:         resd 1
 ax_digits:      resb 24

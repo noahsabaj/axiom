@@ -1513,7 +1513,8 @@ lx_forget:
 ;  Time
 ; -----------------------------------------------------------------------------
 
-; lx_time_init: the wall clock at boot, from the CMOS clock (taken as UTC)
+; lx_time_init: the wall clock at boot, from the CMOS clock (time.zone from
+; UTC); again when time.zone changes
 lx_time_init:
     push rbx
     call rtc_read
@@ -1567,6 +1568,11 @@ lx_time_init:
     imul rcx, [rtc_min], 60
     add rax, rcx
     add rax, [rtc_sec]
+    push rax                            ; the clock keeps time.zone: UTC
+    call cfg_zone
+    imul rcx, rax, 60
+    pop rax
+    sub rax, rcx
     mov rbx, rax
     call lx_now_ns                      ; less the time since boot
     mov rcx, 1000000000
@@ -1835,6 +1841,14 @@ lx_sys_uname:
     lodsq
     test rax, rax
     jz .copy
+    lea rcx, [str_lxu_node]             ; the node: network.name
+    cmp rax, rcx
+    jne .named
+    push rsi
+    call cfg_host
+    mov rax, rsi
+    pop rsi
+.named:
     push rsi
     push rdi
     mov rsi, rax

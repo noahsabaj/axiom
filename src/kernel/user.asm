@@ -60,8 +60,8 @@
 ;      AW_*) -> RAX = a task (a reference), RDX = its first thread, started
 ;      (a reference, for user_wait); RAX = 0 if it could not be loaded
 ;      (said why), RDX = E_*. One the shell runs gets the network, its
-;      names in the store and the desktop only as it wants or is granted
-;      them, and writes to the shell's terminal; one a task starts gets
+;      names in the store, the desktop and the settings only as it wants
+;      or is granted them, and writes to the shell's terminal; one a task starts gets
 ;      none of them, only what it is given, and writes where its parent does
 ;    user_wait(RDI = task, RSI = its first thread) -> RAX = what that thread
 ;      returned, once it and every other thread of the task have ended
@@ -1771,9 +1771,14 @@ user_load:
     mov [rbp + SB_NET], eax
 .no_net:
     test qword [rsp + 8 + 48], AW_DESK
-    jz .given
+    jz .no_desk
     call desk_program                   ; the desktop
     mov [rbp + SB_DESK], eax
+.no_desk:
+    test qword [rsp + 8 + 48], AW_SETTINGS
+    jz .given
+    call cfg_program                    ; the settings
+    mov [rbp + SB_SETTINGS], eax
 .given:
     xor eax, eax
     mov esi, [rsp + 8 + 40]             ; and what it is given

@@ -18,6 +18,10 @@ the firmware left 5-level paging on.
 3. Read the first sector of the volume the loader came from (`LoadedImage`'s
    device handle, its `BlockIo`) and keep its FAT volume serial number, so the
    kernel can find that stick again for its log. Never fatal.
+   Then `\SETTINGS.TXT` from the same volume, through its
+   `SimpleFileSystem`, read only, into 8 KiB of loader data
+   (`BI_SETTINGS`, `BI_SETTINGS_LEN`); none, and the kernel starts from its
+   defaults.
 4. Calibrate the TSC against the firmware's `Stall` (50 ms).
 5. Copy the embedded `kernel.bin` (an `incbin`) into fresh pages, zero its
    `.bss`, and build page tables:
@@ -36,7 +40,8 @@ the firmware left 5-level paging on.
    identity mapped, so `ResetSystem` keeps working.
 7. Load CR3, jump to `kernel_main` with a boot-information block
    (`src/include/bootinfo.inc`): memory map, framebuffer, ACPI, SMBIOS, TSC
-   frequency, runtime-services table, boot volume serial.
+   frequency, runtime-services table, boot volume serial, the settings
+   file.
 
 Placing the kernel in the top 2 GiB matters for assembly: every label is a
 sign-extended 32-bit value, so `[table + rax*8]` and `push label` encode
@@ -692,6 +697,55 @@ appended and saved, unless the crash came in the middle of a FAT write
 when the FAT code's state can't be trusted. USB transfers are polled, so the
 save works with interrupts off. A failed automatic save turns automatic saving
 off. `log` shows the state; `log save`, `log on`, `log off`.
+
+## Settings: `settings.asm`
+
+- **The store:** a table of settings (`SETTING`: a name, a kind, flags, a
+  default, a range and step or a list of names, a unit, what applies it, a
+  line about it), a value each in `cfg_vals` and, for words, 64 bytes in
+  `cfg_texts`. Kinds (`SK_*`): a choice, a switch, a number, a colour (with
+  named swatches), a zone (minutes from UTC) and a word, checked by
+  `CW_HOST`, `CW_IPV4` or `CW_WORD`. `cfg_parse` reads a value as a person
+  types it (`500ms`, `on`, `orange` or `#ff9f0a`, `-05:00`); `cfg_show`
+  writes it back the same way; `cfg_takes` says what one takes, for errors.
+- **A change** (`cfg_change`, any thread, under `cfg_lock`): the value, a
+  bit in `cfg_pending` for the main loop, `cfg_dirty` and a save a second
+  later, and every settings object told (`cfg_notify`: `SG_CHANGED` set,
+  its queue woken). `cfg_service`, from the main loop, runs each pending
+  setting's apply (`SD_APPLY`) on the main thread, and saves.
+- **What reads them:** the look (`look_set`: `look_bg` .. `look_accent`
+  from `display.theme` and `display.accent`, read by the desk, the bar, the
+  frames and the terminals; text already written keeps the dark look's
+  `COL_*` in its cells, and `look_map` turns those into the look's at
+  drawing time), `look_backdrop` (the wallpaper: plain, or a gradient in
+  bands), `cfg_clock` (the bar's clock, from the CMOS clock), `cfg_font`
+  (`gfx_init`'s font: `display.text-size`), `cfg_repeat_delay` and
+  `cfg_repeat_every` (USB key repeat), `cfg_key` (Dvorak and Colemak, by
+  character, on USB and PS/2), `cfg_pointer` and `cfg_wheel`, `cfg_host`
+  (DHCP's host name option and Linux's `uname`), `cfg_zone` (Linux's
+  UTC), the IPv4 setting (through `ip`/`dhcp`), `ip6_prefer`, the log and
+  Claude's model. The power button is `power.asm`'s.
+- **Kept** in `/SETTINGS.TXT` on the boot stick, the log's volume and the
+  log's way of writing it: `name = value` for each that is not its default,
+  `#` for remarks. The loader's copy is read in `cfg_init`, before
+  `gfx_init`, so the look and the text size hold from the first frame; if
+  the loader had none, the stick's is read once it is mounted. Saved a
+  second after a change, and by `log_final` before a reboot or power-off.
+- **The shell:** `settings [name | category | pattern]` (records: one in
+  full, with what it takes and whether it applies now or at the next
+  start), `settings set <name> <value>` (a row: name, value, was) and
+  `settings reset <name | pattern | all>...`.
+- **Programs** that want them (`AW_SETTINGS`, or `+settings`) get an
+  `OT_SETTINGS` handle of their own (`SB_SETTINGS`, rights `RT_SET_READ`,
+  `RT_SET_CHANGE`). `RO_SET_LIST` copies a record (`SI_*`, 512 bytes:
+  name, kind, flags, value, default, range, its text, unit, choices,
+  swatches, about) for each into the program's memory and clears its
+  `SG_CHANGED`; `RO_SET_CHANGE` sets one by its place, as a value or as
+  text from its memory; `RO_WAIT` on the handle ends once one changed
+  since it last listed them. `src/user/settings.asm` (`run settings`) is
+  the window: it keeps a wait on its window's channel and one on the
+  settings at once (`arm`, `drain`), so a change from the shell repaints
+  it, and its own changes come back the same way.
 
 ## Network: `rtl8168.asm`, `net.asm`, `ip6.asm`, `tcp.asm`, `netapp.asm`, `http.asm`, `httpd.asm`, `socket.asm`
 
@@ -1539,6 +1593,13 @@ restarts before double precision runs out.
 Reboot and power-off use UEFI `ResetSystem` first, on the firmware tables. Fallbacks: the ACPI reset
 register, port CF9, the 8042 and a triple fault for reboot; ACPI S5 (SLP_TYP
 from `_S5_`) for power-off, then QEMU's port 0x604.
+
+The power button: when the firmware left the machine in ACPI mode (`SCI_EN`)
+and the FADT's button is the fixed one, `power_button_init` sets
+`PWRBTN_EN` in PM1a; the SCI stays masked, and the main loop polls
+`PWRBTN_STS` (`power_button`), then does what `power.button` says: off,
+restart or nothing. A control-method button (one the DSDT drives) is not
+seen yet.
 
 ## Conventions
 

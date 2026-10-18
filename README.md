@@ -42,6 +42,21 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   page, and a page's blocks on a slide. Undo, copy and paste, its own
   versioned file format (`docs/COMPOSE.md`) saved into the store, and plain
   text and CSV in and out.
+- **Settings**, one store of them in the kernel, typed and described: the
+  look (`display.theme` dark or light, `display.accent`, the wallpaper, the
+  bar's clock), the text size, the keyboard's repeat and layout (US, Dvorak,
+  Colemak), the pointer's speed and natural scrolling, the time zone, the
+  machine's name (for DHCP and Linux), IPv4 by DHCP or by hand, what the
+  power button does, the log, and Claude's model. `settings` lists them as
+  records (`settings display`, `settings | where name ~ key*`), `settings
+  set <name> <value>` changes one now, and an error names what it takes;
+  `settings reset` puts them back. What is not a default is kept in
+  `SETTINGS.TXT` beside the log on the boot stick, and the loader hands it to
+  the kernel, so the look and the text size are there from the first frame.
+  `run settings` opens **the Settings window**: a sidebar of categories and
+  switches, choices, sliders, swatches, steppers and fields, in the look it
+  sets; it reaches the settings only through a capability, and follows a
+  change made anywhere else at once.
 - **USB** on every xHCI controller: hubs (nested, USB 2 and 3), hot-plug, and a
   HID report parser for keyboards (6-key and N-key rollover), mice and tablets.
   A mouse cursor: in the Mandelbrot's window, click to recentre it, wheel to
@@ -148,7 +163,7 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   killing one (ctrl+C, or a program killing its child) ends every program
   it started too. Several run at once (`&`, `tasks stop <program>`), and
   each gets only the capabilities it declares (the network, the store, the
-  desktop) or is granted for that run (`+net hello`). `hello`, `test`, `child`, `fault`, `spin`, `stash`, `paint`, `browse` and `compose` come with it
+  desktop, the settings) or is granted for that run (`+net hello`). `hello`, `test`, `child`, `fault`, `spin`, `stash`, `paint`, `browse`, `settings` and `compose` come with it
   (`src/user/`); `user test` runs them all, with a fault of every kind.
 - **Linux programs, unchanged**: `linux <program> [arguments]` runs an
   x86-64 Linux program from a root on the boot stick (`tools/mkroot.py`
@@ -414,7 +429,10 @@ tools/test/             host-side tests for self-contained modules (tls: the
                         client against servers on the host, and httpd
                         against clients there; ip6: IPv6 on QEMU's
                         network, and between two guests on a hub that is
-                        their router; linux: Linux programs from
+                        their router; settings: the shell's settings,
+                        the Settings window clicked, the look's pixels,
+                        SETTINGS.TXT across two boots, Dvorak and the
+                        power button; linux: Linux programs from
                         Ubuntu, and threads and signals in C, from a
                         stick with a root on it); all.py
                         runs them

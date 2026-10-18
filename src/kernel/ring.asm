@@ -555,6 +555,8 @@ ring_arm:
     je .channel
     cmp rax, OT_SOCKET
     je .socket
+    cmp rax, OT_SETTINGS
+    je .settings
     mov esi, OT_EVENT
     mov edx, RT_EV_WAIT
     call handle_get
@@ -583,6 +585,16 @@ ring_arm:
     mov r13, rax
     lea r14, [r13 + CH_READY]
     lea rax, [r13 + CH_WQ]
+    jmp .queue
+.settings:                              ; until one changed since they were listed
+    mov esi, OT_SETTINGS
+    mov edx, RT_SET_READ
+    call handle_get
+    cmp rax, E_ANY
+    jae .out
+    mov r13, rax
+    lea r14, [r13 + SG_CHANGED]
+    lea rax, [r13 + SG_WQ]
     jmp .queue
 .socket:                                ; a0 = 0: something to receive; 1: room to send
     mov rax, E_ARG
@@ -1018,6 +1030,21 @@ ring_exec:
     mov rdx, [rbx + SQ_A0]
     mov rcx, [rbx + SQ_A1]
     call h_win_title
+    jmp .out
+.set_list:
+    mov edi, [rbx + SQ_HANDLE]
+    mov esi, [rbx + SQ_HANDLE2]
+    mov rdx, [rbx + SQ_A0]
+    mov rcx, [rbx + SQ_A1]
+    call h_set_list
+    jmp .out
+.set_change:
+    mov edi, [rbx + SQ_HANDLE]
+    mov esi, [rbx + SQ_HANDLE2]
+    mov rdx, [rbx + SQ_A0]
+    mov rcx, [rbx + SQ_A1]
+    mov r8, [rbx + SQ_A2]
+    call h_set_change
     jmp .out
 .bad:
     mov rax, E_ARG                      ; one it does not know
@@ -1499,8 +1526,10 @@ ro_exec:        dq ring_exec.nop, ring_exec.signal, ring_exec.reset, ring_exec.b
                 dq ring_exec.st_abort, ring_exec.st_sub, ring_exec.st_rollback, ring_exec.st_list
                 dq ring_exec.net_connect, ring_exec.net_listen, ring_exec.net_accept, ring_exec.net_status
                 dq ring_exec.net_shut, ring_exec.net_sub, ring_exec.win_show, ring_exec.win_title
+                dq ring_exec.set_list, ring_exec.set_change
 ro_async:       db 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 ; which wait: RO_WAIT, RO_JOIN, RO_TIMEOUT
                 db 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+                db 0, 0
 
 section .bss
 alignb 8

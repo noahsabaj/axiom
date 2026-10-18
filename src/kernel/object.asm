@@ -1476,6 +1476,7 @@ str_rt_insecure: db 'insecure', 0
 str_rt_listen:  db 'listen', 0
 str_rt_window:  db 'window', 0
 str_rt_draw:    db 'draw', 0
+str_rt_change:  db 'change', 0
 str_e_ok:       db 'ok', 0
 str_e_badh:     db 'no such handle', 0
 str_e_type:     db 'the wrong type', 0
@@ -1530,6 +1531,8 @@ rt_names_desk:  dq str_rt_dup, str_rt_give, str_rt_info, 0, 0, 0, 0, 0
                 dq str_rt_window, 0, 0, 0, 0, 0, 0, 0
 rt_names_window: dq str_rt_dup, str_rt_give, str_rt_info, 0, 0, 0, 0, 0
                 dq str_rt_draw, 0, 0, 0, 0, 0, 0, 0
+rt_names_settings: dq str_rt_dup, str_rt_give, str_rt_info, 0, 0, 0, 0, 0
+                dq str_rt_read, str_rt_change, 0, 0, 0, 0, 0, 0
 
 section .data
 align 8
@@ -1548,6 +1551,7 @@ ty_net:         dq str_ot_net, obj_free, 0, 0, 0, 0, rt_names_net, 0
 ty_socket:      dq str_ot_socket, sk_destroy, 0, 0, 0, 0, rt_names_socket, sk_orphan
 ty_desk:        dq str_ot_desk, obj_free, 0, 0, 0, 0, rt_names_desk, 0
 ty_window:      dq str_ot_window, wo_destroy, 0, 0, 0, 0, rt_names_window, wo_orphan
+ty_settings:    dq str_ot_settings, obj_free, 0, 0, 0, 0, rt_names_settings, 0
 
 thread_list     equ ty_thread + TY_LIST
 thread_count    equ ty_thread + TY_LIVE

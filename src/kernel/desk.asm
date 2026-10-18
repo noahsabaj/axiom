@@ -894,8 +894,7 @@ desk_compose:
     mov r15, rcx
     call gfx_target_back
     call gfx_set_clip
-    mov r8d, COL_BG                     ; the background
-    call gfx_fill
+    call look_backdrop                  ; the background
     xor ebx, ebx                        ; windows, bottom to top
 .window:
     cmp rbx, [desk_zn]
@@ -959,7 +958,7 @@ desk_frame:
     mov r13, rsi
     mov r14, rdx
     mov r15, rcx
-    mov r8d, COL_LINE                   ; the border
+    mov r8d, [look_line]                   ; the border
     call gfx_fill
     mov rdi, r12                        ; the title bar
     add rdi, [fr_b]
@@ -969,10 +968,10 @@ desk_frame:
     sub rdx, [fr_b]
     sub rdx, [fr_b]
     mov rcx, [fr_t]
-    mov r8d, COL_PANEL
+    mov r8d, [look_panel]
     cmp rbx, [desk_focus]
     jne .bar_color
-    mov r8d, COL_PANEL2
+    mov r8d, [look_panel2]
 .bar_color:
     call gfx_fill
     cmp rbx, [desk_focus]               ; the accent mark of the focused one
@@ -984,7 +983,7 @@ desk_frame:
     mov rdx, [ui_line]
     imul rdx, rdx, 3
     mov rcx, [fr_t]
-    mov r8d, COL_ACCENT
+    mov r8d, [look_accent]
     call gfx_fill
 .title:
     mov rax, [fr_t]                     ; text row, centred in the bar
@@ -1007,19 +1006,19 @@ desk_frame:
     add rdi, [font_cw]
     mov rsi, [frame_ty]
     lea rdx, [rbx + WN_TITLE]
-    mov ecx, COL_DIM
-    mov r8d, COL_PANEL
+    mov ecx, [look_dim]
+    mov r8d, [look_panel]
     cmp rbx, [desk_focus]
     jne .title_text
-    mov ecx, COL_TEXT
-    mov r8d, COL_PANEL2
+    mov ecx, [look_text]
+    mov r8d, [look_panel2]
 .title_text:
     call ui_text_max
 .buttons:
-    mov r15d, COL_PANEL                 ; right to left: close, minimise
+    mov r15d, [look_panel]                 ; right to left: close, minimise
     cmp rbx, [desk_focus]
     jne .btn_bg
-    mov r15d, COL_PANEL2
+    mov r15d, [look_panel2]
 .btn_bg:
     mov rdi, r12
     add rdi, r14
@@ -1033,7 +1032,7 @@ desk_frame:
     push rdi
     mov rdi, rdx
     lea rdx, [str_btn_close]
-    mov ecx, COL_DIM
+    mov ecx, [look_dim]
     mov r8d, r15d
     call ui_text
     pop rdi
@@ -1044,7 +1043,7 @@ desk_frame:
     mov rsi, [frame_ty]
     mov rdi, rdx
     lea rdx, [str_btn_min]
-    mov ecx, COL_DIM
+    mov ecx, [look_dim]
     mov r8d, r15d
     call ui_text
     test dword [rbx + WN_FLAGS], WF_RESIZE
@@ -1064,7 +1063,7 @@ desk_frame:
     sub rdi, rax
     mov rdx, rax
     mov rcx, [ui_line]
-    mov r8d, COL_FAINT
+    mov r8d, [look_faint]
     call gfx_fill
     mov rdi, r12
     mov rsi, r13
@@ -1256,21 +1255,21 @@ desk_bar_paint:
     xor esi, esi
     mov rdx, [scr_w]
     mov rcx, [hdr_h]
-    mov r8d, COL_PANEL
+    mov r8d, [look_panel]
     call gfx_fill
     xor edi, edi
     mov rsi, [hdr_h]
     sub rsi, [ui_line]
     mov rdx, [scr_w]
     mov rcx, [ui_line]
-    mov r8d, COL_LINE
+    mov r8d, [look_line]
     call gfx_fill
     mov rdi, [font_cw]
     mov rsi, [font_ch]
     shr rsi, 1
     lea rdx, [str_brand]
-    mov ecx, COL_ACCENT
-    mov r8d, COL_PANEL
+    mov ecx, [look_accent]
+    mov r8d, [look_panel]
     call ui_text
     call bar_layout
     xor ebx, ebx
@@ -1279,12 +1278,12 @@ desk_bar_paint:
     jae .status
     lea rax, [bar_win]
     mov r12, [rax + rbx * 8]            ; its window, or 0
-    mov r8d, COL_PANEL                  ; the button
+    mov r8d, [look_panel]                  ; the button
     test r12, r12
     jz .box
     cmp r12, [desk_focus]
     jne .box
-    mov r8d, COL_PANEL2
+    mov r8d, [look_panel2]
 .box:
     push r8
     lea rax, [bar_x0]
@@ -1300,17 +1299,17 @@ desk_bar_paint:
     sub rcx, rsi
     call gfx_fill
     pop r8
-    mov ecx, COL_ACCENT                 ; and its label
+    mov ecx, [look_accent]                 ; and its label
     test r12, r12
     jz .label
-    mov ecx, COL_DIM
+    mov ecx, [look_dim]
     test dword [r12 + WN_FLAGS], WF_SHOWN
     jnz .shown
-    mov ecx, COL_FAINT
+    mov ecx, [look_faint]
 .shown:
     cmp r12, [desk_focus]
     jne .label
-    mov ecx, COL_TEXT
+    mov ecx, [look_text]
 .label:
     lea rax, [bar_x0]
     mov rdi, [rax + rbx * 8]
@@ -1329,8 +1328,8 @@ desk_bar_paint:
     mov rsi, [font_ch]
     shr rsi, 1
     lea rdx, [bar_status]
-    mov ecx, COL_TEXT
-    mov r8d, COL_PANEL
+    mov ecx, [look_text]
+    mov r8d, [look_panel]
     call ui_text_right
     pop r12
     pop rbx
