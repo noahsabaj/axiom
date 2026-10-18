@@ -292,7 +292,7 @@ def main():
     subprocess.run([sys.executable, str(ROOT / "tools" / "mkstick.py"), str(stick)], cwd=ROOT,
                    check=True, capture_output=True)
     logs = boot_all(OUT, {"desk": (script(), ["--smp", "4", "--demo", "--extra", TABLET, "--stick",
-                                              stick.relative_to(ROOT).as_posix()], 120)})
+                                              stick.relative_to(ROOT).as_posix()], 120, 2)})
     check(*logs["desk"])
     print(f"{'all passed' if not FAILS else f'{FAILS} FAILED'}")
     return 1 if FAILS else 0

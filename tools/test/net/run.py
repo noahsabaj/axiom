@@ -243,7 +243,7 @@ def main():
                "type poweroff" + NL, "ended"]
     fwd = f"user,hostfwd=tcp:127.0.0.1:{SERVE}-:7777"
     logs = boot_all(OUT, {"net": (script, ["--smp", "4", "--nic", "rtl8139", "--netdev", fwd,
-                                            "--stick", stick.relative_to(ROOT).as_posix()], 300)})
+                                            "--stick", stick.relative_to(ROOT).as_posix()], 300, 1)})
     log, err = logs["net"]
     result("AXIOM PANIC" not in log, "no panic")
     result("QEMU ended by itself" in err, "powered off")

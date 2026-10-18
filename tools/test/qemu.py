@@ -9,7 +9,9 @@ side: as many at once as there are host threads to spare for their CPUs
 (--smp, 8 when not given), counting only threads that are idle when the
 suite starts (AXIOM_VCPUS=N says otherwise). That limit holds across processes, so suites can
 run at the same time too: each vCPU is a lock on a file in build/test/slots,
-let go when the boot ends or its process dies. Each boot has 1 GiB unless
+let go when the boot ends or its process dies. A boot that mostly waits (for
+what is typed, for the network) can take fewer slots than it has vCPUs, since
+an idle guest's CPUs sleep: a fourth element in boot_all's tuple, or slots=N. Each boot has 1 GiB unless
 it asks for more (--mem). A boot whose firmware never
 got as far as Axiom is booted again. AXIOM_TRACE=1 times each step of each
 boot's script (tools/run.py --trace).
@@ -112,13 +114,13 @@ def cpus(extra):
     return int(extra[extra.index("--smp") + 1]) if "--smp" in extra else 8
 
 
-def boot(out, name, script, *extra, timeout=60, again=True):
-    """One boot, once it has its vCPUs: (the serial log, run.py's stderr,
-    seconds). Booted again if the firmware never got as far as Axiom,
-    unless again is False."""
+def boot(out, name, script, *extra, timeout=60, again=True, slots=None):
+    """One boot, once it has its slots (its vCPUs, or slots): (the serial
+    log, run.py's stderr, seconds). Booted again if the firmware never got
+    as far as Axiom, unless again is False."""
     serial = out / f"{name}.log"
     out.mkdir(parents=True, exist_ok=True)
-    slots = take(cpus(extra))
+    slots = take(slots or cpus(extra))
     start = time.monotonic()
     try:
         for attempt in range(2 if again else 1):
@@ -145,12 +147,13 @@ def boot(out, name, script, *extra, timeout=60, again=True):
 
 
 def boot_all(out, jobs):
-    """jobs: {name: (script, [run.py arguments], timeout)}, booted side by
-    side -> {name: (log, stderr)}; how long each took is printed."""
+    """jobs: {name: (script, [run.py arguments], timeout[, slots])}, booted
+    side by side -> {name: (log, stderr)}; how long each took is printed."""
     start = time.monotonic()
     with concurrent.futures.ThreadPoolExecutor(len(jobs)) as pool:
         done = dict(zip(jobs, pool.map(
-            lambda name: boot(out, name, jobs[name][0], *jobs[name][1], timeout=jobs[name][2]),
+            lambda name: boot(out, name, jobs[name][0], *jobs[name][1], timeout=jobs[name][2],
+                              slots=(jobs[name][3:] or [None])[0]),
             jobs)))
     print("      (" + ", ".join(f"{name} {done[name][2]:.0f} s" for name in jobs) +
           f"; {time.monotonic() - start:.0f} s in all)", flush=True)

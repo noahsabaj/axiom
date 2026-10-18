@@ -264,7 +264,7 @@ def main():
     subprocess.run([sys.executable, str(ROOT / "tools" / "mkstick.py"), str(stick),
                     "--linux", str(LINUX)], cwd=ROOT, check=True, capture_output=True)
     logs = boot_all(OUT, {"linux": (script(), ["--smp", "4", "--stick",
-                                                stick.relative_to(ROOT).as_posix()], 300)})
+                                                stick.relative_to(ROOT).as_posix()], 300, 1)})
     print("-- linux")
     check(*logs["linux"])
     print(f"{'all passed' if FAILS == 0 else f'{FAILS} failed'}")

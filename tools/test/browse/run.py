@@ -356,7 +356,7 @@ def main():
                    check=True, capture_output=True)
     logs = boot_all(OUT, {"browse": (script(links), [
         "--smp", "4", "--nic", "rtl8139", "--extra", TABLET,
-        "--stick", stick.relative_to(ROOT).as_posix()], 300)})
+        "--stick", stick.relative_to(ROOT).as_posix()], 300, 1)})     # it mostly waits
     check(*logs["browse"], pages, views)
     print(f"{'all passed' if not FAILS else f'{FAILS} FAILED'}")
     return 1 if FAILS else 0

@@ -302,7 +302,7 @@ def jobs():
             script += ["wait 0.5"]                      # their ends said, after
     script += [f"type poweroff{NL}", "ended"]
     return {"shell": (script, ["--smp", "4", "--stick", stick.relative_to(ROOT).as_posix()],
-                      60)}
+                      60, 1)}                     # it mostly waits: one slot
 
 
 def outputs(log):
