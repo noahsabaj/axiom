@@ -86,7 +86,8 @@ wheel), destroy windows that closed, draw what was printed into each
 terminal, compose the screen where it changed, and otherwise park
 the thread `main` (`thread_park_until`) until the next deadline: the next
 refresh or frame, the next key repeat, the next network timer, or 4 ms while
-a USB controller or a network card needs polling. Any device interrupt
+a USB controller or a network card needs polling (a card, every quarter of a
+millisecond for 50 ms after a frame comes or goes). Any device interrupt
 (vectors `0x20` to `0x2F`: a key, a USB event, a network frame, pointer
 movement) unparks it early. While it is parked, the BSP runs other threads,
 or idles.
@@ -716,7 +717,8 @@ off. `log` shows the state; `log save`, `log on`, `log off`.
   (With 64, a burst of small segments between two polls overran the ring,
   and each lost one cost TCP a retransmission timeout: over a second.)
   MSI-X or MSI wakes the main loop, which polls the ring; without either
-  (QEMU's 8139) it polls every 4 ms.
+  (QEMU's 8139) it polls every 4 ms, and every 0.25 ms for 50 ms after a
+  frame came in or went out (a round trip took 4 ms, now about 0.3).
 - **Stack** (`net.asm`): drivers register an interface with a table of
   operations (send, poll, link, ack) and hand frames to `net_receive`. The
   first interface carries the one IPv4 address. ARP keeps 16 neighbours for

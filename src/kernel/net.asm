@@ -89,6 +89,11 @@ net_init:
     mov rax, [tsc_per_ms]
     imul rcx, rax, 4
     mov [net_poll_ticks], rcx
+    imul rcx, rax, 50
+    mov [net_busy_ticks], rcx
+    shr rax, 2
+    mov [net_fast_ticks], rax           ; a quarter of a millisecond
+    mov rax, [tsc_per_ms]
     imul rcx, rax, 500
     mov [net_link_ticks], rcx
     imul rcx, rax, 1000
@@ -232,6 +237,13 @@ net_service:
     cmp r12d, [nic_count]
     jb .poll
     call net_clock
+    cmp byte [net_active], 0            ; frames came or went: poll fast
+    je .link
+    mov byte [net_active], 0
+    mov rcx, rax
+    add rcx, [net_busy_ticks]
+    mov [net_busy_until], rcx
+.link:
     cmp rax, [net_link_at]
     jb .timers
     add rax, [net_link_ticks]
@@ -274,11 +286,14 @@ net_deadline:
     jnz .timer
     cmp byte [net_polled], 0            ; an interface without an interrupt
     je .done
-    mov rcx, rax
+    mov rsi, rax
     RDTSC64
-    add rax, [net_poll_ticks]
-    cmp rcx, rax
-    cmovb rax, rcx
+    mov rcx, [net_poll_ticks]           ; every 4 ms, or while frames flow
+    cmp rax, [net_busy_until]           ; every quarter of one
+    cmovb rcx, [net_fast_ticks]
+    add rax, rcx
+    cmp rsi, rax
+    cmovb rax, rsi
 .done:
     pop rsi
     pop rdx
@@ -428,6 +443,7 @@ net_fold:
 ; net_receive(RBX = interface, RSI = frame, ECX = bytes): from a driver
 net_receive:
     mov ecx, ecx
+    mov byte [net_active], 1
     inc qword [rbx + NI_RXPK]
     add [rbx + NI_RXBY], rcx
     cmp rbx, [net_nic]                  ; only that one has an address
@@ -502,6 +518,7 @@ nic_send:
     call [rax + NOP_SEND]
     pop rcx
     jc .full
+    mov byte [net_active], 1            ; an answer may come soon
     inc qword [rbx + NI_TXPK]
     add [rbx + NI_TXBY], rcx
     clc
@@ -1167,10 +1184,14 @@ arp_failed:     resd 1
 net_polled:     resb 1                  ; an interface without an interrupt
 net_pending:    resb 1                  ; the MSI fired
 net_irq_on:     resb 1
+net_active:     resb 1                  ; a frame came or went since the last look
 alignb 8
 net_nic:        resq 1                  ; the interface with the address
 net_now:        resq 1                  ; TSC, as of the last net_clock
 net_poll_ticks: resq 1
+net_fast_ticks: resq 1                  ; polling while frames flow
+net_busy_ticks: resq 1                  ; and for how long after the last
+net_busy_until: resq 1
 net_link_ticks: resq 1
 net_second:     resq 1
 arp_life:       resq 1
