@@ -1863,7 +1863,7 @@ win_say:
     ret
 .shell:
     mov rdi, [rbx + WN_DATA]
-    mov rsi, [rdi + TW_LINE]
+    mov rsi, [rdi + TW_END]
     inc rsi
     mov rdi, [rdi + TW_BACK]
     KLOG "desk: %u '%s' at %d,%d, %ux%u, %s, %u lines, %u back", rax, rcx, qword [rbx + WN_X], qword [rbx + WN_Y], qword [rbx + WN_W], qword [rbx + WN_H], rdx, rsi, rdi

@@ -3,13 +3,22 @@
 ;  legacy emulation) and the serial port, both feeding one ring of key codes.
 ;
 ;  Key codes: printable ASCII, 8 backspace, 9 tab, 10 enter, 27 escape,
-;  ctrl+letter = 1..26, KEY_UP/DOWN/LEFT/RIGHT below.
+;  ctrl+letter = 1..26 (and ctrl+[ \ ] ^ _ / as xterm has them), the keys
+;  past ASCII below; alt+key is 27 first.
 ; =============================================================================
 
-KEY_UP          equ 0x11
-KEY_DOWN        equ 0x12
-KEY_LEFT        equ 0x13
-KEY_RIGHT       equ 0x14
+KEY_UP          equ 0x80                ; (lxtty.asm's lt_key_seqs, in order)
+KEY_DOWN        equ 0x81
+KEY_LEFT        equ 0x82
+KEY_RIGHT       equ 0x83
+KEY_HOME        equ 0x84
+KEY_END         equ 0x85
+KEY_PGUP        equ 0x86
+KEY_PGDN        equ 0x87
+KEY_INS         equ 0x88
+KEY_DEL         equ 0x89
+KEY_BTAB        equ 0x8A                ; shift+tab
+KEY_F1          equ 0x90                ; to F12, KEY_F1 + 11
 
 section .text
 
@@ -131,28 +140,24 @@ kbd_scancode:
     jnz .ext_release
     cmp ecx, 0x1D
     je .ctrl_down
-    mov dl, KEY_UP
-    cmp ecx, 0x48
-    je .emit
-    mov dl, KEY_DOWN
-    cmp ecx, 0x50
-    je .emit
-    mov dl, KEY_LEFT
-    cmp ecx, 0x4B
-    je .emit
-    mov dl, KEY_RIGHT
-    cmp ecx, 0x4D
-    je .emit
-    mov dl, 10
-    cmp ecx, 0x1C                       ; keypad enter
-    je .emit
-    mov dl, '/'
-    cmp ecx, 0x35
-    je .emit
-    ret
+    cmp ecx, 0x38                       ; right alt
+    je .alt_down
+    lea rdx, [kbd_e0_map]
+.e0_find:
+    cmp byte [rdx], 0
+    je .ignore
+    cmp [rdx], cl
+    je .e0_found
+    add rdx, 2
+    jmp .e0_find
+.e0_found:
+    mov dl, [rdx + 1]
+    jmp .emit
 .ext_release:
     cmp ecx, 0x1D
     je .ctrl_up
+    cmp ecx, 0x38
+    je .alt_up
     ret
 .plain:
     test al, 0x80
@@ -163,9 +168,11 @@ kbd_scancode:
     je .shift_down
     cmp ecx, 0x1D
     je .ctrl_down
+    cmp ecx, 0x38
+    je .alt_down
     cmp ecx, 0x3A
     je .caps
-    ja .ignore                          ; function keys, keypad
+    ja .fkeys
     lea rdx, [kbd_map]
     cmp byte [kbd_shift], 0
     je .lookup
@@ -189,9 +196,43 @@ kbd_scancode:
     and edx, 0x1F                       ; ctrl+letter
     jmp .emit
 .no_letter:
+    cmp edx, 9                          ; shift+tab
+    jne .no_btab
+    cmp byte [kbd_shift], 0
+    je .emit
+    mov dl, KEY_BTAB
+    jmp .emit
+.no_btab:
+    cmp byte [kbd_ctrl], 0
+    je .emit
+    cmp edx, '/'                        ; ctrl+/ is ctrl+_
+    jne .ctrl_punct
+    mov dl, '_'
+.ctrl_punct:
+    cmp edx, '['                        ; ctrl+[ \ ] ^ _
+    jb .emit
+    cmp edx, '_'
+    ja .emit
+    and edx, 0x1F
 .emit:
+    cmp byte [kbd_alt], 0               ; alt+key: ESC first
+    je .push
+    mov al, 27
+    call kbd_push
+.push:
     mov al, dl
     jmp kbd_push
+.fkeys:
+    lea edx, [ecx - 0x3B + KEY_F1]      ; F1..F10
+    cmp ecx, 0x44
+    jbe .emit
+    mov dl, KEY_F1 + 10
+    cmp ecx, 0x57
+    je .emit
+    mov dl, KEY_F1 + 11
+    cmp ecx, 0x58
+    je .emit
+    ret
 .release:
     cmp ecx, 0x2A
     je .shift_up
@@ -199,7 +240,15 @@ kbd_scancode:
     je .shift_up
     cmp ecx, 0x1D
     je .ctrl_up
+    cmp ecx, 0x38
+    je .alt_up
 .ignore:
+    ret
+.alt_down:
+    mov byte [kbd_alt], 1
+    ret
+.alt_up:
+    mov byte [kbd_alt], 0
     ret
 .shift_down:
     mov byte [kbd_shift], 1
@@ -296,6 +345,11 @@ serial_poll:
     ret
 
 section .rodata
+kbd_e0_map:                             ; E0 scan codes, and their keys
+    db 0x48, KEY_UP, 0x50, KEY_DOWN, 0x4B, KEY_LEFT, 0x4D, KEY_RIGHT
+    db 0x47, KEY_HOME, 0x4F, KEY_END, 0x49, KEY_PGUP, 0x51, KEY_PGDN
+    db 0x52, KEY_INS, 0x53, KEY_DEL, 0x1C, 10, 0x35, '/'
+    db 0
 kbd_map:
     db 0, 27, '1234567890-=', 8, 9
     db 'qwertyuiop[]', 10, 0
@@ -312,6 +366,7 @@ kbd_present:    db 0
 kbd_e0:         db 0
 kbd_shift:      db 0
 kbd_ctrl:       db 0
+kbd_alt:        db 0
 kbd_caps:       db 0
 kbd_head:       db 0
 kbd_tail:       db 0

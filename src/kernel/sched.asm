@@ -1136,6 +1136,24 @@ sched_switch:
 .take:
     mov dword [rsi + TH_ONCPU], 1
     mov [gs:PC_CURRENT], rsi
+    mov rax, [rsi + TH_FSBASE]          ; ring 3's FS and GS bases, its own
+    cmp rax, [gs:PC_FSBASE]
+    je .fs_same
+    mov [gs:PC_FSBASE], rax
+    mov rdx, rax
+    shr rdx, 32
+    mov ecx, MSR_FS_BASE
+    wrmsr
+.fs_same:
+    mov rax, [rsi + TH_GSBASE]
+    cmp rax, [gs:PC_UGSBASE]
+    je .gs_same
+    mov [gs:PC_UGSBASE], rax
+    mov rdx, rax
+    shr rdx, 32
+    mov ecx, MSR_KGS_BASE               ; (swapgs makes it GS in ring 3)
+    wrmsr
+.gs_same:
     mov rax, [rsi + TH_STACK_TOP]       ; where ring 3 comes back in
     mov [gs:PC_KSTACK], rax
     mov [gs:PC_TSS + TSS_RSP0], rax

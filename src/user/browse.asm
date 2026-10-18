@@ -84,10 +84,10 @@ GO_NEW          equ 0                   ; go's ways: a new page in the history,
 GO_HIST         equ 1                   ; one from it, the same again
 GO_RELOAD       equ 2
 
-KEY_UP          equ 0x11                ; kbd.asm's
-KEY_DOWN        equ 0x12
-KEY_LEFT        equ 0x13
-KEY_RIGHT       equ 0x14
+KEY_UP          equ 0x80                ; kbd.asm's
+KEY_DOWN        equ 0x81
+KEY_LEFT        equ 0x82
+KEY_RIGHT       equ 0x83
 KEY_BS          equ 8
 KEY_ENTER       equ 10
 KEY_ESC         equ 27

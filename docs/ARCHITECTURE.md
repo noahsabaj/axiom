@@ -595,7 +595,8 @@ into) on screen and serial.
   the drive to flush. Replacing a file empties its entry before freeing the
   old clusters, so an interrupted write leaves an empty file, not a dangling
   chain.
-- Shell: `disks`, `vol`, `ls`, `cd`, `cat`, `cp`, `write`, `mkdir`, `rm`.
+- Shell: `disks`, `vol`, and the `files` thing (`files show`, `copy`,
+  `move`, `new`, `write`, `remove`, `find`), `go`, `here`.
   File times come from the CMOS clock (`rtc.asm`, also `date`).
 - Tested in QEMU against images from `tools/mkdisk.py` (512-byte and 64 KiB
   clusters, two drives at once, a USB stick direct and behind a hub, pulled
@@ -1173,12 +1174,156 @@ text rows.
   for the host, so a page can be laid out and drawn there; the QEMU suite,
   `tools/test/browse/run.py`, compares browse's window with that.
 
-## Terminals: `term.asm`
+## Linux programs: `linux.asm`, `lxmm.asm`, `lxfs.asm`, `lxsig.asm`, `lxtty.asm`
+
+- `linux <program> [arguments]` runs an unchanged Linux x86-64 program
+  from a root on the boot stick: `tools/mkroot.py` copies programs and
+  every library they need (DT_NEEDED, followed, with the links on the way)
+  from a WSL distribution into `build/linux/ROOT`, gives it an `/etc` of
+  Axiom's own, and writes `META`, a line per path with what FAT cannot
+  keep (kind, mode, size, a link's target); `mkstick.py --linux` puts both
+  at `/LINUX` with 4 KiB clusters. A name without a slash is looked for on
+  the Linux PATH. One runs at a time in a shell, and has its window's
+  keys while it runs (ctrl+C is its terminal's: SIGINT); closing the
+  window kills it, and the shell says how it ended (`exited with N`,
+  `ended by signal N`, `stopped`).
+- **A process** is a task (its own address space, as `run`'s) with a
+  Linux process's state in `TK_LX` (`LP_*`): its pid, descriptors,
+  directory, program and terminal. Its threads are user threads marked
+  `TF_LINUX`: `syscall_entry` hands their calls to `lx_syscall`, which
+  indexes `lx_table` by Linux's numbers and goes back by IRETQ with every
+  register but RAX as it was. A call not there yet is said once
+  (`system call N is not there yet`) and gets `-ENOSYS`. Each thread has
+  its own FS base (`arch_prctl`, `TH_FSBASE`), loaded by `sched_switch`.
+  It ends with its last thread: `exit_group`, the last `exit`, a signal's
+  default action, a fault with no handler (said as `run`'s are, and ending
+  it as the signal would), or a kill.
+- **Loading** (`lx_elf_map`, `lx_exec_image`): the program's PT_LOAD
+  segments are mapped from its file in the cache, ET_EXEC where it was
+  linked and ET_DYN at 0x555555554000; its PT_INTERP (ld.so) highest below
+  0x7FFFF7FFF000. The first thread starts at the interpreter's entry on a
+  stack laid out as Linux's: argc, argv, envp, then the auxiliary vector
+  (AT_PHDR, AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_BASE, AT_ENTRY, the ids,
+  AT_HWCAP, AT_CLKTCK, AT_RANDOM, AT_PLATFORM, AT_EXECFN), with the
+  strings and 16 random bytes above it. The break starts after the
+  program's last segment.
+- **Memory** (`lxmm.asm`): each address space keeps a sorted array of
+  areas (start, end, protection, flags, the file and its offset), changed
+  under the space's lock by mmap, munmap, mprotect, mremap, madvise and
+  brk; mmap places areas down from below the stack and honours MAP_FIXED,
+  MAP_FIXED_NOREPLACE and MAP_32BIT. Nothing is mapped until it is
+  touched: a fault in an area fills that page in (zeroes, or the file's
+  own page from the cache, read-only, so programs share it), a write to a
+  file's page takes a private copy, and PROT_NONE keeps a page present but
+  out of ring 3's reach. The kernel reaches a program's memory by walking
+  its tables (SMAP stays on), filling pages in as a fault would.
+- **Files** (`lxfs.asm`): a read-only tree in RAM built from META, plus
+  `/dev/null`, `/dev/zero`, `/dev/random`, `/dev/urandom`, `/dev/tty`
+  (and `/dev/stdin`, `stdout`, `stderr` to it) and `/proc/self/exe`. A
+  file's bytes are read from the stick whole, once, by the main thread
+  (a program's thread queues it and waits); `open`, `openat`, `read`,
+  `pread64`, `readv`, `writev`, `lseek`, `close`, `dup`s, `fcntl`, the
+  `stat` family with `statx`, `getdents64`, `readlink`, `access`,
+  `getcwd`, `chdir` work on it, and writing is refused (`EROFS`).
+- **The terminal** (`lxtty.asm`): a shell's window has one terminal for
+  programs (`LY_*`), made the first time one runs there, with what a tty
+  has on Linux: termios (`TCGETS`, `TCSETS` and the termios2 calls, reset
+  for each program to a cooked terminal), the window's size
+  (`TIOCGWINSZ`; the program gets SIGWINCH when it changes), the
+  foreground process group and session, `FIONREAD`, `TIOCSTI`, `TCFLSH`.
+  Keys go through a line discipline: ICRNL and the other input flags,
+  ISIG (ctrl+C, ctrl+\ and ctrl+Z send SIGINT, SIGQUIT and SIGTSTP to
+  the program, the input flushed), ICANON's line editing (erase, kill,
+  word erase, ctrl+D) with ECHO and ECHOCTL, or raw bytes with VMIN and
+  VTIME; arrows, home and end, page up and down, insert, delete and F1 to
+  F12 arrive as xterm's sequences (`ESC O x` for the arrows under
+  DECCKM), alt as an ESC before the key. A read waits for a line, or for
+  VMIN bytes or VTIME; `O_NONBLOCK` (`fcntl`, `FIONBIO`) says `EAGAIN`; a
+  signal ends the wait (`EINTR`, or the read made again with
+  `SA_RESTART`). Output goes through OPOST's ONLCR to `vt.asm`, and a
+  copy, escape sequences left out, to the serial log a line at a time.
+  `poll`, `ppoll`, `select` and `pselect6` are here too: a terminal is
+  readable when a read would not wait, and writable always, as is every
+  other file.
+- **Threads** (`lxsig.asm`): `clone` with `CLONE_VM | CLONE_THREAD |
+  CLONE_SIGHAND` (what `pthread_create` asks for; `clone3` says `ENOSYS`,
+  so glibc falls back to it) makes another `TF_LINUX` thread of the task,
+  starting from a copy of its parent's frame with RAX 0, its own stack and
+  TLS (`CLONE_SETTLS`), its id written where `CLONE_PARENT_SETTID` and
+  `CLONE_CHILD_SETTID` say; as it exits, its `CLONE_CHILD_CLEARTID` word
+  is zeroed and a waiter there woken (`pthread_join`). Every Linux thread
+  starts from a frame (`lx_thread_new`, `lx_thread_begin`), so whenever
+  one goes back to ring 3 RBP is its frame.
+- **Futexes**: a waiter waits on a queue of its own, on its stack, in one
+  of 256 buckets keyed by where the direct map has the word (made
+  writable first, so a copy on write cannot come between a wait and its
+  wake). WAIT and WAIT_BITSET (relative on the monotonic clock, or
+  absolute on either), WAKE and WAKE_BITSET, REQUEUE and CMP_REQUEUE
+  (waiters moved between buckets, both locked, the lower first), and
+  WAKE_OP (the operation done with a locked CMPXCHG). The PI ones say
+  `ENOSYS`.
+- **Signals**: a process has its actions (`LP_SIGACTS`, `rt_sigaction`)
+  and the signals sent to it (`LP_SIGPEND`); a thread has its mask, its
+  own pending signals, its alternate stack (`sigaltstack`) and what a
+  fault said (`TH_LXINFO`). Sending one (`kill` to the process itself,
+  `tkill`, `tgkill`, ctrl+C) sets it pending, unless it would be ignored,
+  and kicks the threads that may take it: unparked if parked, an IPI if
+  running on another CPU. `user_leave` sends a Linux thread to
+  `lx_leave`, which takes the lowest signal its mask lets through: the
+  default action (nothing, or the process ends by it), or a frame on its
+  stack as Linux builds one (`siginfo`, a `ucontext` with the registers
+  and mask, and the XSAVE state with Linux's magic numbers, the handler
+  starting with a clean one), entered with RDI, RSI, RDX the signal,
+  `&siginfo` and `&ucontext` and the restorer as its return address;
+  `rt_sigreturn` puts it all back, the flags and the XSAVE header made
+  safe first. A wait in a system call ends early when a signal its mask
+  lets through is pending (`user_killed` asks `lx_interrupted`): with
+  `EINTR`, or for the calls Linux restarts (futex waits), made again when
+  no handler runs or the handler has `SA_RESTART`. A fault the process
+  has a handler for, and does not block, is delivered the same way, with
+  its address and code. Also `rt_sigprocmask`, `rt_sigpending`,
+  `rt_sigsuspend` and `pause`.
+- The rest: `uname` (`Linux axiom 6.8.0-axiom`), the ids (root's),
+  `clock_gettime` and the other clocks (the CMOS clock at boot taken as
+  UTC, then the TSC), `nanosleep` and `clock_nanosleep` (cut short by a
+  signal), `getrandom`, `sysinfo`, `prlimit64`, `sched_getaffinity`, and
+  `prctl`'s name.
+- `tools/test/linux/run.py` builds the root and a stick and runs, in QEMU,
+  `/test/hello` (`tools/test/linux/hello.asm`, a static program of our
+  own), then Ubuntu's `true`, `false`, `echo`, `cat`, `ls -la`, `uname
+  -a`, `id`, `date`, `sha256sum`, `env`, `wc` and `sleep`, checking what
+  each prints against the host; `/test/threads` (`threads.c`, compiled by
+  WSL's gcc against Ubuntu's glibc) with its sixteen checks of threads,
+  futexes and signals, and its ways out (`abort`, an unhandled fault, the
+  last thread's exit, `exit` from a thread); ctrl+C on `sleep 60`
+  (SIGINT), and ctrl+\ on a program that ignores SIGINT (SIGQUIT);
+  `/test/tty` (`tty.c`) with its checks of the terminal (termios, the
+  size, xterm's answers, the alternate screen, VMIN and VTIME, poll,
+  select, SIGWINCH) and of keys typed (a line edited, arrows, ctrl+C raw
+  and as SIGINT, ctrl+D); `/test/tty draw`, checked row by row through
+  the shell's `screen`; and Ubuntu's `stty`, `tput`, `clear` and `less`
+  through libtinfo and the root's terminfo.
+
+## Terminals: `term.asm`, `vt.asm`
 
 - Each shell is a window with a terminal (`TW_*`): 1000 lines of 256 cells
-  (a character and its colour), the cursor, the scroll-back, its own input
-  line and history (`TW_SH_*`, `shell.asm`), and whether a command is still
-  running in it. `+ shell` or `shell` opens one; its close button closes it.
+  (a glyph, its attributes, a foreground and a background colour of 24
+  bits each), the cursor, the scroll-back, its own input line and history
+  (`TW_SH_*`, `shell.asm`), and whether a command is still running in it.
+  `+ shell` or `shell` opens one; its close button closes it. `screen`
+  writes what the window shows to the serial log, as text (for tests).
+- **xterm** (`vt.asm`): what a Linux program writes is read as xterm
+  would: UTF-8 (wide characters take two cells, combining ones none, a
+  character the font lacks drawn as one like it or '?'), cursor movement,
+  erasing, inserting and deleting characters and lines, scroll regions,
+  SGR (bold, dim, italic, underline, inverse, hidden; 16, 256 and 24-bit
+  colours), DEC's line drawing, the alternate screen (1049, 1047, 47),
+  DECCKM, DECAWM, DECTCEM, origin and insert modes, saved cursors, tabs,
+  synchronized output (2026, drawing held back up to 150 ms), and the OSC
+  title, shown as the window's. Questions are answered as typed input:
+  DSR and the cursor's place, DA1, DA2, XTVERSION, DECRQM, the size in
+  cells and pixels, and the OSC colours. Scrolling the main screen keeps
+  its top rows in the scroll-back; a program's end resets the terminal.
 - **Where output goes:** a thread's `TH_CON` names the terminal it prints
   to (`con_target`: if that one is gone, the first shell, else the oldest).
   Work that answers later records its terminal when it starts (a lookup, a

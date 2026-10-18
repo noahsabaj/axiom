@@ -107,8 +107,14 @@ section .text
 %include "shell.asm"
 %include "desk.asm"
 %include "term.asm"
+%include "vt.asm"
 %include "window.asm"
 %include "power.asm"
+%include "lxmm.asm"
+%include "lxfs.asm"
+%include "linux.asm"
+%include "lxsig.asm"
+%include "lxtty.asm"
 %include "boot.asm"
 
 section .data

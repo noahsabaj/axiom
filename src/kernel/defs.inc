@@ -57,6 +57,8 @@ PC_CUR_VR       equ 432                 ; the running thread's vruntime when las
 PC_KSTACK       equ 440                 ; the running thread's kernel stack, for SYSCALL
 PC_USER_RSP     equ 448                 ; its RSP in ring 3, on the way in
 PC_CR3          equ 456                 ; the page tables loaded here, 0 = not known
+PC_FSBASE       equ 464                 ; the FS base loaded here (TH_FSBASE)
+PC_UGSBASE      equ 472                 ; ring 3's GS base loaded here (TH_GSBASE)
 PC_SIZE         equ 512
 
 CPU_KIND_UNKNOWN equ 0
@@ -185,7 +187,19 @@ TH_CR3          equ 272                 ; its task's page tables, 0 = the kernel
 TH_UENTRY       equ 280                 ; TF_USER: where it starts in ring 3
 TH_USTACK       equ 288                 ; its RSP there
 TH_UARG         equ 296                 ; and its RDI
-TH_SIZE         equ 320
+; 304 is term.asm's TH_CON; 312 is free
+TH_FSBASE       equ 320                 ; ring 3's FS base (a Linux thread's TLS)
+TH_GSBASE       equ 328                 ; and its GS base
+TH_TID          equ 336                 ; dword: a Linux thread's id
+TH_LXFL         equ 340                 ; dword: LXF_* (lxsig.asm)
+TH_CTID         equ 344                 ; its clear_child_tid, or 0
+TH_SIGMASK      equ 352                 ; signals it blocks
+TH_SIGPEND      equ 360                 ; signals sent to it, not yet taken
+TH_ALTSP        equ 368                 ; its sigaltstack, 0 if none
+TH_ALTSIZE      equ 376
+TH_LXINFO       equ 384                 ; 32 bytes: a fault, for its signal (lxsig.asm)
+TH_SAVEMASK     equ 416                 ; the mask rt_sigsuspend put aside
+TH_SIZE         equ 448
 
 ; a wait queue (kobj.asm): threads waiting for a flag
 WQ_LOCK         equ 0                   ; dword
@@ -211,7 +225,8 @@ TK_ENDED        equ 112                 ; dword, bit 0: no thread and no handle
                                         ; to it were left, and its handles went
 TK_KILL         equ 116                 ; dword, bit 0: killed; bit 1: by a fault
 TK_AS           equ 120                 ; its address space (user.asm), 0 if none
-TK_SIZE         equ 128
+TK_LX           equ 128                 ; a Linux process: its state (linux.asm), or 0
+TK_SIZE         equ 192
 
 ; a slot of a handle table; a handle is (HS_GEN << 16) | its index, never 0
 HS_CAP          equ 0                   ; its capability, 0 if free or revoked
@@ -467,6 +482,7 @@ TF_MAIN         equ 2
 TF_WORKER       equ 4
 TF_USER         equ 8                   ; runs in ring 3 (user.asm)
 TF_FIRST        equ 16                  ; its task's first: when it ends, the task does
+TF_LINUX        equ 32                  ; a Linux program's: Linux system calls (linux.asm)
 
 ; 64-bit TSS
 TSS_RSP0        equ 4
@@ -536,6 +552,7 @@ MSR_EFER        equ 0xC0000080
 MSR_STAR        equ 0xC0000081
 MSR_LSTAR       equ 0xC0000082
 MSR_FMASK       equ 0xC0000084
+MSR_FS_BASE     equ 0xC0000100
 MSR_GS_BASE     equ 0xC0000101
 MSR_KGS_BASE    equ 0xC0000102
 

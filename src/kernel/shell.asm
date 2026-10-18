@@ -211,6 +211,13 @@ shell_key:
     pop rax
     test rbx, rbx
     jz .out
+    push rax                            ; a Linux program's, while one has
+    mov rdi, rbx                        ; this terminal (lxtty.asm)
+    mov esi, eax
+    call lt_key
+    test eax, eax
+    pop rax
+    jnz .out
     cmp eax, 3                          ; ctrl+C, always
     je .cancel
     cmp byte [rbx + TW_SH_WAIT], 0
@@ -277,6 +284,7 @@ shell_key:
     mov rdi, rbx                        ; what this terminal started stops:
     call net_forget                     ; a ping, a lookup or a fetch,
     mov rdi, rbx
+    call lx_interrupt                   ; a Linux program, SIGINT,
     call user_forget                    ; and a program
     mov dword [rbx + TW_SH_LEN], 0
     lea rdi, [str_ctrl_c]
@@ -1204,8 +1212,9 @@ sh_head:
     pop rbx
     ret
 
-; sh_print_run(RAX = a command that prints, R15D = 1 if piped): run, what
-; it prints captured as a table of lines if piped -> CF clear
+; sh_print_run(RAX = a command that prints, R15D = 1 if piped; EDI, RSI:
+; its words, for one that wants them): run, what it prints captured as a
+; table of lines if piped -> CF clear
 sh_print_run:
     test r15d, r15d
     jz .plain
@@ -1486,6 +1495,95 @@ cmd_set:
     KLOG "there are %u variables already: 'set <name>' removes one", SH_VARS
     stc
 .out:
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+; linux <program> [arguments]: cmd_linux (linux.asm) reads them from
+; [sh_args] as lx_args splits them, at spaces with ' and " keeping them
+; together; the shell has split them already (EDI words, RSI them), so
+; each goes back quoted where it has to be
+sh_linux:
+    push rbx
+    push r12
+    push r13
+    mov r12d, edi
+    mov r13, rsi
+    lea rdi, [sh_joined]
+    lea r8, [sh_joined + LINE_MAX - 8]  ; room for a ' as '"'"', a quote, the 0
+    xor ebx, ebx                        ; the word
+.word:
+    cmp ebx, r12d
+    jae .done
+    test ebx, ebx
+    jz .first
+    mov byte [rdi], ' '
+    inc rdi
+.first:
+    mov rsi, [r13 + rbx * 8]
+    cmp byte [rsi], 0                   ; an empty word: ''
+    je .quote
+    mov rcx, rsi
+.look:
+    mov al, [rcx]
+    test al, al
+    jz .plain
+    cmp al, ' '
+    je .quote
+    cmp al, 0x27
+    je .quote
+    cmp al, '"'
+    je .quote
+    inc rcx
+    jmp .look
+.plain:
+    mov al, [rsi]
+    test al, al
+    jz .next
+    cmp rdi, r8
+    jae .long
+    stosb
+    inc rsi
+    jmp .plain
+.quote:
+    cmp rdi, r8
+    jae .long
+    mov byte [rdi], 0x27
+    inc rdi
+.quoted:
+    mov al, [rsi]
+    test al, al
+    jz .unquote
+    cmp rdi, r8
+    jae .long
+    inc rsi
+    cmp al, 0x27
+    je .apostrophe
+    stosb
+    jmp .quoted
+.apostrophe:                            ; '"'"': out, a ' in double quotes,
+    mov eax, 0x22272227                 ; and back in
+    stosd
+    mov byte [rdi], 0x27
+    inc rdi
+    jmp .quoted
+.unquote:
+    mov byte [rdi], 0x27
+    inc rdi
+.next:
+    inc ebx
+    jmp .word
+.done:
+    mov byte [rdi], 0
+    lea rax, [sh_joined]
+    mov [sh_args], rax
+    pop r13
+    pop r12
+    pop rbx
+    jmp cmd_linux
+.long:
+    KLOG "that command is too long"
     pop r13
     pop r12
     pop rbx
@@ -1788,6 +1886,7 @@ commands:
     VERB    'here',     cmd_here,     'the folder you are in'
     VERB    'set',      cmd_set,      'set [name [value...]]: every variable ($name), one removed, or one set'
     COMMAND 'shell',    cmd_shell,    'a new shell, in a window of its own'
+    COMMAND 'screen',   cmd_screen,   "what this shell's window shows, as text, to the serial log"
     COMMAND 'win',      cmd_win,      'win [move <n> <x> <y> | size <n> <w> <h> | raise <n> | min <n> | close <n>]: the windows'
     COMMAND 'info',     cmd_info,     'what this machine is'
     VERB    'cpus',     cmd_cpus,     'each logical CPU: kind, core, clock, heat, work'
@@ -1797,6 +1896,7 @@ commands:
     COMMAND 'objects',  cmd_objects,  'objects [test | audit | <task id>]: objects and tasks, the handles a task holds, the audit ring, or a self-test of capabilities'
     COMMAND 'rings',    cmd_rings,    'rings [test]: each ring, its entries and completions, and the thread that finishes requests; or a self-test'
     COMMAND 'run',      cmd_run,      'run <program> [arguments]: /EFI/AXIOM/<PROGRAM>.AXE in ring 3; ctrl+C stops it'
+    COMMAND 'linux',    sh_linux,     'linux <program> [arguments]: a Linux program from the root in /LINUX on the boot stick; ctrl+C stops it'
     COMMAND 'user',     cmd_user,     'user [test]: programs run, their pages; or a self-test of ring 3'
     COMMAND 'pci',      cmd_pci,      'PCI Express functions'
     COMMAND 'acpi',     cmd_acpi,     'firmware ACPI tables'

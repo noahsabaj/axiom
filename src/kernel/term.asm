@@ -2,34 +2,50 @@
 ;  term.asm - terminals: a window of text with a shell of its own.
 ;
 ;  A terminal (TW_*) keeps the last TW_LINES lines it was given, TW_COLS
-;  cells each (a cell is a character and its color), wrapped at the width
-;  its window has when they are written; the wheel scrolls back through
-;  them. Text reaches a terminal through the con_* calls (kprint, kputs and
-;  the shell use them), which write to the terminal of the thread printing
-;  (TH_CON), else to the first terminal there is: what a command prints
-;  later (a ping's replies, a fetch, a program's lines) goes where it was
-;  started, because whatever does it later sets TH_CON as it was then
-;  (con_call). Writing only changes cells, from any CPU, under print_lock;
-;  term_service, on the main thread, draws what changed into the window.
+;  cells each (a cell is a glyph, its attributes and its colors), wrapped at
+;  the width its window has when they are written; the wheel scrolls back
+;  through them. The screen is the window's rows from TW_SCREEN down: what
+;  scrolls off its top is the scroll-back. Text reaches a terminal through
+;  the con_* calls (kprint, kputs and the shell use them), which write to
+;  the terminal of the thread printing (TH_CON), else to the first terminal
+;  there is: what a command prints later (a ping's replies, a fetch, a
+;  program's lines) goes where it was started, because whatever does it
+;  later sets TH_CON as it was then (con_call). A Linux program's output
+;  comes through its terminal (lxtty.asm) to vt.asm, which speaks xterm's
+;  escape sequences on the same cells. Writing only changes cells, from any
+;  CPU, under print_lock; term_service, on the main thread, draws what
+;  changed into the window.
 ; =============================================================================
 
 TW_LINES        equ 1000                ; lines kept
 TW_COLS         equ 256                 ; cells a line has
 
+; a cell: a qword
+CELL_FG         equ 16                  ; bits 16..39: its color (RGB)
+CELL_BG         equ 40                  ; bits 40..63: its background, if CA_BG
+CA_BOLD         equ 0x01                ; bits 8..15: attributes
+CA_DIM          equ 0x02
+CA_ITALIC       equ 0x04
+CA_UNDER        equ 0x08
+CA_INVERSE      equ 0x10
+CA_HIDDEN       equ 0x20
+CA_BG           equ 0x40                ; a background of its own (else the panel's)
+CA_WIDE         equ 0x80                ; the right half of a wide character
+
 TW_WIN          equ 0                   ; its window
-TW_CELLS        equ 8                   ; TW_LINES x TW_COLS dwords: character | color << 8
+TW_CELLS        equ 8                   ; TW_LINES x TW_COLS cells (bits 0..7: the glyph)
 TW_COLS_NOW     equ 16                  ; columns the window has room for
 TW_ROWS_NOW     equ 24                  ; rows
-TW_CX           equ 32                  ; the cursor: column,
+TW_CX           equ 32                  ; the cursor: column (TW_COLS_NOW: wrap first),
 TW_LINE         equ 40                  ; and line (counting up from 0, forever)
 TW_BACK         equ 48                  ; lines scrolled back (0: at the bottom)
-TW_FG           equ 56                  ; dword: color of what is written
+TW_FG           equ 56                  ; dword: color of what the kernel writes
 TW_ID           equ 60                  ; dword: its number
 TW_DIRTY_LO     equ 64                  ; lines changed since drawn: from,
 TW_DIRTY_HI     equ 72                  ; to (not included)
 TW_SHOWN        equ 80                  ; the first line in the window now, -1 if none
 TW_NEXT         equ 88                  ; every terminal
-TW_TOP          equ 96                  ; the first line of the view at the bottom (clear)
+TW_SCREEN       equ 96                  ; the screen's first line (a clear starts a new one)
 TW_SH_LEN       equ 104                 ; dword: the line being typed: its length
 TW_SH_WAIT      equ 108                 ; byte: a command runs on; the prompt waits
                                         ; (2: it is done, the rest of its line is next)
@@ -37,7 +53,44 @@ TW_SH_RLINK     equ 109                 ; byte: how the rest is joined to it (SL
 TW_SH_LINE      equ 112                 ; LINE_MAX + 8
 TW_SH_HIST      equ TW_SH_LINE + LINE_MAX + 8
 TW_SH_REST      equ TW_SH_HIST + LINE_MAX + 8   ; what is left of the line, for then
-TW_SIZE         equ TW_SH_REST + LINE_MAX + 8
+TW_END          equ TW_SH_REST + LINE_MAX + 8   ; the newest line
+TW_FLOOR        equ TW_END + 8          ; the oldest line the wheel reaches (CSI 3 J)
+TW_TTY          equ TW_FLOOR + 8        ; the terminal programs have here (lxtty.asm), or 0
+TW_VT           equ TW_TTY + 8          ; vt.asm's: what a program's output said so far
+
+; vt.asm's state
+TW_VS           equ TW_VT + 0           ; dword: where the parser is (VS_*)
+TW_VFLAGS       equ TW_VT + 4           ; dword: VF_*
+TW_VATTR        equ TW_VT + 8           ; a cell written now: attributes and colors
+TW_VNP          equ TW_VT + 16          ; dword: parameters so far
+TW_VCOLON       equ TW_VT + 20          ; dword: bit n: parameter n came after ':'
+TW_VPRIV        equ TW_VT + 24          ; byte: '?', '>', '<' or '=' before them
+TW_VINTER       equ TW_VT + 25          ; byte: an intermediate (' ', '$', '!' ...)
+TW_VNEED        equ TW_VT + 26          ; byte: UTF-8 bytes still to come
+TW_VCP          equ TW_VT + 28          ; dword: the code point so far
+TW_VLAST        equ TW_VT + 32          ; dword: the last glyph written (REP)
+TW_VTOP         equ TW_VT + 36          ; dword: the scrolling region's top row,
+TW_VBOT         equ TW_VT + 40          ; dword: and bottom row (-1: the screen's)
+TW_VSFLAGS      equ TW_VT + 44          ; dword: VF_* saved with the cursor
+TW_VSX          equ TW_VT + 48          ; the cursor ESC 7 saved: column,
+TW_VSY          equ TW_VT + 56          ; row,
+TW_VSATTR       equ TW_VT + 64          ; attributes
+TW_VALT         equ TW_VT + 72          ; the main screen's cells while the alternate shows
+TW_VALTX        equ TW_VT + 80          ; and its cursor
+TW_VALTY        equ TW_VT + 88
+TW_VOSCN        equ TW_VT + 96          ; dword: OSC bytes so far
+TW_VREPLYN      equ TW_VT + 100         ; dword: reply bytes waiting (lxtty.asm takes them)
+TW_VTITLED      equ TW_VT + 104         ; byte: TW_VTITLE is new
+TW_VALTN        equ TW_VT + 108         ; dword: rows TW_VALT keeps
+TW_VSYNC        equ TW_VT + 112         ; when synchronized output began (TSC)
+TW_VP           equ TW_VT + 120         ; VT_PARAMS dwords
+TW_VOSC         equ TW_VP + VT_PARAMS * 4
+TW_VREPLY       equ TW_VOSC + VT_OSC
+TW_VTITLE       equ TW_VREPLY + VT_REPLY
+TW_SIZE         equ TW_VTITLE + WN_TITLE_MAX
+VT_PARAMS       equ 16
+VT_OSC          equ 256
+VT_REPLY        equ 128
 
 TH_CON          equ 304                 ; a thread's terminal to print to (0: the first)
 
@@ -64,13 +117,18 @@ term_open:
     test rax, rax
     jz .out
     mov rbx, rax
-    mov edi, TW_LINES * TW_COLS * 4
+    mov edi, TW_LINES * TW_COLS * 8
     call vm_alloc
     test rax, rax
     jz .no_cells
     mov [rbx + TW_CELLS], rax
+    mov edi, VT_ROWS_MAX * TW_COLS * 8  ; the main screen, while the alternate shows
+    call vm_alloc                       ; (none: the alternate screen is lost)
+    mov [rbx + TW_VALT], rax
     mov dword [rbx + TW_FG], COL_TEXT
     mov qword [rbx + TW_SHOWN], -1
+    mov rdi, rbx
+    call vt_init
     inc dword [term_count]
     mov eax, [term_count]
     mov [rbx + TW_ID], eax
@@ -108,6 +166,11 @@ term_open:
 .no_window:
     mov rdi, rbx                        ; (its window's handlers never ran)
     call term_unlist
+    mov rdi, [rbx + TW_VALT]
+    test rdi, rdi
+    jz .no_alt
+    call vm_free
+.no_alt:
     mov rdi, [rbx + TW_CELLS]
     call vm_free
 .no_cells:
@@ -219,13 +282,18 @@ term_wheel:
     jns .floor
     xor edx, edx
 .floor:
-    mov rax, [rdi + TW_LINE]            ; no further back than the oldest
+    mov rax, [rdi + TW_END]             ; no further back than the oldest kept
     inc rax
-    cmp rax, TW_LINES
-    jbe .kept
-    mov eax, TW_LINES
+    sub rax, TW_LINES
+    jns .kept
+    xor eax, eax
 .kept:
-    sub rax, [rdi + TW_ROWS_NOW]
+    cmp rax, [rdi + TW_FLOOR]
+    jge .oldest
+    mov rax, [rdi + TW_FLOOR]
+.oldest:
+    neg rax
+    add rax, [rdi + TW_SCREEN]          ; lines above the screen, at most
     jns .most
     xor eax, eax
 .most:
@@ -248,12 +316,19 @@ term_close:
     call con_forget
     mov rdi, r12                        ; and nothing prints to it again
     call term_unlist
+    mov rdi, r12                        ; nor do programs
+    call lt_detach
     cmp r12, [con_first]
     jne .free
     mov qword [con_first], 0
 .free:
     mov eax, [r12 + TW_ID]
     KLOG "desk: shell %u closes", rax
+    mov rdi, [r12 + TW_VALT]
+    test rdi, rdi
+    jz .no_alt
+    call vm_free
+.no_alt:
     mov rdi, [r12 + TW_CELLS]
     call vm_free
     mov rdi, r12
@@ -263,8 +338,10 @@ term_close:
     ret
 
 ; term_measure(R12 = terminal, RBX = its window): rows and columns from
-; the window's size
+; the window's size; the screen follows (programs told, if it changed)
 term_measure:
+    push r13
+    push r14
     mov rdi, rbx
     mov rax, [font_ch]
     shr rax, 2
@@ -281,7 +358,7 @@ term_measure:
     jbe .cols_ok
     mov eax, TW_COLS
 .cols_ok:
-    mov [r12 + TW_COLS_NOW], rax
+    mov r13, rax
     mov rax, [rdi + WN_H]
     mov rcx, [font_ch]
     shr rcx, 1
@@ -292,7 +369,44 @@ term_measure:
     jnz .rows
     inc eax
 .rows:
-    mov [r12 + TW_ROWS_NOW], rax
+    cmp rax, VT_ROWS_MAX
+    jbe .rows_ok
+    mov eax, VT_ROWS_MAX
+.rows_ok:
+    mov r14, rax
+    pushfq
+    cli
+    lea rdi, [print_lock]
+    call spin_lock
+    xor eax, eax                        ; EAX = 1 if it changed
+    cmp r13, [r12 + TW_COLS_NOW]
+    setne al
+    cmp r14, [r12 + TW_ROWS_NOW]
+    setne cl
+    or al, cl
+    mov [r12 + TW_COLS_NOW], r13
+    mov [r12 + TW_ROWS_NOW], r14
+    mov rdx, r12
+    call tm_scrolled                    ; fewer rows: the top ones go back
+    mov rcx, [r12 + TW_SCREEN]
+    cmp [r12 + TW_LINE], rcx
+    jge .cursor_on
+    mov [r12 + TW_LINE], rcx
+.cursor_on:
+    mov dword [r12 + TW_VTOP], 0        ; the scrolling region: the screen again
+    mov dword [r12 + TW_VBOT], -1
+    push rax
+    lea rdi, [print_lock]
+    call spin_unlock
+    pop rax
+    popfq
+    test eax, eax
+    jz .out
+    mov rdi, r12
+    call lt_resized                     ; SIGWINCH
+.out:
+    pop r14
+    pop r13
     ret
 
 ; -----------------------------------------------------------------------------
@@ -313,6 +427,22 @@ term_service:
     jz .done
     cmp qword [rbx + TW_WIN], 0
     je .next
+    cmp byte [rbx + TW_VTITLED], 0      ; a program named it
+    je .titled
+    mov byte [rbx + TW_VTITLED], 0
+    mov rdi, [rbx + TW_WIN]
+    lea rsi, [rbx + TW_VTITLE]
+    call win_title
+.titled:
+    test dword [rbx + TW_VFLAGS], VF_SYNC  ; a program drawing a frame: shown
+    jz .draw                            ; once it is done, or after a while
+    RDTSC64
+    sub rax, [rbx + TW_VSYNC]
+    mov rcx, [tsc_per_ms]
+    imul rcx, rcx, VT_SYNC_MS
+    cmp rax, rcx
+    jb .next
+.draw:
     mov rdi, rbx
     call term_draw
 .next:
@@ -430,20 +560,11 @@ term_draw:
 
 ; term_first(R12) -> RAX = the first line the window shows. Preserves others.
 term_first:
-    push rcx
-    mov rax, [r12 + TW_LINE]
-    mov rcx, [r12 + TW_ROWS_NOW]
-    dec rcx
-    sub rax, rcx                        ; the cursor's line at the bottom,
-    cmp rax, [r12 + TW_TOP]             ; or the top after a clear
-    jge .back
-    mov rax, [r12 + TW_TOP]
-.back:
+    mov rax, [r12 + TW_SCREEN]
     sub rax, [r12 + TW_BACK]
     jns .out
     xor eax, eax
 .out:
-    pop rcx
     ret
 
 ; term_scroll(R12, RBX = window, RCX = rows): the text in the surface up
@@ -506,9 +627,9 @@ term_line:
     mov rcx, [font_ch]
     mov r8d, COL_PANEL
     call gfx_fill
-    cmp r13, [r12 + TW_LINE]            ; written yet?
+    cmp r13, [r12 + TW_END]             ; written yet?
     jg .out
-    mov rax, [r12 + TW_LINE]            ; still kept?
+    mov rax, [r12 + TW_END]             ; still kept?
     sub rax, r13
     cmp rax, TW_LINES
     jae .out
@@ -516,33 +637,18 @@ term_line:
     xor edx, edx
     mov ecx, TW_LINES
     div rcx
-    imul rdx, rdx, TW_COLS * 4
+    imul rdx, rdx, TW_COLS * 8
     add rdx, [r12 + TW_CELLS]
     mov r14, rdx                        ; its cells
     xor ecx, ecx
 .cell:
     cmp rcx, [r12 + TW_COLS_NOW]
     jae .cursor
-    mov eax, [r14 + rcx * 4]
-    test al, al
+    mov rax, [r14 + rcx * 8]
+    test rax, rax                       ; blank, on the panel
     jz .next
-    cmp al, ' '
-    je .next
     push rcx
-    push rax
-    mov edi, eax
-    shr edi, 8
-    mov esi, COL_PANEL
-    call gfx_color
-    pop rdx
-    mov rdi, [rsp]
-    imul rdi, [font_cw]
-    mov rax, [font_cw]
-    shr rax, 1
-    add rdi, rax
-    mov rsi, r15
-    movzx edx, dl
-    call gfx_glyph
+    call term_cell
     pop rcx
 .next:
     inc rcx
@@ -552,6 +658,8 @@ term_line:
     jne .out
     cmp qword [r12 + TW_BACK], 0
     jne .out
+    test dword [r12 + TW_VFLAGS], VF_CURSOR
+    jz .out
     mov rdi, [r12 + TW_CX]
     cmp rdi, [r12 + TW_COLS_NOW]
     jb .in_row
@@ -573,6 +681,89 @@ term_line:
 .out:
     pop r15
     pop r14
+    ret
+
+; term_cell(RAX = a cell, RCX = its column, R15 = the row's y): drawn
+term_cell:
+    push rbx
+    push r12
+    push r13
+    mov rbx, rax                        ; RBX = the cell
+    mov r12, rcx
+    imul r12, [font_cw]
+    mov rcx, [font_cw]
+    shr rcx, 1
+    add r12, rcx                        ; R12 = x
+    mov rdi, rbx                        ; EDI = its color, ESI = the background
+    shr rdi, CELL_FG
+    and edi, 0xFFFFFF
+    mov esi, COL_PANEL
+    test bh, CA_BG
+    jz .bg
+    mov rsi, rbx
+    shr rsi, CELL_BG
+.bg:
+    test bh, CA_INVERSE
+    jz .not_inverse
+    xchg edi, esi
+.not_inverse:
+    test bh, CA_DIM                     ; halfway to the background
+    jz .not_dim
+    mov eax, edi
+    and eax, 0xFEFEFE
+    shr eax, 1
+    mov ecx, esi
+    and ecx, 0xFEFEFE
+    shr ecx, 1
+    lea edi, [eax + ecx]
+.not_dim:
+    mov r13d, edi                       ; R13 = the color, for underlining
+    test bl, bl                         ; a glyph: drawn on its background
+    jz .no_glyph
+    cmp bl, ' '
+    je .no_glyph
+    test bh, CA_HIDDEN
+    jnz .no_glyph
+    call gfx_color
+    mov rdi, r12
+    mov rsi, r15
+    movzx edx, bl
+    call gfx_glyph
+    test bh, CA_BOLD                    ; bold: once more, a pixel over
+    jz .lines
+    mov edi, r13d
+    mov esi, GFX_CLEAR
+    call gfx_color
+    lea rdi, [r12 + 1]
+    mov rsi, r15
+    movzx edx, bl
+    call gfx_glyph
+    jmp .lines
+.no_glyph:
+    cmp esi, COL_PANEL                  ; no glyph: just its background
+    je .lines
+    mov r8d, esi
+    mov rdi, r12
+    mov rsi, r15
+    mov rdx, [font_cw]
+    mov rcx, [font_ch]
+    call gfx_fill
+.lines:
+    test bh, CA_UNDER
+    jz .out
+    mov rdi, r12
+    mov rsi, r15
+    add rsi, [font_ch]
+    mov rcx, [ui_line]
+    sub rsi, rcx
+    sub rsi, rcx
+    mov rdx, [font_cw]
+    mov r8d, r13d
+    call gfx_fill
+.out:
+    pop r13
+    pop r12
+    pop rbx
     ret
 
 ; -----------------------------------------------------------------------------
@@ -663,6 +854,7 @@ con_forget:
     push rdi
     call net_forget
     pop rdi
+    call lx_forget                      ; (preserves RDI)
     jmp user_forget
 
 ; con_write(RDI = string). Under print_lock. Preserves all.
@@ -781,12 +973,15 @@ con_clear:
     test rax, rax
     jz .none
     mov rdx, rax
-    cmp qword [rdx + TW_CX], 0          ; on a line of its own, at the top
+    call tm_mark
+    mov rax, [rdx + TW_END]             ; on a line of its own, the newest
+    mov [rdx + TW_LINE], rax
+    cmp qword [rdx + TW_CX], 0
     je .fresh
     call tm_newline
 .fresh:
-    mov rax, [rdx + TW_LINE]
-    mov [rdx + TW_TOP], rax
+    mov rax, [rdx + TW_LINE]            ; at the top
+    mov [rdx + TW_SCREEN], rax
     mov qword [rdx + TW_SHOWN], -1
     mov qword [rdx + TW_BACK], 0
     mov byte [term_dirty], 1
@@ -854,9 +1049,9 @@ tm_putc:
     call tm_cell
     movzx ecx, al
     mov eax, [rdx + TW_FG]
-    shl eax, 8
-    or eax, ecx
-    mov [rdi], eax
+    shl rax, CELL_FG
+    or rax, rcx
+    mov [rdi], rax
     inc qword [rdx + TW_CX]
     call tm_mark
     jmp .out
@@ -870,8 +1065,9 @@ tm_putc:
 .backspace:
     cmp qword [rdx + TW_CX], 0
     jne .back
-    cmp qword [rdx + TW_LINE], 0        ; to the end of the row above, where
-    je .out                             ; a long line wrapped
+    mov rcx, [rdx + TW_LINE]            ; to the end of the row above, where
+    cmp rcx, [rdx + TW_SCREEN]          ; a long line wrapped
+    jle .out
     call tm_mark
     dec qword [rdx + TW_LINE]
     mov rcx, [rdx + TW_COLS_NOW]
@@ -879,7 +1075,7 @@ tm_putc:
 .back:
     dec qword [rdx + TW_CX]
     call tm_cell
-    mov dword [rdi], 0
+    mov qword [rdi], 0
     call tm_mark
     jmp .out
 .tab:
@@ -907,33 +1103,57 @@ tm_cell:
     mov ecx, TW_LINES
     div rcx
     pop rcx
-    imul rdx, rdx, TW_COLS * 4
+    imul rdx, rdx, TW_COLS * 8
     add rdx, [rdi + TW_CELLS]
     mov rax, [rdi + TW_CX]
-    lea rdi, [rdx + rax * 4]
+    lea rdi, [rdx + rax * 8]
     pop rdx
     pop rax
     ret
 
-; tm_newline(RDX): the cursor to the start of a new, empty line. Preserves all.
+; tm_newline(RDX): the cursor to the start of the line below: a new, empty
+; one at the end, the screen following. Preserves all.
 tm_newline:
     push rax
     push rcx
     push rdi
     call tm_mark                        ; (the cursor leaves this row)
-    inc qword [rdx + TW_LINE]
     mov qword [rdx + TW_CX], 0
+    mov rax, [rdx + TW_LINE]
+    cmp rax, [rdx + TW_END]
+    jb .down
+    inc rax
+    mov [rdx + TW_LINE], rax
+    mov [rdx + TW_END], rax
     call tm_cell
     xor eax, eax
     mov ecx, TW_COLS
-    rep stosd
+    rep stosq
+    call tm_scrolled
+    jmp .marked
+.down:
+    inc qword [rdx + TW_LINE]
+.marked:
     call tm_mark
-    cmp qword [rdx + TW_BACK], 0        ; scrolled back: the view stays put
-    je .out
-    inc qword [rdx + TW_BACK]
-.out:
     pop rdi
     pop rcx
+    pop rax
+    ret
+
+; tm_scrolled(RDX): the screen down to its newest line, if that is below
+; it; a view scrolled back stays where it is. Preserves all.
+tm_scrolled:
+    push rax
+    mov rax, [rdx + TW_END]
+    sub rax, [rdx + TW_ROWS_NOW]
+    inc rax                             ; the first line, at least
+    sub rax, [rdx + TW_SCREEN]
+    jle .out
+    add [rdx + TW_SCREEN], rax
+    cmp qword [rdx + TW_BACK], 0
+    je .out
+    add [rdx + TW_BACK], rax
+.out:
     pop rax
     ret
 
@@ -954,10 +1174,90 @@ tm_mark:
     ret
 
 ; -----------------------------------------------------------------------------
-;  shell: a terminal of its own
+;  shell: a terminal of its own; screen: what the screen shows, to the log
 ; -----------------------------------------------------------------------------
 cmd_shell:
     jmp term_new
+
+; screen: the rows of this terminal's screen, as text, to the serial log
+; only (what a program drew, for tests)
+cmd_screen:
+    push rbx
+    push r12
+    push r13
+    call con_target
+    test rax, rax
+    jz .out
+    mov rbx, rax
+    pushfq
+    cli
+    lea rdi, [print_lock]
+    call spin_lock
+    xor r12d, r12d                      ; R12 = the row
+.row:
+    cmp r12, [rbx + TW_ROWS_NOW]
+    jae .done
+    lea rdi, [term_screen_buf]
+    mov dword [rdi], '| '
+    add rdi, 2
+    mov rax, [rbx + TW_SCREEN]
+    add rax, r12
+    cmp rax, [rbx + TW_END]
+    jg .ended
+    xor edx, edx
+    mov ecx, TW_LINES
+    div rcx
+    imul rdx, rdx, TW_COLS * 8
+    add rdx, [rbx + TW_CELLS]
+    xor ecx, ecx
+.cell:
+    cmp rcx, [rbx + TW_COLS_NOW]
+    jae .ended
+    mov rax, [rdx + rcx * 8]
+    test ah, CA_WIDE
+    jnz .skip
+    test al, al
+    jnz .glyph
+    mov al, ' '
+.glyph:
+    call vt_glyph_utf8
+.skip:
+    inc rcx
+    jmp .cell
+.ended:
+    lea rax, [term_screen_buf + 2]      ; no spaces at the end
+.trim:
+    cmp rdi, rax
+    jbe .trimmed
+    cmp byte [rdi - 1], ' '
+    jne .trimmed
+    dec rdi
+    jmp .trim
+.trimmed:
+    mov word [rdi], 10
+    lea rdi, [term_screen_buf]
+    call serial_text
+    inc r12
+    jmp .row
+.done:
+    mov rax, [rbx + TW_LINE]            ; and where the cursor is
+    sub rax, [rbx + TW_SCREEN]
+    inc rax
+    mov rcx, [rbx + TW_CX]
+    inc rcx
+    lea rdi, [term_screen_buf]
+    SPRINTF rdi, "| cursor %u,%u", rax, rcx
+    call serial_write
+    mov al, 10
+    call serial_putc
+    lea rdi, [print_lock]
+    call spin_unlock
+    popfq
+.out:
+    pop r13
+    pop r12
+    pop rbx
+    ret
 
 section .rodata
 align 8
@@ -979,3 +1279,4 @@ alignb 8
 con_cols:       resq 1                  ; con_metrics
 con_cx:         resq 1
 con_flush_at:   resq 1
+term_screen_buf: resb TW_COLS * 3 + 16
