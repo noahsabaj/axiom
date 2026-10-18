@@ -8,7 +8,8 @@ there are three views of it:
   bold, italic, underline, struck-through text, bulleted and numbered lists,
   tables and images.
 - **Slides**: the same blocks on 16:9 slides. A sidebar shows a thumbnail of
-  each one, and F5 presents them.
+  each one, and F5 presents them. A slide is laid out 960 by 540 points and
+  shown as large as the window allows, in steps of a quarter pixel a point.
 - **Grid**: a spreadsheet of the grid the cursor is on. It holds numbers,
   text and formulas, and works them out again by what depends on what.
 
@@ -61,7 +62,7 @@ long is fine.
 |---|---|
 | F1 / F2 / F3 | Pages / Slides / Grid |
 | F5 | present, from the slide shown; →, Space, Enter, PgDn: next; ←, Backspace, PgUp: back; Home, End; Esc ends |
-| ctrl+B, ctrl+E, ctrl+U, ctrl+D | bold, italic, underline, struck through (ctrl+I is Tab on Axiom's keyboard) |
+| ctrl+B, ctrl+I (or ctrl+E), ctrl+U, ctrl+D | bold, italic, underline, struck through |
 | ctrl+N | text → heading 1 → 2 → 3 → text |
 | ctrl+L | text → bulleted → numbered → text |
 | ctrl+T | a table here (on the Grid view: a new grid at the end) |
@@ -71,7 +72,7 @@ long is fine.
 | ctrl+Z, ctrl+Y | undo, redo (typing in one block is one change; 100 kept) |
 | ctrl+A, ctrl+C, ctrl+X, ctrl+V | everything, copy, cut, paste (inside compose) |
 | ctrl+S | save into the store, and commit |
-| F7 | the theme: auto (as the system's), light, dark; the toolbar's button too |
+| F7 | the paper: as the desktop's theme is, or light; the Light paper button too |
 | F9, F10 | export NAME.txt, NAME.csv (the cursor's grid, or the first one) |
 | F12 | the document, block by block, on the console |
 | ctrl+Q, ctrl+W | close |
@@ -82,22 +83,31 @@ On a grid:
 - Enter commits and moves down. Tab commits and moves right; past a table's
   last cell on a page, Tab adds a row. Esc cancels the edit.
 
-The mouse places the cursor and dragging selects. The toolbar has the views,
+Shift with the arrows, Home or End selects. The mouse places the cursor and
+dragging selects. The toolbar has the views,
 the styles, the inserts, Present and Save. In the Grid view you can click a
 cell, the formula bar, or a grid's tab. The wheel scrolls.
 
 ## Light and dark
 
-Compose is light or dark, all of it: the toolbar, the pages, the slides, the
-presenter and the grid. As it starts, it is as the system's theme is
-(`display.theme`, read through compose's settings capability), and it
-follows a change to it (`settings set display.theme light`) within half a
-second.
+Compose's window is drawn with the desktop's kit (src/user/kit.inc): its
+toolbar, buttons, fields, sidebar and status line take the desktop's look,
+its colours, accent, fonts and scale, and follow it as it changes (WE_LOOK,
+`settings set display.theme light`).
 
-F7, or the theme button left of Present, goes from Auto to Light to Dark
-and back to Auto. Light and Dark hold whatever the system's theme is. The
-choice is kept in the store as `compose/theme` (`auto`, `light` or `dark`),
-so the next document opens the same way.
+The paper (pages, slides, the presenter and the grid's cells) is the
+document's own setting. F7, or the Light paper button left of Present,
+switches it between:
+
+- **Auto**: the paper is as the desktop's theme is, dark in the dark;
+- **Light paper**: white pages and slides, whatever the theme is.
+
+The choice is kept in the store as `compose/theme` (`auto` or `light`), so
+the next document opens the same way.
+
+The window is 1040 by 600 points to start with and may be resized. Compose
+lays everything out in points; the desktop's scale (two pixels a point on a
+2560 by 1600 screen) turns them into pixels.
 
 ## Files
 
@@ -148,8 +158,8 @@ snapshot of the document in it before each change.
 
 ## Inside
 
-compose.asm is only a platform layer. It handles the memory, the window and
-the presenter's window, their events, the store, and the system's theme. Everything else is in
+compose.asm is only a platform layer. It handles the memory, the kit's
+window and the presenter's window, their events, and the store. Everything else is in
 src/user/compose/ and is plain code: events go in, pixels come out.
 
 | file | what |
@@ -159,16 +169,25 @@ src/user/compose/ and is plain code: events go in, pixels come out.
 | file.inc | the .axd format, plain text, CSV |
 | layout.inc | pages, slides and frame cards laid out: a display list and a line table |
 | edit.inc | the cursor, selection, typing, structure, cells, undo, the clipboard |
-| ui.inc | the light and dark colours, rounded rectangles, shadows, buttons |
+| draw.inc | drawing in points at a scale: web/draw.inc's DejaVu, kit.inc's Noto for the UI |
+| ui.inc | the palettes (the window's from the desktop's look, the paper's), buttons through the kit |
 | view.inc | the toolbar, each view, the thumbnails, the presenter (scaled bilinear) |
 | app.inc | keys, clicks, the wheel, saving, opening, presenting |
 
-Text is drawn with web/draw.inc and the anti-aliased DejaVu faces in
-gen/webfont.bin, which browse uses too.
+The document's text is drawn with web/draw.inc in anti-aliased DejaVu: the
+faces and sizes of gen/webfont.bin, which browse uses too, and twice those
+sizes for screens at two pixels a point (tools/mkdocfont.py). Both are packed
+into gen/docfont.pak, about 11 MB, which compose unpacks as it starts: a
+program is 16 MiB at most, and they are 28 MB unpacked. At other scales, a
+glyph is drawn from the size nearest.
+
+The window's own text (the toolbar, the status line, the formula bar) is
+the desktop's Noto Sans, through the kit.
 
 The same code runs on Windows in tools/test/compose/:
 
-- shim.asm links the .inc files into a DLL;
+- shim.asm links the .inc files and kit.inc into a DLL, with the desktop's
+  look made as the kernel makes it (its fonts, theme.asm's colours);
 - host.py drives the DLL;
 - calc.py tests the formulas;
 - app.py tests the program, taking screenshots in build/test/compose/.

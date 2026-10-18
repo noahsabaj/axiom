@@ -13,17 +13,20 @@
 ;    plat_present(EDI = 1 to show the presenter's window, 0 to close it) ->
 ;      EAX = 1 if it is open
 ;    plat_mem(EDI = bytes, 64 MiB at most) -> RAX = zeroed memory, < 0 if
-;      there is none
+;      there is none (five times)
 ;  All preserve RBX, RBP, R12-R15.
 ;
 ;    app_init -> RAX < 0 if there was not the memory (APP_BYTES in all):
-;      an empty document; win_px and save_buf (SAVE_MAX) set first
+;      an empty document; save_buf (SAVE_MAX) set first, and the window
+;      (view_size) before it is painted
 ;    app_open(RSI = a NUL-ended name): that document read (NAME.axd, or a
 ;      .txt or .csv imported), or a new one of that name
-;    app_event(EDI = WE_*, ESI = its code, EDX = x, ECX = y, R8D = 1 if it
-;      is the presenter's window's) -> EAX = AE_* to do
-;    app_theme(EDI = 1 if the system's theme is dark, 0 if light) -> EAX =
-;      AE_* to do: compose follows it, unless it was set light or dark
+;    app_event(EDI = WE_*, ESI = its code, EDX = x, ECX = y, in points
+;      (a key's x: the modifiers held, WM_*), R8D = 1 if it is the
+;      presenter's window's) -> EAX = AE_* to do
+;    app_theme(EDI = 1 if the desktop's theme is dark, 0 if light) -> EAX =
+;      AE_* to do: the window's colours the desktop's look (ui_theme), and
+;      the document's paper with them, unless it was set light (F7)
 ; =============================================================================
 
 ; keys, as kbd.asm sends them
@@ -47,9 +50,8 @@ SAVE_MAX        equ 1 << 20             ; the most the store keeps in one
 NAME_MAX        equ 48
 
 MEM_A           equ MAX_BLOCKS * BL_SIZE + CALC_STACK + DL_BYTES + LN_MAX * LN_SIZE \
-                    + LT_BYTES + SL_MAX * SL_SIZE + CLIP_BYTES + ED_CAP + 4096 \
-                    + SL_W * SL_H * 4 + TH_MAX * TH_BYTES
-APP_BYTES       equ MEM_A + 2 * UNDO_BYTES + DA_BYTES
+                    + LT_BYTES + SL_MAX * SL_SIZE + CLIP_BYTES + ED_CAP + 4096
+APP_BYTES       equ WF_BYTES + MEM_A + 2 * UNDO_BYTES + DA_BYTES + MEM_P
 
 ; what a button does
 ACT_BOLD        equ 1
@@ -69,13 +71,12 @@ ACT_ROW         equ 14
 ACT_COL         equ 15
 ACT_THEME       equ 16
 
-THEME_AUTO      equ 0                   ; as the system's theme is
-THEME_LIGHT     equ 1
-THEME_DARK      equ 2
+PAPER_AUTO      equ 0                   ; the document dark or light as the
+PAPER_LIGHT     equ 1                   ; desktop's theme is; light whatever it is
 
 SEG_X           equ 16                  ; the views' control
 SEG_Y           equ 10
-SEG_W           equ 84
+SEG_W           equ 68
 SEG_H           equ 32
 
 VP              equ 1 << V_PAGES
@@ -91,7 +92,13 @@ VG              equ 1 << V_GRID
 section .text
 
 app_init:
-    mov edi, MEM_A                      ; the memory, in three pieces
+    mov edi, WF_BYTES                   ; the fonts, unpacked
+    call plat_mem
+    test rax, rax
+    js .out
+    mov rdi, rax
+    call font_unpack
+    mov edi, MEM_A                      ; the memory, in four pieces more
     call plat_mem
     test rax, rax
     js .out
@@ -118,10 +125,13 @@ app_init:
     pop rdi
     add rdi, ED_CAP
     mov [csv_buf], rdi
-    add rdi, 4096
-    mov [off_px], rdi
-    add rdi, SL_W * SL_H * 4
-    mov [th_px], rdi
+    mov edi, MEM_P                      ; a slide's pixels, and the thumbnails
+    call plat_mem
+    test rax, rax
+    js .out
+    mov [off_px], rax
+    add rax, OFF_BYTES
+    mov [th_px], rax
     mov edi, 2 * UNDO_BYTES
     call plat_mem
     test rax, rax
@@ -142,6 +152,7 @@ app_init:
     mov dword [view], V_PAGES
     mov dword [goal_x], -1
     mov dword [thumb_gen], -1
+    mov byte [sys_dark], -1             ; (not yet known)
     lea rdi, [doc_name]
     lea rsi, [s_untitled]
     mov ecx, NAME_MAX
@@ -839,6 +850,7 @@ app_event:
     jmp .out
 .key:
     mov byte [st_msg], 0
+    mov [key_mods], r13d                ; (a key's x: the modifiers, WM_*)
     mov eax, r12d
     call on_key
     cmp byte [quitting], 0
@@ -923,6 +935,11 @@ on_key:
     jmp .paint
 .not_editing:
 .dispatch:
+    test byte [key_mods], WM_CTRL       ; ctrl and a letter: what ctrl does,
+    jz .plain                           ; though it is tab or enter's code
+    cmp ebx, ' '
+    jb .ctrl
+.plain:
     cmp ebx, ' '
     jb .control
     cmp ebx, 0x7F
@@ -956,6 +973,7 @@ on_key:
     je .enter
     cmp ebx, 27
     je .escape
+.ctrl:
     lea rax, [ctrl_keys]
     mov rax, [rax + rbx * 8]
     test rax, rax
@@ -999,6 +1017,26 @@ on_key:
     call sel_none
     jmp .paint
 .special:
+    test byte [key_mods], WM_SHIFT      ; shift and a move: what is chosen
+    jz .unshifted                       ; stretched to there
+    cmp dword [view], V_GRID
+    jne .shifted
+    cmp byte [ed_on], 0
+    je .unshifted
+.shifted:
+    cmp ebx, KEY_LEFT
+    je .sel_left
+    cmp ebx, KEY_RIGHT
+    je .sel_right
+    cmp ebx, KEY_UP
+    je .sel_up
+    cmp ebx, KEY_DOWN
+    je .sel_down
+    cmp ebx, KEY_HOME
+    je .sel_home
+    cmp ebx, KEY_END
+    je .sel_end
+.unshifted:
     cmp ebx, KEY_LEFT
     je .left
     cmp ebx, KEY_RIGHT
@@ -1039,6 +1077,31 @@ on_key:
     xor eax, eax
     pop rbx
     ret
+.sel_left:
+    call move_left
+    jmp .paint
+.sel_right:
+    call move_right
+    jmp .paint
+.sel_up:
+    mov ecx, -1
+    jmp .sel_vertical
+.sel_down:
+    mov ecx, 1
+.sel_vertical:
+    push rcx
+    call view_layout
+    pop rcx
+    call move_vert
+    jmp .paint
+.sel_home:
+    call view_layout
+    call move_home
+    jmp .paint
+.sel_end:
+    call view_layout
+    call move_end
+    jmp .paint
 .left:
     cmp dword [view], V_GRID
     jne .left_text
@@ -1148,11 +1211,14 @@ on_key:
     je .page_slide
     cmp eax, V_GRID
     je .page_grid
-    imul ecx, ecx, VIEW_H - 80          ; pages: the view scrolled, the cursor
+    mov eax, [view_h]                   ; pages: the view scrolled, the cursor
+    sub eax, 80
+    imul ecx, eax
     add [scroll_y], ecx                 ; to the same place in it
     mov byte [vw_follow], 0
     call view_layout
-    mov eax, VIEW_H / 2
+    mov eax, [view_h]
+    shr eax, 1
     call cursor_at_view
     jmp .paint
 .page_slide:
@@ -1164,7 +1230,9 @@ on_key:
     call go_slide
     jmp .paint
 .page_grid:
-    imul eax, ecx, GV_ROWS - 2
+    mov eax, [gv_rows]
+    sub eax, 2
+    imul eax, ecx
     xor edx, edx
     call cell_move
     jmp .paint
@@ -1220,11 +1288,13 @@ on_key:
 cursor_at_view:
     mov edx, eax
     add edx, [scroll_y]
-    mov eax, PG_X + PG_M
+    mov eax, [pg_x]
+    add eax, PG_M
     call hit_line
     test rax, rax
     jz .out
-    mov edx, PG_X + PG_M
+    mov edx, [pg_x]
+    add edx, PG_M
     call cursor_to
     call sel_none
 .out:
@@ -1423,6 +1493,12 @@ act_on:
     mov ecx, BK_NUMBER
     cmp edi, ACT_NUMBER
     je .kind
+    cmp edi, ACT_THEME
+    je .paper
+    ret
+.paper:
+    cmp byte [paper], PAPER_LIGHT
+    sete al
     ret
 .bold:
     mov ecx, A_BOLD
@@ -1478,7 +1554,8 @@ on_press:
     shl eax, cl
     test [rbx + BT_VIEWS], al
     jz .next
-    movzx eax, word [rbx + BT_X]
+    mov rdi, rbx
+    call bt_x
     cmp r12d, eax
     jl .next
     movzx ecx, word [rbx + BT_W]
@@ -1508,7 +1585,7 @@ on_press:
     add rbx, BT_SIZE
     jmp .button
 .view:
-    cmp r13d, WIN_H - ST_H
+    cmp r13d, [st_y]
     jge .none
     mov eax, [view]
     cmp eax, V_GRID
@@ -1530,15 +1607,11 @@ on_press:
 .text:
     call cell_commit
     call view_layout
-    mov eax, r12d
-    sub eax, [vw_ox]
-    mov edx, r13d
-    sub edx, [vw_oy]
+    call view_xy
     call hit_line
     test rax, rax
     jz .paint
-    mov edx, r12d
-    sub edx, [vw_ox]
+    mov edx, [vx_x]
     call cursor_to
     call sel_none
     mov byte [dragging], 1
@@ -1559,7 +1632,7 @@ on_press:
 
 ; grid_press(R12D = x, R13D = y): on the grid view
 grid_press:
-    cmp r13d, GV_BOTTOM                 ; a tab: that grid
+    cmp r13d, [gv_bottom]           ; a tab: that grid
     jge .tab
     cmp r13d, GV_TOP
     jl .bar
@@ -1635,17 +1708,13 @@ on_drag:
     mov r12d, edi
     mov r13d, esi
     call view_layout
-    mov eax, r12d
-    sub eax, [vw_ox]
-    mov edx, r13d
-    sub edx, [vw_oy]
+    call view_xy
     call hit_line
     test rax, rax
     jz .out
     cmp dword [rax + LN_KIND], LK_TEXT  ; (text only)
     jne .out
-    mov edx, r12d
-    sub edx, [vw_ox]
+    mov edx, [vx_x]
     call cursor_to
 .out:
     mov eax, AE_PAINT
@@ -1676,14 +1745,45 @@ on_wheel:
     jns .grid_max
     mov dword [gv_row0], 0
 .grid_max:
-    cmp dword [gv_row0], MAXR - GV_ROWS + 1
+    mov eax, MAXR + 1
+    sub eax, [gv_rows]
+    cmp [gv_row0], eax
     jle .paint
-    mov dword [gv_row0], MAXR - GV_ROWS + 1
+    mov [gv_row0], eax
 .paint:
     mov eax, AE_PAINT
     ret
 .none:
     xor eax, eax
+    ret
+
+; view_xy(R12D = x, R13D = y, in the window) -> EAX = x, EDX = y, as laid
+; out (the Slides view's slide at its own scale); vx_x = EAX
+view_xy:
+    mov eax, r12d
+    mov edx, r13d
+    cmp dword [view], V_SLIDES
+    je .slide
+    sub eax, [vw_ox]
+    sub edx, [vw_oy]
+    mov [vx_x], eax
+    ret
+.slide:
+    push rcx
+    mov ecx, [sl_s]
+    sub eax, [slide_x]
+    imul eax, [win_s]
+    cdq
+    idiv ecx
+    mov [vx_x], eax
+    mov eax, r13d
+    sub eax, [slide_y]
+    imul eax, [win_s]
+    cdq
+    idiv ecx
+    mov edx, eax
+    mov eax, [vx_x]
+    pop rcx
     ret
 
 ; hit_line(EAX = x, EDX = y, laid-out coordinates) -> RAX = the line there,
@@ -1884,16 +1984,17 @@ dump:
 
 ; --- the theme ----------------------------------------------------------------
 
-; app_theme(EDI = 1 if the system's theme is dark) -> EAX = AE_* to do
+; app_theme(EDI = 1 if the desktop's theme is dark) -> EAX = AE_* to do
 app_theme:
-    xor eax, eax
-    cmp dil, [sys_dark]
-    je .out
+    mov al, [sys_dark]                  ; logged when the theme is other
     mov [sys_dark], dil
-    cmp byte [theme_mode], THEME_AUTO
-    jne .out                            ; set light or dark here: kept
+    push rax
     call theme_apply
+    pop rax
+    cmp al, [sys_dark]
+    je .logged
     call theme_log
+.logged:
     mov eax, AE_PAINT
     cmp byte [pres_on], 0
     je .out
@@ -1901,61 +2002,49 @@ app_theme:
 .out:
     ret
 
-; k_theme: auto, then light, then dark, then auto again; kept in the store
+; k_theme: the paper, auto or light; kept in the store
 k_theme:
-    movzx eax, byte [theme_mode]
-    inc eax
-    cmp eax, THEME_DARK
-    jbe .set
-    xor eax, eax
-.set:
-    mov [theme_mode], al
+    xor byte [paper], 1
     call theme_apply
     call theme_log
     jmp theme_save
 
-; theme_apply: the colours as theme_mode and sys_dark have them; the
-; thumbnails drawn again in them
+; theme_apply: the colours as the desktop's theme (sys_dark) and the paper
+; have them; the thumbnails drawn again in them
 theme_apply:
-    movzx eax, byte [theme_mode]
-    lea rcx, [theme_labels]
-    mov rcx, [rcx + rax * 8]
-    mov [theme_label], rcx
-    xor edi, edi
-    cmp eax, THEME_LIGHT
-    je .set
-    inc edi
-    cmp eax, THEME_DARK
-    je .set
     movzx edi, byte [sys_dark]
+    mov esi, edi
+    cmp byte [paper], PAPER_LIGHT
+    jne .set
+    xor esi, esi
 .set:
-    mov [dark], dil
+    mov [dark], sil
     call ui_theme
     mov dword [thumb_gen], -1
     mov byte [thumbs_all], 1
     ret
 
-; theme_log: "compose: theme auto, dark"
+; theme_log: "compose: paper auto, dark" (the paper, the desktop's theme)
 theme_log:
     call log_start
-    lea rsi, [s_theme_is]
+    lea rsi, [s_paper_is]
     call sb_str
-    movzx eax, byte [theme_mode]
-    lea rsi, [theme_names]
+    movzx eax, byte [paper]
+    lea rsi, [paper_names]
     mov rsi, [rsi + rax * 8]
     call sb_str
     lea rsi, [s_comma_light]
-    cmp byte [dark], 0
+    cmp byte [sys_dark], 0
     je .shown
     lea rsi, [s_comma_dark]
 .shown:
     call sb_str
     jmp log_sb
 
-; theme_save: theme_mode into the store, as "auto", "light" or "dark"
+; theme_save: the paper into the store, as "auto" or "light"
 theme_save:
-    movzx eax, byte [theme_mode]
-    lea rsi, [theme_names]
+    movzx eax, byte [paper]
+    lea rsi, [paper_names]
     mov rsi, [rsi + rax * 8]
     mov rdi, [save_buf]
     xor edx, edx
@@ -1972,22 +2061,17 @@ theme_save:
     lea rsi, [s_theme_file]
     jmp plat_save
 
-; theme_load: theme_mode from the store (auto if it has none), and applied
+; theme_load: the paper from the store (auto if it has none), and applied
 theme_load:
-    mov byte [theme_mode], THEME_AUTO
+    mov byte [paper], PAPER_AUTO
     lea rsi, [s_theme_file]
     call plat_load
     test rax, rax
     jle .apply
     mov rsi, [save_buf]
-    mov al, [rsi]
-    cmp al, 'l'
-    jne .dark
-    mov byte [theme_mode], THEME_LIGHT
-.dark:
-    cmp al, 'd'
+    cmp byte [rsi], 'l'
     jne .apply
-    mov byte [theme_mode], THEME_DARK
+    mov byte [paper], PAPER_LIGHT
 .apply:
     jmp theme_apply
 
@@ -2050,13 +2134,10 @@ s_b_slide:      db '+ Slide', 0
 s_b_image:      db '+ Image', 0
 s_b_present:    db 'Present', 0
 s_b_save:       db 'Save', 0
-s_th_auto:      db 'Auto', 0
-s_th_light:     db 'Light', 0
-s_th_dark:      db 'Dark', 0
-s_theme_auto:   db 'auto', 0
-s_theme_light:  db 'light', 0
-s_theme_dark:   db 'dark', 0
-s_theme_is:     db 'theme ', 0
+s_b_paper:      db 'Light paper', 0
+s_paper_auto:   db 'auto', 0
+s_paper_light:  db 'light', 0
+s_paper_is:     db 'paper ', 0
 s_comma_light:  db ', light', 0
 s_comma_dark:   db ', dark', 0
 s_theme_file:   db 'theme', 0
@@ -2071,34 +2152,33 @@ seg_labels:     dq s_seg_pages, s_seg_slides, s_seg_grid
 kind_names:     dq s_k_para, s_k_h1, s_k_h2, s_k_h3, s_k_bullet, s_k_number
                 dq s_k_grid, s_k_image, s_k_slide
 ctrl_keys:      dq 0, k_all, k_bold, k_copy, k_strike, k_italic, 0, k_image ; 0-7
-                dq 0, 0, 0, k_slide, k_list, 0, k_heading, 0          ; 8-15
+                dq 0, k_italic, 0, k_slide, k_list, 0, k_heading, 0   ; 8-15
                 dq k_present, k_quit, k_row, k_save, k_table, k_under, k_paste, k_quit ; 16-23
                 dq k_cut, k_redo, k_undo, 0, 0, 0, 0, k_col           ; 24-31
 act_calls:      dq 0, k_bold, k_italic, k_under, a_h1, a_h2, a_text, a_bullet
                 dq a_number, k_table, k_slide, k_image, k_present, k_save, k_row, k_col
                 dq k_theme
-theme_labels:   dq s_th_auto, s_th_light, s_th_dark
-theme_names:    dq s_theme_auto, s_theme_light, s_theme_dark
+paper_names:    dq s_paper_auto, s_paper_light
 
-BT_RIGHT        equ WIN_W - 16
+BT_RIGHT        equ DEF_W - 16          ; (these three from the right: BV_RIGHT)
 buttons:
-    BUTTON 290, 34, ACT_BOLD, VP | VS, BS_GHOST, UI_BOLD, s_b_bold, 0
-    BUTTON 326, 34, ACT_ITALIC, VP | VS, BS_GHOST, WF_ITALIC * WF_SIZES + WF_PX16, s_b_italic, 0
-    BUTTON 362, 34, ACT_UNDER, VP | VS, BS_GHOST, UI_FONT, s_b_under, 0
-    BUTTON 412, 42, ACT_H1, VP | VS, BS_GHOST, UI_BOLD, s_b_h1, 0
-    BUTTON 456, 42, ACT_H2, VP | VS, BS_GHOST, UI_BOLD, s_b_h2, 0
-    BUTTON 500, 52, ACT_TEXT, VP | VS, BS_GHOST, UI_FONT, s_b_text, 0
-    BUTTON 554, 36, ACT_BULLET, VP | VS, BS_GHOST, UI_BOLD, s_b_bullet, 0
-    BUTTON 592, 36, ACT_NUMBER, VP | VS, BS_GHOST, UI_FONT, s_b_number, 0
-    BUTTON 652, 88, ACT_TABLE, VP | VS, BS_PLAIN, UI_FONT, s_b_table, 0
-    BUTTON 746, 84, ACT_SLIDE, VP | VS, BS_PLAIN, UI_FONT, s_b_slide, 0
-    BUTTON 836, 88, ACT_IMAGE, VP | VS, BS_PLAIN, UI_FONT, s_b_image, 0
-    BUTTON 290, 80, ACT_ROW, VG, BS_PLAIN, UI_FONT, s_b_row, 0
-    BUTTON 376, 104, ACT_COL, VG, BS_PLAIN, UI_FONT, s_b_col, 0
-    BUTTON 490, 84, ACT_TABLE, VG, BS_PLAIN, UI_FONT, s_b_grid, 0
-    BUTTON BT_RIGHT - 80 - 10 - 104 - 10 - 76, 76, ACT_THEME, VP | VS | VG, BS_PLAIN, UI_FONT, 0, 0
-    BUTTON BT_RIGHT - 80 - 10 - 104, 104, ACT_PRESENT, VP | VS | VG, BS_PRIMARY, UI_BOLD, s_b_present, 0
-    BUTTON BT_RIGHT - 80, 80, ACT_SAVE, VP | VS | VG, BS_PLAIN, UI_FONT, s_b_save, 0
+    BUTTON 240, 32, ACT_BOLD, VP | VS, BS_GHOST, UI_BOLD, s_b_bold, 0
+    BUTTON 274, 32, ACT_ITALIC, VP | VS, BS_GHOST, WF_ITALIC * WF_SIZES + WF_PX16, s_b_italic, 0
+    BUTTON 308, 32, ACT_UNDER, VP | VS, BS_GHOST, UI_FONT, s_b_under, 0
+    BUTTON 352, 38, ACT_H1, VP | VS, BS_GHOST, UI_BOLD, s_b_h1, 0
+    BUTTON 392, 38, ACT_H2, VP | VS, BS_GHOST, UI_BOLD, s_b_h2, 0
+    BUTTON 432, 46, ACT_TEXT, VP | VS, BS_GHOST, UI_FONT, s_b_text, 0
+    BUTTON 484, 32, ACT_BULLET, VP | VS, BS_GHOST, UI_BOLD, s_b_bullet, 0
+    BUTTON 518, 32, ACT_NUMBER, VP | VS, BS_GHOST, UI_FONT, s_b_number, 0
+    BUTTON 566, 68, ACT_TABLE, VP | VS, BS_PLAIN, UI_FONT, s_b_table, 0
+    BUTTON 638, 66, ACT_SLIDE, VP | VS, BS_PLAIN, UI_FONT, s_b_slide, 0
+    BUTTON 708, 72, ACT_IMAGE, VP | VS, BS_PLAIN, UI_FONT, s_b_image, 0
+    BUTTON 240, 66, ACT_ROW, VG, BS_PLAIN, UI_FONT, s_b_row, 0
+    BUTTON 310, 84, ACT_COL, VG, BS_PLAIN, UI_FONT, s_b_col, 0
+    BUTTON 398, 66, ACT_TABLE, VG, BS_PLAIN, UI_FONT, s_b_grid, 0
+    BUTTON BT_RIGHT - 54 - 6 - 76 - 6 - 92, 92, ACT_THEME, VP | VS | VG | BV_RIGHT, BS_PLAIN, UI_FONT, s_b_paper, 0
+    BUTTON BT_RIGHT - 54 - 6 - 76, 76, ACT_PRESENT, VP | VS | VG | BV_RIGHT, BS_PRIMARY, UI_BOLD, s_b_present, 0
+    BUTTON BT_RIGHT - 54, 54, ACT_SAVE, VP | VS | VG | BV_RIGHT, BS_PLAIN, UI_FONT, s_b_save, 0
     times BT_SIZE db 0
 
 section .rodata
@@ -2117,10 +2197,11 @@ st_msg:         resb 96
 pres_on:        resb 1
 dragging:       resb 1
 quitting:       resb 1
-theme_mode:     resb 1                  ; THEME_*
-sys_dark:       resb 1                  ; the system's theme: 1 dark
+vx_x:           resd 1                  ; view_xy's x
+key_mods:       resd 1                  ; the key's modifiers, WM_*
+paper:          resb 1                  ; PAPER_*
+sys_dark:       resb 1                  ; the desktop's theme: 1 dark
 dark:           resb 1                  ; what is shown
 alignb 8
-theme_label:    resq 1                  ; the theme button's (theme_labels)
 
 section .text

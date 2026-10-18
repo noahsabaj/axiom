@@ -4,7 +4,7 @@
 ;
 ;    run compose [name]
 ;
-;  Opens a window (1360 by 900) on NAME.axd from the store (its names are
+;  Opens a window (1240 by 760 points) on NAME.axd from the store (its names are
 ;  under "compose/"), or a new document of that name ("untitled.axd" if
 ;  there is none); NAME.txt or NAME.csv is read in as plain text or as a
 ;  grid. Pages (F1) are rich text flowed onto pages, Slides (F2) the same
@@ -14,24 +14,27 @@
 ;  The keys and the file format are in docs/COMPOSE.md.
 ;
 ;  What compose does is compose/app.inc and what it includes; this file is
-;  its platform: memory, the windows, their events, the store, and the
-;  system's theme (display.theme, through the settings, if it was given
-;  them), which compose follows unless F7 set it light or dark. It says
-;  "compose: ..." on the console as it opens, saves and presents.
+;  its platform: memory, the windows, their events, the store. The window
+;  is the desktop's kind (kit.inc), any size, at the desktop's scale and in
+;  its look, which compose follows (WE_LOOK); its pixels are given to the
+;  app as points (view_size). The presenter's is a second window, the whole
+;  screen, its events looked for while compose waits. It says "compose:
+;  ..." on the console as it opens, saves and presents.
 ; =============================================================================
 
 %include "axe.inc"
-WANTS AW_DESK | AW_STORE | AW_SETTINGS
+WANTS AW_DESK | AW_STORE
+%include "kit.inc"
 
-PRES_W          equ 1600                ; the presenter's window
-PRES_H          equ 900
+W_PT            equ 1040                ; the window, to start with
+H_PT            equ 600
 IO_NAME         equ 0                   ; the store's page: a name (64 bytes),
 IO_WHY          equ 64                  ; why it was saved,
 IO_DATA         equ 4096                ; then the document (save_buf)
 ST_BYTES        equ IO_DATA + SAVE_MAX
-POLL_US         equ 15000               ; presenting: each window this often
-THEME_US        equ 500000              ; the system's theme: looked at this often
-SET_BYTES       equ 32 * SI_SIZE        ; the settings, read into this
+POLL_US         equ 15000               ; presenting: its window this often
+
+section .text
 
 main:
     push rbx
@@ -72,19 +75,19 @@ main:
     mov [st_va], rax
     add rax, IO_DATA
     mov [save_buf], rax
-    mov edi, WIN_W                      ; the window
-    mov esi, WIN_H
-    lea rdx, [win]
-    call window_new
-    test rax, rax
-    js .refused
-    mov rax, [win + W_PX]
-    mov [win_px], rax
     call app_init
     test rax, rax
     js .refused
-    call set_init
-    call sys_theme
+    mov edi, W_PT                       ; the window
+    mov esi, H_PT
+    mov edx, WNF_RESIZE
+    call kit_open
+    jc .no_window
+    call win_size
+    call kit_dark                       ; in the desktop's look
+    sete dil
+    movzx edi, dil
+    call app_theme
     lea rsi, [arg_name]
     cmp byte [rsi], 0
     jne .open
@@ -94,45 +97,36 @@ main:
     call paint_main
 .event:
     xor ecx, ecx                        ; wait: for ever, or a while if presenting
-    mov edi, POLL_US                    ; or the theme is to be looked at
     cmp byte [pres_on], 0
-    jne .until
-    mov edi, THEME_US
-    cmp qword [set_va], 0
     je .wait
-.until:
+    mov edi, POLL_US
     call ax_us
     mov rbx, rax
     call ax_now
     lea rcx, [rax + rbx]
 .wait:
-    mov edi, [win + W_END]
-    xor r8d, r8d
-    call next_event
-    cmp rax, E_TIMEOUT                  ; the wait ran out (the receive
-    je .presenter                       ; linked to it: canceled)
-    cmp rax, E_CANCELED
-    je .presenter
-    test rax, rax
-    js .done                            ; the window is gone
+    call kit_next
+    cmp eax, -1
+    je .done                            ; the window is gone
+    test eax, eax
+    jz .presenter                       ; the wait ran out
+    call on_event
     mov ebx, eax                        ; EBX: what to do, from all that is waiting
 .drain:
+    test ebx, AE_QUIT
+    jnz .act
     call ax_now
     mov rcx, rax
-    mov edi, [win + W_END]
-    xor r8d, r8d
-    push rbx
-    call next_event
-    pop rbx
-    test rax, rax
-    js .presenter_too
+    call kit_next
+    cmp eax, -1
+    je .done
+    test eax, eax
+    jz .presenter_too
+    call on_event
     or ebx, eax
-    test ebx, AE_QUIT
-    jz .drain
-    jmp .act
+    jmp .drain
 .presenter:
-    call sys_theme                      ; (it ran out: the theme looked at)
-    mov ebx, eax
+    xor ebx, ebx
 .presenter_too:
     cmp byte [pres_on], 0
     je .act
@@ -174,6 +168,11 @@ main:
     call ax_puts
     mov eax, 2
     jmp .out
+.no_window:
+    lea rsi, [s_no_window_open]
+    call ax_puts
+    mov eax, 3
+    jmp .out
 .refused:
     mov rbx, rax
     lea rsi, [s_refused]
@@ -186,6 +185,92 @@ main:
     pop r12
     pop rbx
     ret
+
+; on_event(EAX = WE_*, in kit_ev) -> EAX = AE_* to do: compose told of it,
+; in points
+on_event:
+    cmp eax, WE_RESIZED
+    je .sized
+    cmp eax, WE_LOOK
+    je .look
+    cmp eax, WE_FOCUS
+    je .nothing
+    mov edi, eax
+    mov esi, [kit_ev + WE_CODE]
+    mov edx, [kit_ev + WE_X]
+    mov ecx, [kit_ev + WE_Y]
+    cmp edi, WE_KEY                     ; (a key's x: its modifiers)
+    je .tell
+    cmp edi, WE_CLOSE
+    je .tell
+    call pt_in
+.tell:
+    xor r8d, r8d
+    jmp app_event
+.sized:
+    call win_size
+    mov eax, AE_PAINT
+    ret
+.look:                                  ; the theme, the accent or the scale
+    call win_size
+    call kit_dark
+    sete dil
+    movzx edi, dil
+    jmp app_theme
+.nothing:
+    xor eax, eax
+    ret
+
+; pt_in(EDX = x, ECX = y, pixels in the window) -> the same, points.
+; Preserves all but RAX, RDX, RCX.
+pt_in:
+    push rbx
+    mov ebx, ecx
+    mov eax, edx
+    shl eax, 2
+    cdq
+    idiv dword [kit_s4]
+    push rax
+    mov eax, ebx
+    shl eax, 2
+    cdq
+    idiv dword [kit_s4]
+    mov ecx, eax
+    pop rdx
+    pop rbx
+    ret
+
+; win_size: compose told the window's size, in points and pixels, and its
+; scale (the desktop's, to twice at most)
+win_size:
+    mov edx, [kit_s4]
+    cmp edx, S_MAX
+    jbe .s
+    mov edx, S_MAX
+.s:
+    cmp edx, 4
+    jae .s_min
+    mov edx, 4
+.s_min:
+    mov [kit_s4], edx
+    mov eax, [kit_w]
+    shl eax, 2
+    push rdx
+    xor edx, edx
+    div dword [rsp]
+    mov edi, eax
+    mov eax, [kit_h]
+    shl eax, 2
+    xor edx, edx
+    div dword [rsp]
+    mov esi, eax
+    pop rdx
+    mov rcx, [kit_px]
+    mov r8d, [kit_pitch]
+    shr r8d, 2
+    mov r9d, [kit_w]
+    mov r10d, [kit_h]
+    jmp view_size
 
 ; next_event(EDI = a window's channel end, RCX = deadline, R8D = 1 if it
 ; is the presenter's) -> RAX = AE_* for it, or E_* if there was none
@@ -217,11 +302,13 @@ W_H             equ 16
 W_PX            equ 24                  ; where they are mapped
 W_SIZE          equ 32
 
-; window_new(EDI = width, ESI = height, RDX = a W_* record) -> RAX < 0 if
-; it could not be made
+; window_new(EDI = width, ESI = height, RDX = a W_* record, R8D = WNF_*)
+; -> RAX < 0 if it could not be made
 window_new:
     push rbx
+    push r12
     mov rbx, rdx
+    mov r12d, r8d
     mov [rbx + W_W], edi
     mov [rbx + W_H], esi
     mov eax, SYS_CHANNEL_NEW            ; what it says comes over this
@@ -233,6 +320,7 @@ window_new:
     mov esi, [rbx + W_W]
     mov edx, [rbx + W_H]
     mov r10d, eax                       ; the window's, to send from
+    mov r8d, r12d
     mov eax, SYS_WINDOW_NEW
     syscall
     test rax, rax
@@ -247,6 +335,7 @@ window_new:
     mov [rbx + W_PX], rax
     xor eax, eax
 .out:
+    pop r12
     pop rbx
     ret
 
@@ -305,15 +394,14 @@ show:
 
 paint_main:
     call paint_all
-    lea rdi, [win]
-    jmp show
+    jmp kit_show_all
 
 paint_pres:
     cmp dword [pres + W_WIN], 0
     je .out
     mov rdi, [pres + W_PX]
-    mov esi, PRES_W
-    mov edx, PRES_H
+    mov esi, [pres + W_W]
+    mov edx, [pres + W_H]
     call pres_paint
     call target_win
     lea rdi, [pres]
@@ -341,31 +429,15 @@ ax_addn_safe:
     jmp ax_addn
 
 plat_title:
-    push rbx
-    mov ebx, ecx
-    cmp ebx, 200
+    cmp ecx, 200
     jbe .copy
-    mov ebx, 200
+    mov ecx, 200
 .copy:
-    mov rdi, [ax_io_va]
-    mov ecx, ebx
+    lea rdi, [title_buf]
     rep movsb
-    sub rsp, SQ_SIZE
-    lea rdi, [rsp]
-    xor eax, eax
-    mov ecx, SQ_SIZE / 8
-    rep stosq
-    mov byte [rsp + SQ_OP], RO_WIN_TITLE
-    mov eax, [win + W_WIN]
-    mov [rsp + SQ_HANDLE], eax
-    mov eax, [ax_io]
-    mov [rsp + SQ_HANDLE2], eax
-    mov [rsp + SQ_A1], rbx
-    mov rdi, rsp
-    call ax_do
-    add rsp, SQ_SIZE
-    pop rbx
-    ret
+    mov byte [rdi], 0
+    lea rsi, [title_buf]
+    jmp kit_title
 
 ; st_op(AL = RO_ST_*, A0, A1, A2 in RSI, RDX, RCX) -> RAX: on the store,
 ; from st_mem
@@ -458,92 +530,16 @@ plat_load:
 plat_mem:
     jmp mem_new
 
-; set_init: a page for the settings, if compose was given them
-set_init:
-    cmp dword [ax_settings], 0
-    je .out
-    mov edi, SET_BYTES
-    mov eax, SYS_MEM_NEW
-    syscall
-    test rax, rax
-    js .out
-    mov [set_mem], eax
-    mov edi, eax
-    mov eax, SYS_MAP
-    syscall
-    test rax, rax
-    js .out
-    mov [set_va], rax
-.out:
-    ret
-
-; sys_theme -> EAX = AE_* to do: display.theme read (at most each
-; THEME_US), and compose told (app_theme) whether it is dark
-sys_theme:
-    cmp qword [set_va], 0
-    je .none
-    call ax_now
-    cmp rax, [theme_next]
-    jb .none
-    push rax
-    mov edi, THEME_US
-    call ax_us
-    pop rcx
-    add rax, rcx
-    mov [theme_next], rax
-    xor eax, eax
-    sub rsp, SQ_SIZE
-    mov rdi, rsp
-    mov ecx, SQ_SIZE / 8
-    rep stosq
-    mov byte [rsp + SQ_OP], RO_SET_LIST
-    mov eax, [ax_settings]
-    mov [rsp + SQ_HANDLE], eax
-    mov eax, [set_mem]
-    mov [rsp + SQ_HANDLE2], eax
-    mov qword [rsp + SQ_A1], SET_BYTES
-    mov rdi, rsp
-    call ax_do
-    add rsp, SQ_SIZE
-    test rax, rax
-    jle .none
-    cmp eax, SET_BYTES / SI_SIZE
-    jbe .fits
-    mov eax, SET_BYTES / SI_SIZE
-.fits:
-    mov ecx, eax
-    mov rdx, [set_va]
-.find:
-    lea rdi, [rdx + SI_NAME]
-    lea rsi, [s_theme]
-.same:
-    mov al, [rsi]
-    cmp al, [rdi]
-    jne .next
-    inc rsi
-    inc rdi
-    test al, al
-    jnz .same
-    xor edi, edi                        ; display.theme: 0 dark, 1 light
-    cmp qword [rdx + SI_VALUE], 0
-    sete dil
-    jmp app_theme
-.next:
-    add rdx, SI_SIZE
-    dec ecx
-    jnz .find
-.none:
-    xor eax, eax
-    ret
-
 plat_present:
     test edi, edi
     jz .close
     cmp dword [pres + W_WIN], 0
     jne .open
-    mov edi, PRES_W
-    mov esi, PRES_H
+    mov rax, [kit_lk]                   ; the whole screen
+    mov edi, [rax + LK_SCR_W]
+    mov esi, [rax + LK_SCR_H]
     lea rdx, [pres]
+    mov r8d, WNF_FULL
     call window_new
     test rax, rax
     js .failed
@@ -584,7 +580,7 @@ plat_present:
     ret
 
 %include "web/util.inc"
-%include "web/draw.inc"
+%include "compose/draw.inc"
 %include "compose/doc.inc"
 %include "compose/calc.inc"
 %include "compose/file.inc"
@@ -599,19 +595,16 @@ s_no_desk:      db 'compose: no desktop to open a window on', 0
 s_refused:      db 'compose: refused, ', 0
 s_closed:       db 'closed', 0
 s_why:          db 'compose: ', 0
+s_no_window_open: db 'compose: the desktop gave it no window', 0
 s_pres_title:   db 'Presenting ', 0xE2, 0x80, 0x94, ' Compose', 0
-s_theme:        db 'display.theme', 0
 
 section .bss
 alignb 8
 st_va:          resq 1
-win:            resb W_SIZE
-pres:           resb W_SIZE
+pres:           resb W_SIZE             ; the presenter's window
 ev:             resb WE_SIZE
-set_va:         resq 1                  ; the settings' page, if there are any
-theme_next:     resq 1                  ; when to look at the theme again
 st_mem:         resd 1
-set_mem:        resd 1
 arg_name:       resb NAME_MAX + 8
+title_buf:      resb 208
 
 AXE_END

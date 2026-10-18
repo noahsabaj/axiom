@@ -69,8 +69,8 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   worked out again by what depends on what). A grid or a slide sits in a
   page, and a page's blocks on a slide. Undo, copy and paste, its own
   versioned file format (`docs/COMPOSE.md`) saved into the store, plain
-  text and CSV in and out, and light and dark (as the system's theme is, or
-  set with F7).
+  text and CSV in and out. Drawn with the desktop's kit, at its scale, light
+  or dark as its theme is; F7 keeps the paper light in the dark.
 - **Settings**, one store of them in the kernel, typed and described: the
   look (`display.theme` dark or light, `display.accent`, the wallpaper, the
   bar's clock), the text size, the keyboard's repeat and layout (US, Dvorak,

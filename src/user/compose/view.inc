@@ -3,16 +3,20 @@
 ;  slides or the grid), the status line; and the presenter's slide
 ;
 ;  Everything is painted again each time (paint_all), from a layout made
-;  again (view_layout). What is laid out is in document coordinates; the
-;  view's origin in the window is vw_ox, vw_oy. The slides' thumbnails are
-;  each slide painted whole into the offscreen picture (off_px, a slide's
-;  size) and made five times smaller; they are kept until the document
-;  changes (thumb_gen).
+;  again (view_layout), in points (compose/draw.inc) at the window's scale.
+;  What is laid out is in document coordinates; the view's origin in the
+;  window is vw_ox, vw_oy. The slides' thumbnails are each slide painted
+;  whole into the offscreen picture (off_px) at the window's scale and made
+;  five times smaller; they are kept until the document or the scale
+;  changes (thumb_gen, thumb_s).
+;    view_size(EDI = width, ESI = height, points; EDX = quarters of a pixel
+;      a point; RCX = the window's pixels, R8D = pixels a row, R9D, R10D =
+;      its size in pixels): where everything is, for a window that size
 ;    view_layout: the lines (and display list) for the view shown; on
 ;      pages, scrolled to the cursor if vw_follow
 ;    paint_all: all of the window, into win_px
-;    pres_paint(RDI = pixels, ESI = width, EDX = height): the slide being
-;      presented, as large as fits, on black
+;    pres_paint(RDI = pixels, ESI = width, EDX = height, pixels): the
+;      slide being presented, as large as fits, on black
 ;    picture(EDI = width, ESI = height) -> RAX = a new image (IM_*): a
 ;      landscape, for an image block to start with
 ; =============================================================================
@@ -27,17 +31,20 @@ GV_COL_W        equ 120
 GV_HEAD_W       equ 52
 GV_TAB_H        equ 36
 GV_TOP          equ VIEW_Y + GV_FB_H    ; its column letters
-GV_CELLS_Y      equ GV_TOP + GV_ROW_H
-GV_BOTTOM       equ WIN_H - ST_H - GV_TAB_H
-GV_ROWS         equ (GV_BOTTOM - GV_CELLS_Y + GV_ROW_H - 1) / GV_ROW_H
-GV_COLS         equ (WIN_W - GV_HEAD_W + GV_COL_W - 1) / GV_COL_W
+GV_CELLS_Y      equ GV_TOP + GV_ROW_H   ; (gv_bottom: its tabs; gv_rows and
+                                        ; gv_cols: the cells shown)
+MIN_W           equ 1040                ; the window laid out at least this large
+MIN_H           equ 560
+SL_GAP          equ 24                  ; around the slide, on the Slides view
 
-TH_W            equ SL_W / 5            ; a slide's thumbnail
+TH_W            equ SL_W / 5            ; a slide's thumbnail, points
 TH_H            equ SL_H / 5
 TH_X            equ 26
 TH_ITEM         equ TH_H + 22
 TH_MAX          equ 128                 ; thumbnails kept
-TH_BYTES        equ TH_W * TH_H * 4
+TH_BYTES        equ (TH_W * S_MAX / 4) * (TH_H * S_MAX / 4) * 4    ; one, at most
+OFF_BYTES       equ (SL_W * S_MAX / 4) * (SL_H * S_MAX / 4) * 4    ; a slide
+MEM_P           equ OFF_BYTES + TH_MAX * TH_BYTES                  ; both
 
 PIC_W           equ 480
 PIC_H           equ 270
@@ -46,26 +53,21 @@ PIC_H           equ 270
 
 section .text
 
-; target(RDI = pixels, ESI = pixels a row, EDX = width, ECX = height):
-; where drawing goes, all of it the clip. Preserves all.
-target:
-    mov [px_base], rdi
-    mov [px_stride], esi
-    mov dword [clip_x0], 0
-    mov dword [clip_y0], 0
-    mov [clip_x1], edx
-    mov [clip_y1], ecx
-    ret
-
+; target_win: drawing into the window, at its scale, all of it the clip.
+; Preserves all.
 target_win:
     push rdi
     push rsi
     push rdx
     push rcx
+    mov edi, [win_s]
+    xor esi, esi
+    xor edx, edx
+    call scale_set
     mov rdi, [win_px]
-    mov esi, WIN_W
-    mov edx, WIN_W
-    mov ecx, WIN_H
+    mov esi, [win_stride]
+    mov edx, [win_pw]
+    mov ecx, [win_ph]
     call target
     pop rcx
     pop rdx
@@ -73,13 +75,112 @@ target_win:
     pop rdi
     ret
 
-; clip(EDI = x0, ESI = y0, EDX = x1, ECX = y1), inside the target's own.
-; Preserves all.
-clip:
-    mov [clip_x0], edi
-    mov [clip_y0], esi
-    mov [clip_x1], edx
-    mov [clip_y1], ecx
+; slide_scale: drawing the Slides view's slide, laid out at (0, 0): at sl_s,
+; at slide_x, slide_y. Preserves all.
+slide_scale:
+    push rdi
+    push rsi
+    push rdx
+    mov esi, [slide_x]
+    imul esi, [win_s]
+    sar esi, 2
+    mov edx, [slide_y]
+    imul edx, [win_s]
+    sar edx, 2
+    mov edi, [sl_s]
+    call scale_set
+    pop rdx
+    pop rsi
+    pop rdi
+    ret
+
+view_size:
+    mov [win_px], rcx
+    mov [win_stride], r8d
+    mov [win_pw], r9d
+    mov [win_ph], r10d
+    cmp edx, [win_s]
+    je .scaled
+    mov [win_s], edx
+    mov byte [thumbs_all], 1            ; the thumbnails, at this scale
+    mov dword [thumb_gen], -1
+.scaled:
+    push rdi
+    push rsi
+    mov edi, edx
+    xor esi, esi
+    xor edx, edx
+    call scale_set
+    pop rsi
+    pop rdi
+    cmp edi, MIN_W
+    jge .w
+    mov edi, MIN_W
+.w:
+    cmp esi, MIN_H
+    jge .h
+    mov esi, MIN_H
+.h:
+    mov [win_w], edi
+    mov [win_h], esi
+    lea eax, [rsi - ST_H]
+    mov [st_y], eax
+    sub eax, VIEW_Y
+    mov [view_h], eax
+    lea eax, [rdi - SIDE_W - 2 * SL_GAP] ; the slide: as large as fits, in
+    imul eax, [win_s]                   ; whole quarters of a pixel a point,
+    xor edx, edx                        ; no larger than the window's
+    mov ecx, SL_W
+    div ecx
+    mov r8d, eax
+    mov eax, [view_h]
+    sub eax, 2 * SL_GAP
+    imul eax, [win_s]
+    xor edx, edx
+    mov ecx, SL_H
+    div ecx
+    cmp eax, r8d
+    cmova eax, r8d
+    cmp eax, [win_s]
+    cmova eax, [win_s]
+    mov ecx, 1
+    cmp eax, ecx
+    cmovb eax, ecx
+    mov [sl_s], eax
+    imul eax, eax, SL_W                 ; its size, in the window's points
+    xor edx, edx
+    div dword [win_s]
+    mov [sl_w], eax
+    mov eax, [sl_s]
+    imul eax, eax, SL_H
+    xor edx, edx
+    div dword [win_s]
+    mov [sl_h], eax
+    mov eax, [view_h]                   ; in the middle of the view
+    sub eax, [sl_h]
+    sar eax, 1
+    add eax, VIEW_Y
+    mov [slide_y], eax
+    lea eax, [rdi - SIDE_W]
+    sub eax, [sl_w]
+    sar eax, 1
+    add eax, SIDE_W
+    mov [slide_x], eax
+    lea eax, [rdi - PG_W]               ; a page: in the middle
+    sar eax, 1
+    mov [pg_x], eax
+    lea eax, [rsi - ST_H - GV_TAB_H]    ; the grid's cells
+    mov [gv_bottom], eax
+    sub eax, GV_CELLS_Y - GV_ROW_H + 1
+    xor edx, edx
+    mov ecx, GV_ROW_H
+    div ecx
+    mov [gv_rows], eax
+    lea eax, [rdi - GV_HEAD_W + GV_COL_W - 1]
+    xor edx, edx
+    mov ecx, GV_COL_W
+    div ecx
+    mov [gv_cols], eax
     ret
 
 ; ring_shadow(EDI = x, ESI = y, EDX = w, ECX = h): a soft shadow around a
@@ -276,7 +377,7 @@ view_layout:
     mov ecx, [rax + LN_Y]               ; below it: up until it shows
     add ecx, [rax + LN_H]
     add ecx, 24
-    sub ecx, VIEW_H
+    sub ecx, [view_h]
     cmp ecx, [scroll_y]
     jle .scrolled
     mov [scroll_y], ecx
@@ -295,9 +396,9 @@ view_layout:
     mov [vw_slide], eax
     cmp eax, -1
     je .no_slide
-    mov edi, eax
-    mov esi, SLIDE_X
-    mov edx, SLIDE_Y
+    mov edi, eax                        ; at (0, 0): drawn at sl_s, at slide_x, slide_y
+    xor esi, esi
+    xor edx, edx
     jmp layout_slide
 .no_slide:
     jmp lay_reset
@@ -305,7 +406,7 @@ view_layout:
 ; scroll_clamp: the pages' scroll inside the document
 scroll_clamp:
     mov eax, [doc_h]
-    sub eax, VIEW_H
+    sub eax, [view_h]
     jns .max
     xor eax, eax
 .max:
@@ -364,13 +465,13 @@ paint_pages:
     push r12
     mov edi, 0
     mov esi, VIEW_Y
-    mov edx, WIN_W
-    mov ecx, WIN_H - ST_H
+    mov edx, [win_w]
+    mov ecx, [st_y]
     call clip
     mov edi, 0
     mov esi, VIEW_Y
-    mov edx, WIN_W
-    mov ecx, VIEW_H
+    mov edx, [win_w]
+    mov ecx, [view_h]
     mov r8d, C_WINDOW
     call fill_rect
     xor ebx, ebx                        ; each page that shows
@@ -384,18 +485,18 @@ paint_pages:
     lea eax, [r12 + PG_H + 8]
     cmp eax, VIEW_Y
     jl .next_page
-    cmp r12d, WIN_H - ST_H
+    cmp r12d, [st_y]
     jge .pages_done
-    mov edi, PG_X
+    mov edi, [pg_x]
     mov esi, r12d
     mov edx, PG_W
     mov ecx, PG_H
     call ring_shadow
-    mov edi, PG_X
+    mov edi, [pg_x]
     mov esi, r12d
     mov edx, PG_W
     mov ecx, PG_H
-    mov r8d, C_PAPER
+    mov r8d, D_PAPER
     call fill_rect
     cmp dword [pg_count], 1             ; its number, at its foot
     je .next_page
@@ -406,9 +507,10 @@ paint_pages:
     mov [ui_mid], eax
     lea rsi, [sb_buf]
     mov ecx, [sb_len]
-    mov edi, PG_X + PG_W / 2
+    mov edi, [pg_x]
+    add edi, PG_W / 2
     mov r8d, UI_SMALL
-    mov r9d, C_FAINT
+    mov r9d, D_FAINT
     call label_c
 .next_page:
     inc ebx
@@ -447,7 +549,7 @@ paint_cards:
     mov edx, [rbx + LN_W]
     mov ecx, [rbx + LN_H]
     call ring_shadow
-    PUT_C [ui_fill], C_CARD
+    PUT_C [ui_fill], D_CARD
     mov edi, [rbx + LN_X0]
     add edi, [vw_ox]
     mov esi, [rbx + LN_Y]
@@ -455,7 +557,7 @@ paint_cards:
     mov edx, [rbx + LN_W]
     mov ecx, [rbx + LN_H]
     mov r8d, 8
-    mov r9d, C_HAIRLINE
+    mov r9d, D_HAIRLINE
     call frame_round
 .next:
     add rbx, LN_SIZE
@@ -545,7 +647,7 @@ paint_sel:
     mov esi, [rbx + LN_Y]
     add esi, [vw_oy]
     mov ecx, [rbx + LN_H]
-    mov r8d, C_SELECT
+    mov r8d, D_SELECT
     call fill_rect
     jmp .next
 .box:
@@ -665,6 +767,14 @@ img_draw:
     push r14
     push r15
     sub rsp, 24
+    add edx, edi                        ; in pixels
+    add ecx, esi
+    PXX edi
+    PXY esi
+    PXX edx
+    PXY ecx
+    sub edx, edi
+    sub ecx, esi
     mov [rsp], edi                      ; [rsp]: x, +4 y, +8 w, +12 h
     mov [rsp + 4], esi
     mov [rsp + 8], edx
@@ -674,15 +784,15 @@ img_draw:
     test ecx, ecx
     jle .out
     mov r12d, esi                       ; R12D: the row, in the window
-    cmp r12d, [clip_y0]
+    cmp r12d, [px_cy0]
     jge .row
-    mov r12d, [clip_y0]
+    mov r12d, [px_cy0]
 .row:
     mov eax, [rsp + 4]
     add eax, [rsp + 12]
     cmp r12d, eax
     jge .out
-    cmp r12d, [clip_y1]
+    cmp r12d, [px_cy1]
     jge .out
     mov eax, r12d                       ; R14: the image's row
     sub eax, [rsp + 4]
@@ -696,15 +806,15 @@ img_draw:
     mov r15, [px_base]
     lea r15, [r15 + rax * 4]
     mov r13d, [rsp]                     ; R13D: the column
-    cmp r13d, [clip_x0]
+    cmp r13d, [px_cx0]
     jge .col
-    mov r13d, [clip_x0]
+    mov r13d, [px_cx0]
 .col:
     mov eax, [rsp]
     add eax, [rsp + 8]
     cmp r13d, eax
     jge .row_done
-    cmp r13d, [clip_x1]
+    cmp r13d, [px_cx1]
     jge .row_done
     mov eax, r13d
     sub eax, [rsp]
@@ -778,7 +888,7 @@ paint_cursor:
     sub ecx, eax
     mov edx, 2
     dec edi
-    mov r8d, C_INK
+    mov r8d, D_INK
     call fill_rect
     jmp .out
 .ring:
@@ -839,25 +949,25 @@ paint_slides:
     push r13
     mov edi, 0
     mov esi, VIEW_Y
-    mov edx, WIN_W
-    mov ecx, WIN_H - ST_H
+    mov edx, [win_w]
+    mov ecx, [st_y]
     call clip
     mov edi, 0
     mov esi, VIEW_Y
-    mov edx, WIN_W
-    mov ecx, VIEW_H
+    mov edx, [win_w]
+    mov ecx, [view_h]
     mov r8d, C_WINDOW
     call fill_rect
     mov edi, 0                          ; the sidebar
     mov esi, VIEW_Y
     mov edx, SIDE_W
-    mov ecx, VIEW_H
+    mov ecx, [view_h]
     mov r8d, C_SIDEBAR
     call fill_rect
     mov edi, SIDE_W - 1
     mov esi, VIEW_Y
     mov edx, 1
-    mov ecx, VIEW_H
+    mov ecx, [view_h]
     mov r8d, C_HAIRLINE
     call fill_rect
     cmp byte [vw_follow], 0
@@ -870,7 +980,7 @@ paint_slides:
     mov edi, 0
     mov esi, VIEW_Y
     mov edx, SIDE_W - 1
-    mov ecx, WIN_H - ST_H
+    mov ecx, [st_y]
     call clip
     xor ebx, ebx                        ; each thumbnail
 .thumb:
@@ -883,7 +993,7 @@ paint_slides:
     lea eax, [r12 + TH_ITEM]
     cmp eax, VIEW_Y
     jl .thumb_next
-    cmp r12d, WIN_H - ST_H
+    cmp r12d, [st_y]
     jge .thumbs_done
     cmp ebx, [vw_slide]                 ; the one shown: ringed in the accent
     jne .plain
@@ -925,46 +1035,60 @@ paint_slides:
 .thumbs_done:
     mov edi, SIDE_W
     mov esi, VIEW_Y
-    mov edx, WIN_W
-    mov ecx, WIN_H - ST_H
+    mov edx, [win_w]
+    mov ecx, [st_y]
     call clip
     cmp dword [vw_slide], -1
     je .empty
-    mov edi, SLIDE_X
-    mov esi, SLIDE_Y
-    mov edx, SL_W
-    mov ecx, SL_H
+    mov edi, [slide_x]
+    mov esi, [slide_y]
+    mov edx, [sl_w]
+    mov ecx, [sl_h]
     call ring_shadow
-    mov edi, SLIDE_X
-    mov esi, SLIDE_Y
+    call slide_scale                    ; the slide, at its own scale
+    xor edi, edi
+    xor esi, esi
     mov edx, SL_W
     mov ecx, SL_H
-    mov r8d, C_PAPER
-    call fill_rect
-    mov edi, SLIDE_X
-    mov esi, SLIDE_Y
-    mov edx, SLIDE_X + SL_W
-    mov ecx, SLIDE_Y + SL_H
     call clip
+    xor edi, edi
+    xor esi, esi
+    mov edx, SL_W
+    mov ecx, SL_H
+    mov r8d, D_PAPER
+    call fill_rect
     call paint_sel
     mov edi, 0
     mov esi, 0
     call draw_list
     call paint_images
     call paint_cursor
+    call target_win
     jmp .out
 .empty:
-    mov dword [ui_mid], SLIDE_Y + SL_H / 2 - 14
+    mov eax, [sl_h]
+    shr eax, 1
+    add eax, [slide_y]
+    sub eax, 14
+    mov [ui_mid], eax
     lea rsi, [s_no_slides]
     call cstr
-    mov edi, SLIDE_X + SL_W / 2
+    mov edi, [sl_w]
+    shr edi, 1
+    add edi, [slide_x]
     mov r8d, UI_BOLD
     mov r9d, C_SECOND
     call label_c
-    mov dword [ui_mid], SLIDE_Y + SL_H / 2 + 14
+    mov eax, [sl_h]
+    shr eax, 1
+    add eax, [slide_y]
+    add eax, 14
+    mov [ui_mid], eax
     lea rsi, [s_no_slides2]
     call cstr
-    mov edi, SLIDE_X + SL_W / 2
+    mov edi, [sl_w]
+    shr edi, 1
+    add edi, [slide_x]
     mov r8d, UI_FONT
     mov r9d, C_FAINT
     call label_c
@@ -997,7 +1121,7 @@ side_follow:
     jmp .clamp
 .below:
     add eax, TH_ITEM + 28
-    sub eax, VIEW_H
+    sub eax, [view_h]
     cmp eax, [side_scroll]
     jle .clamp
     mov [side_scroll], eax
@@ -1005,7 +1129,7 @@ side_follow:
     mov eax, [sl_n]
     imul eax, eax, TH_ITEM
     add eax, 28
-    sub eax, VIEW_H
+    sub eax, [view_h]
     jns .max
     xor eax, eax
 .max:
@@ -1019,21 +1143,28 @@ side_follow:
 .out:
     ret
 
-; slide_render(EDI = a slide): painted whole into off_px, at (0, 0). The
-; layout is then that slide's.
+; slide_render(EDI = a slide, ESI = quarters of a pixel a point): painted
+; whole into off_px, at that scale (SL_W * ESI / 4 pixels wide), at (0, 0).
+; The layout is then that slide's, and the scale that one.
 slide_render:
     push rbx
+    push r12
     mov ebx, edi
+    mov r12d, esi
+    mov edi, esi
+    xor esi, esi
+    xor edx, edx
+    call scale_set
     mov rdi, [off_px]
-    mov esi, SL_W
-    mov edx, SL_W
-    mov ecx, SL_H
+    imul esi, r12d, SL_W / 4
+    mov edx, esi
+    imul ecx, r12d, SL_H / 4
     call target
     xor edi, edi
     xor esi, esi
     mov edx, SL_W
     mov ecx, SL_H
-    mov r8d, C_PAPER
+    mov r8d, D_PAPER
     call fill_rect
     mov edi, ebx
     xor esi, esi
@@ -1047,6 +1178,7 @@ slide_render:
     mov dword [vw_oy], 0
     call paint_images_plain
     pop qword [vw_ox]
+    pop r12
     pop rbx
     ret
 
@@ -1104,36 +1236,43 @@ thumbs_update:
     pop rbx
     ret
 
-; thumb_make(EDI = a slide): rendered, then each 5 by 5 pixels averaged
-; into its thumbnail
+; thumb_make(EDI = a slide): rendered at the window's scale, then each 5
+; by 5 pixels averaged into its thumbnail (TH_W by TH_H points: TH_W / 4 *
+; win_s pixels wide)
 thumb_make:
     cmp edi, TH_MAX
     jae .none
     push rbx
+    push rbp
     push r12
     push r13
     push r14
     push r15
+    sub rsp, 8
     mov ebx, edi
+    mov esi, [win_s]
     call slide_render
     mov eax, ebx
     imul eax, eax, TH_BYTES
     mov r12, [th_px]
     add r12, rax                        ; R12: the thumbnail
+    imul ebp, [win_s], SL_W             ; EBP: the slide's bytes a row
     xor r13d, r13d                      ; R13D: its row
 .row:
-    cmp r13d, TH_H
+    imul eax, [win_s], TH_H / 4
+    cmp r13d, eax
     jae .done
     xor r14d, r14d                      ; R14D: its column
 .col:
-    cmp r14d, TH_W
+    imul eax, [win_s], TH_W / 4
+    cmp r14d, eax
     jae .row_next
-    mov eax, r13d                       ; RSI: the 5 by 5 square's first
-    imul eax, eax, 5 * SL_W
-    lea eax, [rax + r14 * 4]
-    add eax, r14d                       ; (+ column * 5)
+    imul eax, r13d, 5                   ; RSI: the 5 by 5 square's first
+    imul eax, ebp
+    lea ecx, [r14 * 4 + r14]
+    lea eax, [rax + rcx * 4]
     mov rsi, [off_px]
-    lea rsi, [rsi + rax * 4]
+    add rsi, rax
     xor r8d, r8d                        ; R8D, R9D, R10D: blue, green, red
     xor r9d, r9d
     xor r10d, r10d
@@ -1151,7 +1290,7 @@ thumb_make:
     add rdi, 4
     dec edx
     jnz .sq_col
-    add rsi, SL_W * 4
+    add rsi, rbp
     dec ecx
     jnz .sq_row
     mov ecx, 25
@@ -1169,8 +1308,8 @@ thumb_make:
     xor edx, edx
     div ecx
     or r15d, eax
-    mov eax, r13d
-    imul eax, eax, TH_W
+    imul eax, [win_s], TH_W / 4
+    imul eax, r13d
     add eax, r14d
     mov [r12 + rax * 4], r15d
     inc r14d
@@ -1179,10 +1318,12 @@ thumb_make:
     inc r13d
     jmp .row
 .done:
+    add rsp, 8
     pop r15
     pop r14
     pop r13
     pop r12
+    pop rbp
     pop rbx
 .none:
     ret
@@ -1194,6 +1335,7 @@ thumb_draw:
     push r12
     push r13
     push r14
+    push r15
     mov r12d, esi
     mov r13d, edx
     cmp edi, TH_MAX
@@ -1202,35 +1344,40 @@ thumb_draw:
     mov esi, r13d
     mov edx, TH_W
     mov ecx, TH_H
-    mov r8d, C_PAPER
+    mov r8d, D_PAPER
     call fill_rect
     jmp .out
 .kept:
     imul edi, edi, TH_BYTES
     mov rbx, [th_px]
     add rbx, rdi
+    PXX r12d                            ; in pixels
+    PXY r13d
+    imul r15d, [win_s], TH_W / 4        ; R15D: its width, pixels
     xor r14d, r14d                      ; R14D: the row
 .row:
-    cmp r14d, TH_H
+    imul eax, [win_s], TH_H / 4
+    cmp r14d, eax
     jae .out
     lea edx, [r13 + r14]
-    cmp edx, [clip_y0]
+    cmp edx, [px_cy0]
     jl .next
-    cmp edx, [clip_y1]
+    cmp edx, [px_cy1]
     jge .out
     imul edx, [px_stride]
     add edx, r12d
     mov rdi, [px_base]
     lea rdi, [rdi + rdx * 4]
     mov eax, r14d
-    imul eax, eax, TH_W * 4
-    lea rsi, [rbx + rax]
-    mov ecx, TH_W
+    imul eax, r15d
+    lea rsi, [rbx + rax * 4]
+    mov ecx, r15d
     rep movsd
 .next:
     inc r14d
     jmp .row
 .out:
+    pop r15
     pop r14
     pop r13
     pop r12
@@ -1261,7 +1408,8 @@ grid_scroll:
     jge .row_below
     mov [gv_row0], eax
 .row_below:
-    lea ecx, [rax - GV_ROWS + 2]
+    lea ecx, [rax + 2]
+    sub ecx, [gv_rows]
     cmp ecx, [gv_row0]
     jle .col
     mov [gv_row0], ecx
@@ -1270,7 +1418,8 @@ grid_scroll:
     jge .col_right
     mov [gv_col0], edx
 .col_right:
-    lea ecx, [rdx - GV_COLS + 2]
+    lea ecx, [rdx + 2]
+    sub ecx, [gv_cols]
     cmp ecx, [gv_col0]
     jle .out
     mov [gv_col0], ecx
@@ -1287,14 +1436,14 @@ paint_grid:
     sub rsp, 40
     mov edi, 0
     mov esi, VIEW_Y
-    mov edx, WIN_W
-    mov ecx, WIN_H - ST_H
+    mov edx, [win_w]
+    mov ecx, [st_y]
     call clip
     mov edi, 0
     mov esi, VIEW_Y
-    mov edx, WIN_W
-    mov ecx, VIEW_H
-    mov r8d, C_PAPER
+    mov edx, [win_w]
+    mov ecx, [view_h]
+    mov r8d, C_WINDOW
     call fill_rect
     call grid_shown
     test rax, rax
@@ -1304,21 +1453,33 @@ paint_grid:
     je .scrolled
     call grid_scroll
 .scrolled:
-    ; the formula bar: the cell's name, then what was typed in it
+    ; the formula bar, the window's: the cell's name, then what was typed
+    ; in it
+    mov edi, 0
+    mov esi, VIEW_Y
+    mov edx, [win_w]
+    mov ecx, GV_FB_H
+    mov r8d, C_CHROME
+    call fill_rect
+    mov edi, 0
+    mov esi, GV_TOP
+    mov edx, [win_w]
+    mov ecx, [gv_bottom]
+    sub ecx, GV_TOP
+    mov r8d, D_PAPER
+    call fill_rect
     mov edi, 0
     mov esi, GV_TOP - 1
-    mov edx, WIN_W
+    mov edx, [win_w]
     mov ecx, 1
     mov r8d, C_HAIRLINE
     call fill_rect
-    PUT_C [ui_fill], C_PAPER
     mov edi, 12
     mov esi, VIEW_Y + 7
     mov edx, 72
     mov ecx, 30
-    mov r8d, 6
-    mov r9d, C_BUTTON_EDGE
-    call frame_round
+    xor r8d, r8d
+    call field
     call sb_reset
     mov eax, [cur_off]
     call sb_cell
@@ -1335,21 +1496,17 @@ paint_grid:
     mov r8d, WF_ITALIC * WF_SIZES + WF_PX16
     mov r9d, C_FAINT
     call label
-    PUT_C [ui_fill], C_PAPER
     mov edi, 124
     mov esi, VIEW_Y + 7
-    mov edx, WIN_W - 136
+    mov edx, [win_w]
+    sub edx, 136
     mov ecx, 30
-    mov r8d, 6
-    mov r9d, C_BUTTON_EDGE
-    cmp byte [ed_on], 0
-    je .bar
-    mov r9d, C_ACCENT
-.bar:
-    call frame_round
+    movzx r8d, byte [ed_on]
+    call field
     mov edi, 124
     mov esi, VIEW_Y
-    mov edx, WIN_W - 16
+    mov edx, [win_w]
+    sub edx, 16
     mov ecx, GV_TOP - 1
     call clip
     cmp byte [ed_on], 0
@@ -1381,30 +1538,31 @@ paint_grid:
     mov r9d, C_INK
     call label
     mov edi, [rsp + 32]
-    add edi, 135
-    mov esi, VIEW_Y + 12
-    mov edx, 2
-    mov ecx, 20
-    mov r8d, C_INK
+    add edi, 136
+    mov esi, VIEW_Y + 13
+    mov edx, 1
+    mov ecx, 18
+    mov r8d, C_ACCENT
     call fill_rect
 .bar_done:
     mov edi, 0
     mov esi, GV_TOP
-    mov edx, WIN_W
-    mov ecx, GV_BOTTOM
+    mov edx, [win_w]
+    mov ecx, [gv_bottom]
     call clip
     ; the column letters and the row numbers
     mov edi, 0
     mov esi, GV_TOP
-    mov edx, WIN_W
+    mov edx, [win_w]
     mov ecx, GV_ROW_H
-    mov r8d, C_GRID_HEAD
+    mov r8d, D_GRID_HEAD
     call fill_rect
     mov edi, 0
     mov esi, GV_TOP
     mov edx, GV_HEAD_W
-    mov ecx, GV_BOTTOM - GV_TOP
-    mov r8d, C_GRID_HEAD
+    mov ecx, [gv_bottom]
+    sub ecx, GV_TOP
+    mov r8d, D_GRID_HEAD
     call fill_rect
     mov eax, [cur_off]                  ; [rsp+24], [rsp+28]: the cursor's
     xor edx, edx                        ; row and column
@@ -1414,7 +1572,7 @@ paint_grid:
     mov [rsp + 28], edx
     xor r12d, r12d                      ; R12D: a column shown
 .letters:
-    cmp r12d, GV_COLS
+    cmp r12d, [gv_cols]
     jae .letters_done
     mov eax, r12d
     add eax, [gv_col0]
@@ -1426,8 +1584,9 @@ paint_grid:
     add edi, GV_HEAD_W + GV_COL_W - 1
     mov esi, GV_TOP
     mov edx, 1
-    mov ecx, GV_BOTTOM - GV_TOP
-    mov r8d, C_GRID_LINE
+    mov ecx, [gv_bottom]
+    sub ecx, GV_TOP
+    mov r8d, D_GRID_LINE
     call fill_rect
     cmp r13d, [rsp + 28]                ; the cursor's: marked
     jne .letter
@@ -1437,7 +1596,7 @@ paint_grid:
     mov esi, GV_TOP
     mov edx, GV_COL_W - 1
     mov ecx, GV_ROW_H
-    mov r8d, C_BUTTON_ON
+    mov r8d, D_BUTTON_ON
     call fill_rect
 .letter:
     lea eax, [r13 + 'A']
@@ -1449,14 +1608,14 @@ paint_grid:
     imul edi, edi, GV_COL_W
     add edi, GV_HEAD_W + GV_COL_W / 2
     mov r8d, UI_SMALL
-    mov r9d, C_SECOND
+    mov r9d, D_SECOND
     call label_c
     inc r12d
     jmp .letters
 .letters_done:
     xor r12d, r12d                      ; R12D: a row shown
 .numbers:
-    cmp r12d, GV_ROWS
+    cmp r12d, [gv_rows]
     jae .numbers_done
     mov eax, r12d
     add eax, [gv_row0]
@@ -1467,9 +1626,9 @@ paint_grid:
     imul esi, esi, GV_ROW_H
     add esi, GV_CELLS_Y + GV_ROW_H - 1
     mov edi, 0
-    mov edx, WIN_W
+    mov edx, [win_w]
     mov ecx, 1
-    mov r8d, C_GRID_LINE
+    mov r8d, D_GRID_LINE
     call fill_rect
     cmp r13d, [rsp + 24]
     jne .number
@@ -1479,7 +1638,7 @@ paint_grid:
     mov edi, 0
     mov edx, GV_HEAD_W - 1
     mov ecx, GV_ROW_H - 1
-    mov r8d, C_BUTTON_ON
+    mov r8d, D_BUTTON_ON
     call fill_rect
 .number:
     call sb_reset
@@ -1493,32 +1652,33 @@ paint_grid:
     mov ecx, [sb_len]
     mov edi, GV_HEAD_W / 2
     mov r8d, UI_SMALL
-    mov r9d, C_SECOND
+    mov r9d, D_SECOND
     call label_c
     inc r12d
     jmp .numbers
 .numbers_done:
     mov edi, 0
     mov esi, GV_CELLS_Y - 1
-    mov edx, WIN_W
+    mov edx, [win_w]
     mov ecx, 1
-    mov r8d, C_HAIRLINE
+    mov r8d, D_HAIRLINE
     call fill_rect
     mov edi, GV_HEAD_W - 1
     mov esi, GV_TOP
     mov edx, 1
-    mov ecx, GV_BOTTOM - GV_TOP
-    mov r8d, C_HAIRLINE
+    mov ecx, [gv_bottom]
+    sub ecx, GV_TOP
+    mov r8d, D_HAIRLINE
     call fill_rect
     ; the cells
     mov edi, GV_HEAD_W
     mov esi, GV_CELLS_Y
-    mov edx, WIN_W
-    mov ecx, GV_BOTTOM
+    mov edx, [win_w]
+    mov ecx, [gv_bottom]
     call clip
     xor r12d, r12d                      ; R12D: the row shown
 .cell_row:
-    cmp r12d, GV_ROWS
+    cmp r12d, [gv_rows]
     jae .cells_done
     mov eax, r12d
     add eax, [gv_row0]
@@ -1526,7 +1686,7 @@ paint_grid:
     jae .cells_done
     xor r13d, r13d                      ; R13D: the column shown
 .cell_col:
-    cmp r13d, GV_COLS
+    cmp r13d, [gv_cols]
     jae .cell_row_next
     mov edx, r13d
     add edx, [gv_col0]
@@ -1571,13 +1731,13 @@ paint_grid:
     mov esi, r15d
     lea edx, [rbp + GV_COL_W - 1]
     lea ecx, [r15 + GV_ROW_H - 1]
-    cmp edx, WIN_W
+    cmp edx, [win_w]
     jle .clip_x
-    mov edx, WIN_W
+    mov edx, [win_w]
 .clip_x:
-    cmp ecx, GV_BOTTOM
+    cmp ecx, [gv_bottom]
     jle .clip_y
-    mov ecx, GV_BOTTOM
+    mov ecx, [gv_bottom]
 .clip_y:
     cmp edi, GV_HEAD_W
     jge .clip_set
@@ -1586,34 +1746,34 @@ paint_grid:
     call clip
     lea eax, [r15 + GV_ROW_H / 2]
     mov [ui_mid], eax
-    mov r9d, C_INK
+    mov r9d, D_INK
     cmp byte [r14 + CE_KIND], VK_ERR
     jne .ink
-    mov r9d, C_ERROR
+    mov r9d, D_ERROR
 .ink:
     lea edi, [rbp + 6]
     cmp dword [rsp + 8], 0
     je .left
     mov rsi, [rsp]
     mov ecx, [rsp + 12]
-    mov edx, UI_FONT
+    mov edx, DOC_FONT
     call text_px
     lea edi, [rbp + GV_COL_W - 7]
     sub edi, eax
 .left:
     mov rsi, [rsp]
     mov ecx, [rsp + 12]
-    mov r8d, UI_FONT
-    mov r9d, C_INK
+    mov r8d, DOC_FONT
+    mov r9d, D_INK
     cmp byte [r14 + CE_KIND], VK_ERR
     jne .draw_cell
-    mov r9d, C_ERROR
+    mov r9d, D_ERROR
 .draw_cell:
     call label
     mov edi, GV_HEAD_W
     mov esi, GV_CELLS_Y
-    mov edx, WIN_W
-    mov ecx, GV_BOTTOM
+    mov edx, [win_w]
+    mov ecx, [gv_bottom]
     call clip
 .cell_next:
     inc r13d
@@ -1625,12 +1785,12 @@ paint_grid:
     mov eax, [rsp + 24]                 ; the cursor's cell: ringed
     sub eax, [gv_row0]
     js .tabs
-    cmp eax, GV_ROWS
+    cmp eax, [gv_rows]
     jae .tabs
     mov ecx, [rsp + 28]
     sub ecx, [gv_col0]
     js .tabs
-    cmp ecx, GV_COLS
+    cmp ecx, [gv_cols]
     jae .tabs
     imul esi, eax, GV_ROW_H
     add esi, GV_CELLS_Y - 1
@@ -1638,23 +1798,31 @@ paint_grid:
     add edi, GV_HEAD_W - 1
     mov edx, GV_COL_W + 1
     mov ecx, GV_ROW_H + 1
-    mov r8d, C_ACCENT
+    mov r8d, D_ACCENT
     call ring2
 .tabs:
     call paint_tabs
     jmp .out
 .empty:
-    mov dword [ui_mid], VIEW_Y + VIEW_H / 2 - 14
+    mov eax, [view_h]
+    shr eax, 1
+    add eax, VIEW_Y - 14
+    mov [ui_mid], eax
     lea rsi, [s_no_grid]
     call cstr
-    mov edi, WIN_W / 2
+    mov edi, [win_w]
+    shr edi, 1
     mov r8d, UI_BOLD
     mov r9d, C_SECOND
     call label_c
-    mov dword [ui_mid], VIEW_Y + VIEW_H / 2 + 14
+    mov eax, [view_h]
+    shr eax, 1
+    add eax, VIEW_Y + 14
+    mov [ui_mid], eax
     lea rsi, [s_no_grid2]
     call cstr
-    mov edi, WIN_W / 2
+    mov edi, [win_w]
+    shr edi, 1
     mov r8d, UI_FONT
     mov r9d, C_FAINT
     call label_c
@@ -1676,19 +1844,19 @@ paint_tabs:
     push r12
     push r13
     mov edi, 0
-    mov esi, GV_BOTTOM
-    mov edx, WIN_W
-    mov ecx, WIN_H - ST_H
+    mov esi, [gv_bottom]
+    mov edx, [win_w]
+    mov ecx, [st_y]
     call clip
     mov edi, 0
-    mov esi, GV_BOTTOM
-    mov edx, WIN_W
+    mov esi, [gv_bottom]
+    mov edx, [win_w]
     mov ecx, GV_TAB_H
     mov r8d, C_CHROME
     call fill_rect
     mov edi, 0
-    mov esi, GV_BOTTOM
-    mov edx, WIN_W
+    mov esi, [gv_bottom]
+    mov edx, [win_w]
     mov ecx, 1
     mov r8d, C_HAIRLINE
     call fill_rect
@@ -1726,7 +1894,8 @@ paint_tabs:
     jne .plain
     PUT_C [ui_fill], C_BUTTON
     mov edi, r12d
-    mov esi, GV_BOTTOM + 5
+    mov esi, [gv_bottom]
+    add esi, 5
     mov edx, r13d
     mov ecx, GV_TAB_H - 10
     mov r8d, 6
@@ -1735,7 +1904,9 @@ paint_tabs:
 .plain:
     pop rcx
     pop rsi
-    mov dword [ui_mid], GV_BOTTOM + GV_TAB_H / 2
+    mov eax, [gv_bottom]
+    add eax, GV_TAB_H / 2
+    mov [ui_mid], eax
     lea edi, [r12 + 14]
     mov r8d, UI_FONT
     mov r9d, C_SECOND
@@ -1765,13 +1936,13 @@ paint_toolbar:
     call target_win
     mov edi, 0
     mov esi, 0
-    mov edx, WIN_W
+    mov edx, [win_w]
     mov ecx, TB_H - 1
     mov r8d, C_CHROME
     call fill_rect
     mov edi, 0
     mov esi, TB_H - 1
-    mov edx, WIN_W
+    mov edx, [win_w]
     mov ecx, 1
     mov r8d, C_HAIRLINE
     call fill_rect
@@ -1846,18 +2017,20 @@ paint_status:
     push rbx
     call target_win
     mov edi, 0
-    mov esi, WIN_H - ST_H
-    mov edx, WIN_W
+    mov esi, [st_y]
+    mov edx, [win_w]
     mov ecx, ST_H
     mov r8d, C_CHROME
     call fill_rect
     mov edi, 0
-    mov esi, WIN_H - ST_H
-    mov edx, WIN_W
+    mov esi, [st_y]
+    mov edx, [win_w]
     mov ecx, 1
     mov r8d, C_HAIRLINE
     call fill_rect
-    mov dword [ui_mid], WIN_H - ST_H / 2
+    mov eax, [win_h]
+    sub eax, ST_H / 2
+    mov [ui_mid], eax
     call sb_reset                       ; where the cursor is
     mov eax, [view]
     cmp eax, V_PAGES
@@ -1923,7 +2096,8 @@ paint_status:
     je .name
     lea rsi, [st_msg]
     call cstr
-    mov edi, WIN_W / 2
+    mov edi, [win_w]
+    shr edi, 1
     mov r8d, UI_SMALL
     mov r9d, C_INK
     call label_c
@@ -1941,7 +2115,8 @@ paint_status:
     mov ecx, [sb_len]
     mov edx, UI_SMALL
     call text_px
-    mov edi, WIN_W - 16
+    mov edi, [win_w]
+    sub edi, 16
     sub edi, eax
     mov r8d, UI_SMALL
     mov r9d, C_SECOND
@@ -2003,7 +2178,7 @@ pres_paint:
     push r13
     push r14
     push r15
-    sub rsp, 56
+    sub rsp, 72
     mov [rsp], rdi                      ; [rsp]: the pixels; +8 w, +12 h
     mov [rsp + 8], esi
     mov [rsp + 12], edx
@@ -2017,12 +2192,11 @@ pres_paint:
     mov edx, [rsp + 8]
     mov ecx, [rsp + 12]
     mov r8d, C_BLACK
-    call fill_rect
+    call px_fill_rect
     call slides_build
     mov edi, [pres_slide]
     cmp edi, [sl_n]
     jae .out
-    call slide_render
     ; as large as fits, 16:9: [rsp+16] x0, +20 y0, +24 w, +28 h
     mov eax, [rsp + 8]
     imul eax, eax, 9
@@ -2055,15 +2229,50 @@ pres_paint:
     sub eax, [rsp + 28]
     shr eax, 1
     mov [rsp + 20], eax
-    ; each pixel: the slide's four nearest, weighed (16.16)
-    mov eax, SL_W << 16                 ; [rsp+32], [rsp+36]: steps
+    ; the slide painted as large as fits, to twice (S_MAX) at most: [rsp+40]
+    ; its width, +44 its height, pixels
+    mov eax, [rsp + 24]
+    shl eax, 2
+    xor edx, edx
+    mov ecx, SL_W
+    div ecx
+    cmp eax, S_MAX
+    jbe .most
+    mov eax, S_MAX
+.most:
+    cmp eax, 1
+    jge .least
+    mov eax, 1
+.least:
+    mov esi, eax
+    imul ecx, eax, SL_W / 4
+    mov [rsp + 40], ecx
+    imul ecx, eax, SL_H / 4
+    mov [rsp + 44], ecx
+    mov edi, [pres_slide]
+    call slide_render
+    ; then each pixel: the slide's four nearest, weighed (16.16)
+    mov eax, [rsp + 40]                 ; [rsp+32], [rsp+36]: steps
+    shl eax, 16
     xor edx, edx
     div dword [rsp + 24]
     mov [rsp + 32], eax
-    mov eax, SL_H << 16
+    mov eax, [rsp + 44]
+    shl eax, 16
     xor edx, edx
     div dword [rsp + 28]
     mov [rsp + 36], eax
+    mov eax, [rsp + 40]                 ; [rsp+48]: its bytes a row
+    shl eax, 2
+    mov [rsp + 48], eax
+    mov eax, [rsp + 40]                 ; [rsp+52], +56: the last x and y, 16.16
+    dec eax
+    shl eax, 16
+    mov [rsp + 52], eax
+    mov eax, [rsp + 44]
+    dec eax
+    shl eax, 16
+    mov [rsp + 56], eax
     xor r12d, r12d                      ; R12D: the row
 .row:
     cmp r12d, [rsp + 28]
@@ -2077,9 +2286,10 @@ pres_paint:
     jns .y_in
     xor eax, eax
 .y_in:
-    cmp eax, (SL_H - 1) << 16
+    cmp eax, [rsp + 56]
     jb .y_ok
-    mov eax, ((SL_H - 1) << 16) - 1
+    mov eax, [rsp + 56]
+    dec eax
 .y_ok:
     mov r13d, eax
     mov eax, r12d                       ; R15: the row's first pixel
@@ -2090,9 +2300,10 @@ pres_paint:
     lea r15, [r15 + rax * 4]
     mov eax, r13d                       ; RBP: the slide's row above
     shr eax, 16
-    imul eax, eax, SL_W * 4
+    imul eax, [rsp + 48]
     mov rbp, [off_px]
     add rbp, rax
+    mov r11d, [rsp + 48]                ; R11: a row down
     xor r14d, r14d                      ; R14D: the column
 .col:
     cmp r14d, [rsp + 24]
@@ -2106,9 +2317,10 @@ pres_paint:
     jns .x_in
     xor eax, eax
 .x_in:
-    cmp eax, (SL_W - 1) << 16
+    cmp eax, [rsp + 52]
     jb .x_ok
-    mov eax, ((SL_W - 1) << 16) - 1
+    mov eax, [rsp + 52]
+    dec eax
 .x_ok:
     mov ebx, eax                        ; EBX: x, 16.16
     shr eax, 16
@@ -2118,7 +2330,7 @@ pres_paint:
     movzx r9d, r13w
     shr r9d, 8
     xor r10d, r10d                      ; R10D: the colour
-    mov ecx, 0                          ; each channel
+    xor ecx, ecx                        ; each channel
 .channel:
     movzx eax, byte [rsi + rcx]
     movzx edx, byte [rsi + rcx + 4]
@@ -2126,12 +2338,13 @@ pres_paint:
     imul edx, r8d
     sar edx, 8
     add eax, edx                        ; EAX: across the top
-    movzx edx, byte [rsi + rcx + SL_W * 4]
-    movzx r11d, byte [rsi + rcx + SL_W * 4 + 4]
-    sub r11d, edx
-    imul r11d, r8d
-    sar r11d, 8
-    add edx, r11d                       ; EDX: across the bottom
+    lea rdi, [rsi + r11]
+    movzx edx, byte [rdi + rcx]
+    movzx edi, byte [rdi + rcx + 4]
+    sub edi, edx
+    imul edi, r8d
+    sar edi, 8
+    add edx, edi                        ; EDX: across the bottom
     sub edx, eax
     imul edx, r9d
     sar edx, 8
@@ -2150,7 +2363,7 @@ pres_paint:
     inc r12d
     jmp .row
 .out:
-    add rsp, 56
+    add rsp, 72
     pop r15
     pop r14
     pop r13
@@ -2341,7 +2554,7 @@ s_edited:       db '  ', 0xE2, 0x80, 0x94, '  Edited', 0
 
 section .bss
 alignb 8
-win_px:         resq 1
+win_px:         resq 1                  ; the window's pixels (view_size)
 off_px:         resq 1
 th_px:          resq 1
 SB_MAX          equ 240
@@ -2351,6 +2564,23 @@ GV_TABS_MAX     equ 32
 gv_tabs:        resd 2 * (GV_TABS_MAX + 1)
 gv_ntabs:       resd 1
 sb_len:         resd 1
+win_stride:     resd 1                  ; pixels a row
+win_pw:         resd 1                  ; its size, pixels
+win_ph:         resd 1
+win_s:          resd 1                  ; and its scale
+win_w:          resd 1                  ; and points, as laid out
+win_h:          resd 1
+st_y:           resd 1                  ; the status line's top
+view_h:         resd 1                  ; the view's height
+pg_x:           resd 1                  ; a page's left
+slide_x:        resd 1                  ; a slide's, on the Slides view: where,
+slide_y:        resd 1
+sl_w:           resd 1                  ; how large, in the window's points
+sl_h:           resd 1
+sl_s:           resd 1                  ; and its scale (laid out at SL_W by SL_H)
+gv_bottom:      resd 1                  ; the grid's tabs' top
+gv_rows:        resd 1                  ; and its rows and columns shown
+gv_cols:        resd 1
 vw_ox:          resd 1
 vw_oy:          resd 1
 vw_slide:       resd 1

@@ -46,7 +46,8 @@ def cell_xy(ref):
     return 52 + 120 * (ord(ref[0]) - 65) + 60, 122 + 26 * (int(ref[1:]) - 1) + 13
 
 
-TEXT_BUTTON = (526, 26)
+TEXT_BUTTON = (455, 26)
+PG_TEXT = 112 + 88                    # a page's text: its left (the window 1040 wide)
 
 
 def shot(app, name):
@@ -102,10 +103,10 @@ app.key("ctrl-a")
 app.type("Click here")
 app.click(*TEXT_BUTTON)
 check("the Text button", text_of(app), [("text", "Click here")])
-app.click(361, 183)                                 # just before "Click"
+app.click(PG_TEXT + 1, 183)                         # just before "Click"
 app.type(">")
 check("a click puts the cursor", text_of(app), [("text", ">Click here")])
-app.drag(361, 183, 900, 183)                        # all of it chosen
+app.drag(PG_TEXT + 1, 183, 740, 183)                # all of it chosen
 app.type("Tap")
 check("a drag chooses", text_of(app), [("text", "Tap")])
 
@@ -136,7 +137,7 @@ app.key("ctrl-t")                                   # a second grid
 app.type("7\t8\t=A1*B1\n")
 check("a second grid", [b for b in blocks(app) if b in ("C1=56",)], ["C1=56"])
 shot(app, "grid")
-app.click(40, 853)                                  # the first grid's tab
+app.click(40, 553)                                  # the first grid's tab
 check("tabs", app.dump()[0], app.dump()[0])
 
 # --- slides ----------------------------------------------------------------------------
@@ -159,6 +160,13 @@ shot(app, "frames")
 app.key("f2")
 check("slides view", app.log[-1], "compose: view slides")
 shot(app, "slides")
+# the slide shown at 3/4 (a window 1040 by 600, at (274, 109)), laid out
+# 960 by 540: a click on its heading, at (66, 82) on it
+app.click(274 + 66 * 3 // 4, 109 + 82 * 3 // 4)
+app.type("!")
+check("a click on the slide, at its scale", [b for b in text_of(app) if b[0] == "slide"][1],
+      ("slide", "!Third"))
+app.key("ctrl-z")
 app.key("pgup")
 app.key("f5")
 check("presenting", (app.presenting, app.log[-1]), (True, "compose: presenting slide 2 of 3"))
@@ -182,20 +190,28 @@ check("opened", app.log[-1 - 0].startswith("compose: opened first.axd") or
 check("the same again", blocks(app), before)
 check("the view kept", app.dump()[0].split(", cursor")[0], "compose: document, 9 blocks, view slides")
 
-# --- light and dark --------------------------------------------------------------------------
+# --- the desktop's theme, and the paper ----------------------------------------------------
 LIGHT_PAPER, DARK_PAPER = (255, 255, 255), (0x1C, 0x1C, 0x1F)
-THEME_BUTTON = (1102, 26)
+LIGHT_BAR, DARK_BAR = (0xED, 0xED, 0xF0), (0x32, 0x32, 0x36)
+PAPER_BUTTON = (836, 26)
 
 
 def paper():
-    return app.image().getpixel((300, 120))[:3]          # a page's margin
+    return app.image().getpixel((140, 120))[:3]          # a page's margin
+
+
+def bar():
+    return app.image().getpixel((600, 5))[:3]            # the toolbar
 
 
 app.key("f1")
-check("light at first", paper(), LIGHT_PAPER)
-check("the system's dark, followed", (app.system_theme(True), app.log[-1], paper()),
-      (1, "compose: theme auto, dark", DARK_PAPER))
-check("told again: nothing to do", app.system_theme(True), 0)
+check("light at first", (paper(), bar()), (LIGHT_PAPER, LIGHT_BAR))
+n = len(app.log)
+check("the desktop's dark, followed", (app.system_theme(True), app.log[n:], paper(), bar()),
+      (1, ["compose: paper auto, dark"], DARK_PAPER, DARK_BAR))
+n = len(app.log)
+app.system_theme(True)
+check("told again: nothing said", app.log[n:], [])
 shot(app, "dark_pages")
 app.key("f2")
 shot(app, "dark_slides")
@@ -207,29 +223,39 @@ app.key("f3")
 shot(app, "dark_grid")
 app.key("f1")
 app.key("f7")
-check("F7: light, whatever the system's", (app.log[-1], paper(), app.store.get("compose/theme")),
-      ("compose: theme light, light", LIGHT_PAPER, b"light\n"))
-check("the system's then: kept, not followed", (app.system_theme(False), app.system_theme(True),
-                                                paper()), (0, 0, LIGHT_PAPER))
+check("F7: light paper, in the dark", (app.log[-1], paper(), bar(), app.store.get("compose/theme")),
+      ("compose: paper light, dark", LIGHT_PAPER, DARK_BAR, b"light\n"))
+shot(app, "light_paper")
+app.key("f5")
+check("the presenter, light paper", app.presenter().getpixel((40, 40))[:3], LIGHT_PAPER)
+app.key("esc")
+check("the desktop light, then dark: the paper kept",
+      (app.system_theme(False), bar(), app.system_theme(True), paper(), bar()),
+      (1, LIGHT_BAR, 1, LIGHT_PAPER, DARK_BAR))
 app.key("f7")
-check("F7: dark", (app.log[-1], paper(), app.store.get("compose/theme")),
-      ("compose: theme dark, dark", DARK_PAPER, b"dark\n"))
-app.click(*THEME_BUTTON)
-check("the button: auto, as the system's is", (app.log[-1], app.store.get("compose/theme")),
-      ("compose: theme auto, dark", b"auto\n"))
-app.click(*THEME_BUTTON)
-check("the button: light", app.log[-1], "compose: theme light, light")
-shot(app, "light_again")
+check("F7: the paper as the theme is", (app.log[-1], paper(), app.store.get("compose/theme")),
+      ("compose: paper auto, dark", DARK_PAPER, b"auto\n"))
+app.click(*PAPER_BUTTON)
+check("the button: light paper", (app.log[-1], paper()), ("compose: paper light, dark", LIGHT_PAPER))
+app.click(*PAPER_BUTTON)
+check("the button: auto", (app.log[-1], paper()), ("compose: paper auto, dark", DARK_PAPER))
 app.system_theme(False)
-app.click(*THEME_BUTTON)
-app.click(*THEME_BUTTON)
-check("auto again, light", (app.log[-1], paper()), ("compose: theme auto, light", LIGHT_PAPER))
+check("auto, the desktop light", (app.log[-1], paper(), bar()),
+      ("compose: paper auto, light", LIGHT_PAPER, LIGHT_BAR))
 r = subprocess.run([sys.executable, "-c", (
     "import sys; sys.path.insert(0, {!r}); from host import App\n"
-    "app = App(store={{'compose/theme': b'dark\\n'}}); app.open('x')\n"
-    "print(app.image().getpixel((300, 120))[:3])").format(str(pathlib.Path(__file__).parent))],
+    "app = App(store={{'compose/theme': b'light\\n'}}, dark=True); app.open('x')\n"
+    "print(app.image().getpixel((140, 120))[:3], app.log[0])").format(
+        str(pathlib.Path(__file__).parent))], capture_output=True, text=True)
+check("light paper, as it was kept", r.stdout.strip(),
+      f"{LIGHT_PAPER} compose: paper light, dark")
+r = subprocess.run([sys.executable, "-c", (
+    "import sys; sys.path.insert(0, {!r}); from host import App\n"
+    "app = App(dark=True, s4=8); app.open('x'); app.key('f2')\n"
+    "app.image().save({!r}); print(app.image().size)").format(
+        str(pathlib.Path(__file__).parent), str(OUT / "twice_slides.png"))],
     capture_output=True, text=True)
-check("dark, as it was kept", r.stdout.strip(), str(DARK_PAPER))
+check("at twice the size", r.stdout.strip(), "(2080, 1200)")
 
 # --- plain text and CSV ------------------------------------------------------------------------
 app.key("f9")

@@ -7,15 +7,18 @@ The boot has a blank NVMe drive (serial AXIOMTEST) for the store, the boot
 stick, and a USB tablet. In it, by keyboard and mouse:
   - 'store format', then 'compose report &': a new document, its window;
   - a heading, text, a table typed cell by cell with formulas (=SUM,
-    =C2+C3), checked from F12's log of the document; dark, as the system's
-    theme is, then light after 'settings set display.theme light';
+    =C2+C3), checked from F12's log of the document; dark, as the
+    desktop's theme is, then light after 'settings set display.theme light';
   - a slide frame; Slides (F2), PgUp to the first; F5 presents in a window
     of its own, the arrow key moves on, Esc ends it;
   - Grid (F3), a click on a cell, a formula over the table's totals;
-  - F7 twice: light, then dark, whatever the system's;
+  - the desktop dark again, then F7: light paper, the window still dark;
   - ctrl+S saves into the store and commits; ctrl+Q closes it;
-  - 'compose report &' again: the same document, the same values, dark;
+  - 'compose report &' again: the same document, the same values, the
+    paper still light;
   - screenshots of each view and the presenter.
+The screen is 2560x1600 at two pixels a point: compose's window is
+1040x600 points, 2080x1200 pixels.
 --quick skips the host's tests. Outputs go to build/test/compose/.
 """
 import pathlib
@@ -33,10 +36,14 @@ FAILS = 0
 SCR_W, SCR_H = 2560, 1600
 TABLET = "-device qemu-xhci,id=ux -device usb-tablet,bus=ux.0"
 WX, WY = 100, 100                               # compose's frame, once moved
-BORDER, TITLE = 1, 45
-SHELL1 = (150, 1500)                            # in shell 1, below compose's windows
+BORDER, TITLE = 0, 56                           # its client, from the frame (pixels)
+S = 2                                           # pixels a point
+TITLE_BAR = (WX + 1040, WY + 28)                # its title bar's middle: the keys
+SHELL1 = (150, 1400)                            # in shell 1, below compose's windows
 ACCENT = (0x0A, 0x84, 0xFF)
 DARK_PAPER = (0x1C, 0x1C, 0x1F)
+DARK_BAR = (0x32, 0x32, 0x36)
+LIGHT_BAR = (0xED, 0xED, 0xF0)
 
 
 def at(x, y):
@@ -45,8 +52,8 @@ def at(x, y):
 
 
 def client(x, y):
-    """A point in compose's window, on the screen."""
-    return WX + BORDER + x, WY + BORDER + TITLE + y
+    """A point in compose's window (points), on the screen (pixels)."""
+    return WX + BORDER + x * S, WY + TITLE + y * S
 
 
 def cell(ref):
@@ -86,7 +93,7 @@ def press(text):
 def script():
     shot = lambda name: f"shot build/test/compose/{name}.png"  # noqa: E731
     return [
-        "until Type 'help'", "wait 1",
+        "until settings:", "wait 1",
         "type store format\\n", "until store: disk", "wait 0.5",
         "type compose report &\\n", "until compose: new report.axd", "wait 1",
         f"abs {at(*SHELL1)} left", "wait 0.5",               # the keys, to the shell
@@ -102,9 +109,9 @@ def script():
         shot("pages"),
         "sendkey f12", "until compose: document", "wait 0.5",
         f"abs {at(*SHELL1)} left", "wait 0.5",               # the system's theme: light
-        "type settings set display.theme light\\n", "until compose: theme auto, light",
+        "type settings set display.theme light\\n", "until compose: paper auto, light",
         "wait 0.5", shot("pages_light"),
-        f"abs {at(WX + 60, WY + 20)} left", "wait 0.5",      # compose's title: the keys back
+        f"abs {at(*TITLE_BAR)} left", "wait 0.5",      # compose's title: the keys back
         "sendkey ctrl-k", "wait 0.3",
         *press("Highlights\nRevenue up 12 percent\n"),
         "sendkey f2", "until compose: view slides", "wait 0.5",
@@ -114,16 +121,22 @@ def script():
         shot("presenting"),
         f"abs {at(*SHELL1)} left", "wait 0.5",               # the windows, listed
         "type win\\n", "until Presenting", "wait 0.5",
-        f"abs {at(WX + 60, WY + 20)} left", "wait 0.5",      # compose's title: the keys back
+        f"abs {at(*TITLE_BAR)} left", "wait 0.5",      # compose's title: the keys back
         "sendkey right", "until compose: presenting slide 2", "wait 0.5",
         "sendkey esc", "until compose: presenting ended", "wait 0.5",
+        f"abs {at(*TITLE_BAR)} left", "wait 0.5",      # the keys back from where they went
         "sendkey f3", "until compose: view grid", "wait 0.5",
         f"abs {at(*cell('D2'))} left", "wait 0.3",
         *press("=B4+C4\n"), "wait 0.5",
         shot("grid"),
         "sendkey f12", "until compose: document", "wait 0.5",
-        "sendkey f7", "until compose: theme light, light", "wait 0.3",   # light, then dark,
-        "sendkey f7", "until compose: theme dark, dark", "wait 0.3",     # whatever the system's
+        f"abs {at(*SHELL1)} left", "wait 0.5",               # the desktop dark again
+        "type settings set display.theme dark\\n", "until compose: paper auto, dark",
+        f"abs {at(*TITLE_BAR)} left", "wait 0.5",
+        "sendkey f1", "until compose: view pages", "wait 0.3",
+        "sendkey f7", "until compose: paper light, dark", "wait 0.5",  # the paper light
+        shot("light_paper"),
+        "sendkey f3", "until compose: view grid", "wait 0.3",
         "sendkey ctrl-s", "until compose: saved report.axd", "wait 0.5",
         "sendkey ctrl-q", "until run: COMPOSE exited", "wait 0.5",
         f"abs {at(*SHELL1)} left", "wait 0.3",
@@ -161,8 +174,8 @@ def near(a, b, tol=24):
 
 def check(log, err):
     result("compose: new report.axd" in log, "a new document, its window")
-    result(re.search(r"^desk: 5 'report\.axd .{1,3} Compose' at 100,100, 1360x900", log, re.M)
-           is not None, "its window: 1360x900, moved to 100,100")
+    result(re.search(r"^desk: 5 'report\.axd .{1,3} Compose' at 100,100, 2080x1200", log, re.M)
+           is not None, "its window: 1040x600 points, moved to 100,100")
     d = cells(log)
     first = d[0] if d else {}
     result((first.get("B4"), first.get("C4")) == ("200", "235"),
@@ -170,8 +183,8 @@ def check(log, err):
     result(re.search(r'^compose: 0 h1 "Quarterly report"$', log, re.M) is not None,
            "a heading typed")
     result("compose: presenting slide 1 of 2" in log, "presenting, from the slide shown")
-    result(re.search(r"^desk: \d+ 'Presenting .{1,3} Compose' at -?\d+,-?\d+, 1600x900", log, re.M)
-           is not None, "the presenter's window, 1600x900")
+    result(re.search(r"^desk: \d+ 'Presenting .{1,3} Compose' at -?\d+,-?\d+, 2560x\d+", log, re.M)
+           is not None, "the presenter's window: the screen")
     result("compose: presenting slide 2 of 2" in log, "the next slide")
     result("compose: presenting ended" in log, "presenting ended")
     grid = d[1] if len(d) > 1 else {}
@@ -184,14 +197,20 @@ def check(log, err):
               for part in log.split("compose: document, ")[2:4]]
     result(len(blocks) == 2 and blocks[0] == blocks[1], "opened again: the same blocks")
     result("compose: closed" in log, "ctrl+Q closes it")
-    result(near(pixel("pages.png", *client(1158, 26)), ACCENT), "on the screen: its toolbar")
-    result("compose: theme auto, dark" in log, "the system's theme, dark, followed")
-    result(near(pixel("pages.png", *client(300, 120)), DARK_PAPER, 2), "a page, dark")
-    result(near(pixel("pages_light.png", *client(300, 120)), (255, 255, 255), 2),
-           "'settings set display.theme light': the page, light")
-    result("compose: theme dark, dark" in log, "F7: light, then dark")
-    result(near(pixel("reopened.png", *client(800, 500)), DARK_PAPER, 2),
-           "opened again: dark, as F7 left it, though the system's is light")
+    result(near(pixel("pages.png", *client(894, 26)), ACCENT), "on the screen: its toolbar")
+    result("compose: paper auto, dark" in log, "the desktop's theme, dark, followed")
+    result(near(pixel("pages.png", *client(140, 120)), DARK_PAPER, 2) and
+           near(pixel("pages.png", *client(600, 5)), DARK_BAR, 2), "a page and the toolbar, dark")
+    result(near(pixel("pages_light.png", *client(140, 120)), (255, 255, 255), 2) and
+           near(pixel("pages_light.png", *client(600, 5)), LIGHT_BAR, 2),
+           "'settings set display.theme light': the page and the toolbar, light")
+    result(near(pixel("light_paper.png", *client(140, 120)), (255, 255, 255), 2) and
+           near(pixel("light_paper.png", *client(600, 5)), DARK_BAR, 2),
+           "F7 in the dark: light paper, the toolbar dark")
+    result(len(re.findall(r"^compose: paper light, dark$", log, re.M)) == 2,
+           "opened again: light paper, as F7 left it")
+    result(near(pixel("reopened.png", *client(800, 300)), (255, 255, 255), 2),
+           "opened again: the grid's cells on light paper")
     result("AXIOM PANIC" not in log, "no panic")
     result("QEMU ended by itself" in err, "powered off")
 

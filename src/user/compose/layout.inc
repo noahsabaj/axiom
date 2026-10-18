@@ -23,24 +23,19 @@
 ;  (two thirds of a slide).
 ; =============================================================================
 
-WIN_W           equ 1360
-WIN_H           equ 900
+; the window is win_w by win_h points (view_size); these are points too
 TB_H            equ 52                  ; the toolbar
 ST_H            equ 28                  ; the status line
-VIEW_Y          equ TB_H
-VIEW_H          equ WIN_H - TB_H - ST_H
+VIEW_Y          equ TB_H                ; the view, under it (view_h high)
 PG_W            equ 816                 ; a page: 8.5 by 11 inches at 96 dpi
 PG_H            equ 1056
 PG_M            equ 88                  ; its margins
 PG_GAP          equ 32
-PG_X            equ (WIN_W - PG_W) / 2
-PG_TEXT         equ PG_W - 2 * PG_M
+PG_TEXT         equ PG_W - 2 * PG_M     ; (pg_x: where a page is)
 SIDE_W          equ 228                 ; the slides' sidebar
-SL_W            equ 960                 ; a slide
+SL_W            equ 960                 ; a slide (slide_x, slide_y: where)
 SL_H            equ 540
 SL_M            equ 64                  ; its margin
-SLIDE_X         equ SIDE_W + (WIN_W - SIDE_W - SL_W) / 2
-SLIDE_Y         equ VIEW_Y + (VIEW_H - SL_H) / 2
 MINI_W          equ PG_TEXT             ; a frame on a page
 MINI_H          equ MINI_W * 9 / 16
 MINI_M          equ 40
@@ -765,14 +760,14 @@ lay_grid:
     mov esi, [lc_y]
     mov edx, r14d
     mov ecx, [rsp + 16]
-    mov r8d, C_TABLE_HEAD
+    mov r8d, D_TABLE_HEAD
     call di_rect
 .lines:
     mov edi, [rsp]                      ; its line above, and the columns'
     mov esi, [lc_y]
     mov edx, r14d
     mov ecx, 1
-    mov r8d, C_TABLE_LINE
+    mov r8d, D_TABLE_LINE
     call di_rect
     xor r15d, r15d
 .vline:
@@ -788,7 +783,7 @@ lay_grid:
     mov esi, [lc_y]
     mov edx, 1
     mov ecx, [rsp + 16]
-    mov r8d, C_TABLE_LINE
+    mov r8d, D_TABLE_LINE
     call di_rect
     inc r15d
     jmp .vline
@@ -813,7 +808,7 @@ lay_grid:
     mov edi, [rsp]
     mov esi, [lc_y]
     mov ecx, 1
-    mov r8d, C_TABLE_LINE
+    mov r8d, D_TABLE_LINE
     call di_rect
     inc dword [lc_y]
     mov eax, [rsp + 40]
@@ -905,7 +900,7 @@ lay_grid:
     push rcx
     mov edx, [lc_y]
     add edx, [rsp + 24 + 8 + 20]
-    mov r9d, C_INK
+    mov r9d, D_INK
     xor r10d, r10d
     call di_text
     call ln_new
@@ -1070,7 +1065,7 @@ lay_blocks:
     je .frame
     mov dword [lt_kind], -1
     mov dword [lt_align], -1
-    PUT_C [lt_colour], C_INK
+    PUT_C [lt_colour], D_INK
     mov edi, ebx
     mov esi, r13d
     mov edx, r14d
@@ -1104,7 +1099,7 @@ lay_blocks:
 .frame_text:                            ; (never nested: its title, as text)
     mov dword [lt_kind], BK_H1
     mov dword [lt_align], -1
-    PUT_C [lt_colour], C_INK
+    PUT_C [lt_colour], D_INK
     mov edi, ebx
     mov esi, r13d
     mov edx, r14d
@@ -1242,7 +1237,7 @@ lay_slide_at:
     mov [lc_y], eax
     mov dword [lt_kind], BK_SLIDE
     mov dword [lt_align], AL_CENTER
-    PUT_C [lt_colour], C_INK
+    PUT_C [lt_colour], D_INK
     mov edi, ebx
     mov esi, r14d
     add esi, [ls_m]
@@ -1261,7 +1256,7 @@ lay_slide_at:
     add [lc_y], eax
     mov dword [lt_kind], -1
     mov dword [lt_align], AL_CENTER
-    PUT_C [lt_colour], C_SECOND
+    PUT_C [lt_colour], D_SECOND
     mov edi, r12d
     mov esi, r14d
     add esi, [ls_m]
@@ -1281,7 +1276,7 @@ lay_slide_at:
     je .body
     mov dword [lt_kind], BK_SLIDE
     mov dword [lt_align], -1
-    PUT_C [lt_colour], C_INK
+    PUT_C [lt_colour], D_INK
     mov edi, ebx
     mov esi, r14d
     add esi, [ls_m]
@@ -1345,7 +1340,7 @@ lay_slide_at:
     jnz .thick
     inc ecx
 .thick:
-    mov r8d, C_ACCENT
+    mov r8d, D_ACCENT
     call di_rect
     add [lc_y], ecx
     ret
@@ -1358,10 +1353,13 @@ layout_pages:
     mov byte [lc_paged], 1
     mov dword [lc_page], -1
     call lc_next_page
-    mov dword [lc_x], PG_X + PG_M
+    mov eax, [pg_x]
+    add eax, PG_M
+    mov [lc_x], eax
     xor edi, edi
     mov esi, [nblocks]
-    mov edx, PG_X + PG_M
+    mov edx, [pg_x]
+    add edx, PG_M
     mov ecx, PG_TEXT
     mov r8d, PG_H - 2 * PG_M
     call lay_blocks

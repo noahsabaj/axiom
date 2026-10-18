@@ -32,8 +32,9 @@ def build(cc=None):
     OUT.mkdir(parents=True, exist_ok=True)
     dll = OUT / "compose.dll"
     sources = [HERE / "shim.asm", *(ROOT / "src" / "user" / "compose").glob("*.inc"),
-               *(ROOT / "src" / "user" / "web").glob("*.inc"),
-               ROOT / "src" / "user" / "gen" / "webfont.bin"]
+               *(ROOT / "src" / "user" / "web").glob("*.inc"), ROOT / "src" / "user" / "kit.inc",
+               ROOT / "src" / "user" / "gen" / "docfont.pak", ROOT / "src" / "kernel" / "defs.inc",
+               *(ROOT / "src" / "kernel" / "gen").glob("*font.*")]
     if dll.exists() and all(s.stat().st_mtime < dll.stat().st_mtime for s in sources):
         return dll
     nasm = shutil.which("nasm")
@@ -87,7 +88,29 @@ class Compose:
         return None if n < 0 else self.buf.raw[:n].decode()
 
 
-WIN_W, WIN_H = 1360, 900
+WIN_W, WIN_H = 1040, 600          # compose.asm's window, points: pixels here, at 1x
+S4 = 4                            # the desktop's scale, quarters of a pixel a point
+TH_DARK, TH_LIGHT = 0, 1
+LOOK_BYTES = 4 << 20
+
+
+def theme_colors():
+    """theme.asm's colours for each TH_*, and its blue accent: what the
+    kernel puts in the look."""
+    text = (ROOT / "src" / "kernel" / "theme.asm").read_text()
+    out = {}
+    for mode, label in ((TH_DARK, "th_dark_c:"), (TH_LIGHT, "th_light_c:")):
+        body = text[text.index(label) + len(label):]
+        vals = []
+        for line in body.splitlines()[1:]:
+            line = line.split(";")[0].strip()
+            if not line.startswith("dd "):
+                break
+            vals += [int(v, 0) for v in line[3:].split(",")]
+        out[mode] = b"".join(v.to_bytes(4, "little") for v in vals)
+    body = text[text.index("accent_colors:"):].splitlines()[1]
+    blue = [int(v, 0) for v in body.split(";")[0].strip()[3:].split(",")]
+    return out, {TH_DARK: blue[0], TH_LIGHT: blue[1]}
 WE_KEY, WE_PRESS, WE_RELEASE, WE_MOVE, WE_WHEEL, WE_CLOSE = 1, 2, 3, 4, 5, 6
 KEYS = {"up": 0x80, "down": 0x81, "left": 0x82, "right": 0x83, "home": 0x84,
         "end": 0x85, "pgup": 0x86, "pgdn": 0x87, "del": 0x89, "btab": 0x8A,
@@ -105,11 +128,14 @@ PRESF = ctypes.CFUNCTYPE(ctypes.c_int64, ctypes.c_int64)
 class App:
     """The whole program: events in, pixels out, a store in a dict."""
 
-    def __init__(self, cc=None, store=None):
+    def __init__(self, cc=None, store=None, dark=False, s4=S4):
         d = self.d = ctypes.CDLL(str(build(cc)))
         for name, res, args in (
                 ("t_hooks", None, [ctypes.c_void_p] * 4),
-                ("t_app", None, [ctypes.c_void_p, ctypes.c_int64, ctypes.c_void_p, ctypes.c_void_p]),
+                ("t_app", None, [ctypes.c_void_p, ctypes.c_int64, ctypes.c_void_p]),
+                ("t_look", None, [ctypes.c_void_p, ctypes.c_int64, ctypes.c_char_p,
+                                  ctypes.c_int64, ctypes.c_int64]),
+                ("t_size", None, [ctypes.c_void_p, ctypes.c_int64, ctypes.c_int64]),
                 ("t_open", None, [ctypes.c_char_p]),
                 ("t_event", ctypes.c_int64, [ctypes.c_int64] * 5),
                 ("t_paint", None, []),
@@ -125,10 +151,23 @@ class App:
         d.t_hooks(*[ctypes.cast(c, ctypes.c_void_p) for c in self._cbs])
         nbytes = ctypes.c_uint64.in_dll(d, "t_app_bytes").value + (1 << 16)
         self.mem = ctypes.create_string_buffer(nbytes)
-        self.px = ctypes.create_string_buffer(WIN_W * WIN_H * 4)
+        self.colors, self.accents = theme_colors()
+        self.look = ctypes.create_string_buffer(LOOK_BYTES)
+        assert ctypes.c_uint64.in_dll(d, "t_look_bytes").value <= LOOK_BYTES
+        self.s4 = s4
+        self.dark = dark
+        self._look()
         self.save_buf = ctypes.create_string_buffer(SAVE_MAX)
-        d.t_app(ctypes.addressof(self.mem), nbytes, ctypes.addressof(self.px),
-                ctypes.addressof(self.save_buf))
+        d.t_app(ctypes.addressof(self.mem), nbytes, ctypes.addressof(self.save_buf))
+        self.w, self.h = WIN_W * s4 // 4, WIN_H * s4 // 4
+        self.px = ctypes.create_string_buffer(self.w * self.h * 4)
+        d.t_size(ctypes.addressof(self.px), self.w, self.h)
+        self.d.t_theme(1 if dark else 0)            # as compose.asm starts
+
+    def _look(self):
+        mode = TH_DARK if self.dark else TH_LIGHT
+        self.d.t_look(ctypes.addressof(self.look), mode, self.colors[mode], self.accents[mode],
+                      self.s4)
 
     def _log(self, p, n):
         self.log.append(ctypes.string_at(p, n).decode("utf-8", "replace"))
@@ -155,7 +194,10 @@ class App:
         return self.d.t_event(kind, code, x, y, pres)
 
     def system_theme(self, dark):
-        """The system's theme, as compose.asm reads it from the settings."""
+        """The desktop's theme changed: the look written again, then WE_LOOK,
+        as compose.asm takes it."""
+        self.dark = dark
+        self._look()
         return self.d.t_theme(1 if dark else 0)
 
     def key(self, k):
@@ -193,7 +235,8 @@ class App:
     def image(self):
         from PIL import Image
         self.d.t_paint()
-        return Image.frombuffer("RGBX", (WIN_W, WIN_H), self.px.raw, "raw", "BGRX", 0, 1).convert("RGB")
+        return Image.frombuffer("RGBX", (self.w, self.h), self.px.raw, "raw", "BGRX", 0,
+                                1).convert("RGB")
 
     def presenter(self, w=1600, h=900):
         from PIL import Image

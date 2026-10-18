@@ -1,8 +1,10 @@
 ; =============================================================================
 ;  shim.asm - compose on the host (nasm -f win64): its document, formulas,
-;  file format, layout and drawing (src/user/compose/*.inc, web/draw.inc)
-;  included unchanged, linked into a DLL that tools/test/compose/host.py
-;  drives with ctypes. Linked at a fixed base under 2 GiB, as browse's is.
+;  file format, layout and drawing (src/user/compose/*.inc, with kit.inc and
+;  web/draw.inc) included unchanged, linked into a DLL that
+;  tools/test/compose/host.py drives with ctypes. Linked at a fixed base
+;  under 2 GiB, as browse's is. The desktop's look is made here as the
+;  kernel makes it (look.asm), from the kernel's own fonts.
 ;    t_init(RCX = memory, RDX = its bytes): the arena, the blocks, the
 ;      calculation stack, all from it
 ;    t_grid_new -> RAX = a grid
@@ -16,14 +18,19 @@
 ;    t_hooks(RCX = log, RDX = save, R8 = load, R9 = present): the host's
 ;      functions (Win64) behind plat_log(text, bytes), plat_save(name,
 ;      bytes), plat_load(name) and plat_present(on)
-;    t_app(RCX = memory, RDX = its bytes, R8 = the window's pixels, R9 =
-;      save_buf): app_init, plat_mem taking from that memory
+;    t_look(RCX = memory for it, RDX = TH_*, R8 = the theme's colours,
+;      TC_COUNT bytes, R9 = the accent, [5] = the scale, quarters): the look
+;      (made the first time, written again after), kit.inc reading it
+;    t_app(RCX = memory, RDX = its bytes, R8 = save_buf): app_init,
+;      plat_mem taking from that memory
+;    t_size(RCX = the window's pixels, RDX = width, R8 = height, pixels):
+;      the window that size, at the look's scale (compose.asm's win_size)
 ;    t_open(RCX = a NUL-ended name): app_open
 ;    t_event(RCX = WE_*, RDX = code, R8 = x, R9 = y, [5] = 1 for the
 ;      presenter's) -> RAX = AE_*
 ;    t_paint: paint_all
 ;    t_pres(RCX = pixels, RDX = width, R8 = height): pres_paint
-;    t_theme(RCX = 1 if the system's theme is dark) -> RAX = AE_*: app_theme
+;    t_theme(RCX = 1 if the desktop's theme is dark) -> RAX = AE_*: app_theme
 ; =============================================================================
 
 bits 64
@@ -38,12 +45,38 @@ section .bss bss align=4096
 
 global t_init, t_grid_new, t_cell_set, t_cell_show, t_num
 global t_hooks, t_app, t_open, t_event, t_paint, t_pres, t_theme, t_app_bytes
+global t_look, t_size, t_look_bytes
 global calc_count, nblocks, da_top, da_base, view, cur_blk, cur_off, anc_blk
 global anc_off, ed_on, pres_on, pres_slide, sl_n, modified, doc_name, st_msg
 global blocks, scroll_y
 
+; what kit.inc asks of the AXE runtime (axe.inc): a desktop, and nothing
+; it is asked for here
+section .data
+ax_desk:        dd 1
+ax_io:          dd 0
+ax_io_va:       dq 0
+section .text
+ax_entry:
+    ret
+ax_do:
+ax_recv:
+    mov rax, -1
+    ret
+ax_now:
+    rdtsc
+    shl rdx, 32
+    or rax, rdx
+    ret
+ax_us:
+    mov rax, rdi
+    ret
+
+%include "kit.inc"
+section .text
+
 %include "web/util.inc"
-%include "web/draw.inc"
+%include "compose/draw.inc"
 %include "compose/doc.inc"
 %include "compose/calc.inc"
 %include "compose/file.inc"
@@ -259,8 +292,7 @@ t_hooks:
 
 t_app:
     WIN_SAVE
-    mov [win_px], r8
-    mov [save_buf], r9
+    mov [save_buf], r8
     mov [h_mem], rcx
     add rcx, rdx
     mov [h_mem_end], rcx
@@ -292,6 +324,34 @@ t_paint:
     WIN_RESTORE
     ret
 
+t_size:
+    WIN_SAVE
+    mov [kit_px], rcx
+    lea eax, [rdx * 4]
+    mov [kit_pitch], eax
+    mov [kit_w], edx
+    mov [kit_h], r8d
+    call kit_unclip
+    mov ecx, [kit_s4]                   ; as compose.asm's win_size
+    mov eax, [kit_w]
+    shl eax, 2
+    xor edx, edx
+    div ecx
+    mov edi, eax
+    mov eax, [kit_h]
+    shl eax, 2
+    xor edx, edx
+    div ecx
+    mov esi, eax
+    mov edx, ecx
+    mov rcx, [kit_px]
+    mov r8d, [kit_w]
+    mov r9d, r8d
+    mov r10d, [kit_h]
+    call view_size
+    WIN_RESTORE
+    ret
+
 t_theme:
     WIN_SAVE
     mov edi, ecx
@@ -305,5 +365,112 @@ t_pres:
     mov esi, edx
     mov edx, r8d
     call pres_paint
+    WIN_RESTORE
+    ret
+
+; --- the desktop's look, as look.asm makes it ----------------------------------
+
+LKU_UNI         equ (UFB_FONTS + UF_WEIGHTS * UF_SIZES * UFT_SIZE + 15) & ~15
+LKU_DATA        equ (LKU_UNI + UF_UNI * 8 + 15) & ~15
+LKM_UNI         equ (MFB_FONTS + FONT_SIZES * 16 + 15) & ~15
+LKM_DATA        equ (LKM_UNI + FONT_UNICODE * 8 + 15) & ~15
+
+section .rodata
+%include "gen/uifont.inc"
+uifont_data:    incbin "gen/uifont.bin"
+uifont_end:
+%include "gen/font.inc"
+font_data:      incbin "gen/font.bin"
+font_end:
+align 8
+t_look_bytes:   dq LK_HEAD + LKU_DATA + (uifont_end - uifont_data) + 16 + LKM_DATA + (font_end - font_data)
+
+section .text
+
+t_look:
+    WIN_SAVE
+    mov rbx, rcx                        ; RBX: the look
+    mov r12d, edx
+    mov r13, r8
+    mov r14d, r9d
+    cmp dword [rbx + LK_UF], 0
+    jne .fonts
+    mov dword [rbx + LK_UF], LK_HEAD    ; the desktop's font
+    lea r15, [rbx + LK_HEAD]
+    mov dword [r15 + UFB_WEIGHTS], UF_WEIGHTS
+    mov dword [r15 + UFB_SIZES], UF_SIZES
+    mov dword [r15 + UFB_UNIS], UF_UNI
+    mov dword [r15 + UFB_UNI], LKU_UNI
+    mov dword [r15 + UFB_DATA], LKU_DATA
+    lea rsi, [uf_size_px]
+    lea rdi, [r15 + UFB_PX]
+    mov ecx, UF_SIZES
+    rep movsb
+    lea rsi, [uf_fonts]
+    lea rdi, [r15 + UFB_FONTS]
+    mov ecx, UF_WEIGHTS * UF_SIZES * UFT_SIZE
+    rep movsb
+    lea rsi, [uf_uni]
+    lea rdi, [r15 + LKU_UNI]
+    mov ecx, UF_UNI * 8
+    rep movsb
+    lea rsi, [uifont_data]
+    lea rdi, [r15 + LKU_DATA]
+    mov rcx, uifont_end - uifont_data
+    rep movsb
+    mov rax, uifont_end - uifont_data + LK_HEAD + LKU_DATA + 15
+    and rax, ~15
+    mov [rbx + LK_MONO], eax            ; the monospaced one
+    lea r15, [rbx + rax]
+    mov dword [r15 + MFB_SIZES], FONT_SIZES
+    mov dword [r15 + MFB_UNIS], FONT_UNICODE
+    mov dword [r15 + MFB_UNI], LKM_UNI
+    mov dword [r15 + MFB_DATA], LKM_DATA
+    lea rsi, [font_sizes]
+    lea rdi, [r15 + MFB_FONTS]
+    mov ecx, FONT_SIZES * 16
+    rep movsb
+    lea rsi, [font_unicode]
+    lea rdi, [r15 + LKM_UNI]
+    mov ecx, FONT_UNICODE * 8
+    rep movsb
+    lea rsi, [font_data]
+    lea rdi, [r15 + LKM_DATA]
+    mov rcx, font_end - font_data
+    rep movsb
+.fonts:
+    mov eax, [rsp + ARG + 32]
+    mov [rbx + LK_S4], eax
+    mov [rbx + LK_MODE], r12d
+    mov [rbx + LK_ACCENT], r14d
+    mov dword [rbx + LK_SCR_W], 2560
+    mov dword [rbx + LK_SCR_H], 1600
+    mov rsi, r13
+    lea rdi, [rbx + LK_C]
+    mov ecx, TC_COUNT
+    rep movsb
+    inc dword [rbx + LK_SERIAL]
+    mov [kit_lk], rbx                   ; as kit_look finds it
+    mov ecx, [rbx + LK_UF]
+    add rcx, rbx
+    mov [kit_uf], rcx
+    mov edx, [rcx + UFB_DATA]
+    add rdx, rcx
+    mov [kit_ufd], rdx
+    mov edx, [rcx + UFB_UNI]
+    add rdx, rcx
+    mov [kit_ufu], rdx
+    mov ecx, [rbx + LK_MONO]
+    add rcx, rbx
+    mov [kit_mf], rcx
+    mov edx, [rcx + MFB_DATA]
+    add rdx, rcx
+    mov [kit_mfd], rdx
+    mov edx, [rcx + MFB_UNI]
+    add rdx, rcx
+    mov [kit_mfu], rdx
+    call kit_relook
+    mov edi, 20
+    call kit_mono
     WIN_RESTORE
     ret

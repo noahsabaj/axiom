@@ -1,27 +1,32 @@
 ; =============================================================================
-;  compose/ui.inc - what compose's controls are drawn with, over web/draw.inc
-;  (px_base, px_stride, the clip): blended rectangles, rounded ones with
-;  anti-aliased corners, labels, buttons. All of compose's look is here and
-;  in the colours below, so it can follow the desktop's shared widgets and
-;  themes when they come. The colours are light or dark (ui_theme).
+;  compose/ui.inc - what compose's controls and cards are drawn with, in
+;  points (compose/draw.inc): blended rectangles, rounded ones with
+;  anti-aliased corners, shadows, labels, and buttons drawn as the
+;  desktop's (kit.inc). The colours are two palettes: the window's (pal),
+;  the desktop's theme, its text and accent; and the document's (dpal), its
+;  paper and ink, dark with the theme or light whatever it is (ui_theme).
 ;    blend_rect(EDI = x, ESI = y, EDX = w, ECX = h, R8D = colour, R9D =
 ;      alpha 0-255)
 ;    fill_round(EDI, ESI, EDX, ECX, R8D = radius, R9D = colour)
 ;    frame_round(EDI, ESI, EDX, ECX, R8D = radius, R9D = edge colour,
 ;      [ui_fill] = the colour inside): an edge a pixel wide
 ;    shadow(EDI, ESI, EDX, ECX, R8D = radius): soft, under a card
-;    text_px(RSI = text, ECX = bytes, EDX = a font) -> EAX = its width in
-;      pixels. Preserves all but RAX, R11.
+;    field(EDI, ESI, EDX, ECX, R8D = 1 if it has the keys): a text field's
+;      box, the desktop's
 ;    label(RSI, ECX, EDI = x, ESI2 = [ui_mid] the line's middle, R8D = font,
 ;      R9D = colour) -> EAX = the x after it: text centred on a line
 ;    label_c(RSI, ECX, EDI = the centre's x, R8D, R9D): likewise, centred
 ;    button(RDI = a BT_* entry, ESI = 1 if it is on, EDX = 1 if pressed)
+;    bt_x(RDI = a BT_* entry) -> EAX = its x now (BV_RIGHT: from the
+;      window's right). Preserves all but RAX.
 ;  Each preserves RBX, RBP, R12-R15.
 ; =============================================================================
 
-; colours: compose's theme, light or dark. Each C_* is a dword of pal,
-; which ui_theme fills from pal_light or pal_dark; so a colour is read
-; (mov r8d, C_INK), and put into memory through a register (PUT_C).
+; colours: two palettes of the same slots. Each C_* is a dword of pal,
+; the window's (its text, lines and accent the desktop's), and each D_* of
+; dpal, the document's; ui_theme fills them from pal_light or pal_dark and
+; the look. A colour is read (mov r8d, C_INK), and put into memory through
+; a register (PUT_C).
 P_WINDOW        equ 0                   ; behind the pages
 P_CHROME        equ 4                   ; the toolbar, the status line
 P_HAIRLINE      equ 8
@@ -68,6 +73,28 @@ P_BYTES         equ 88
 %define C_SIDEBAR       dword [pal + P_SIDEBAR]
 %define C_CARD          dword [pal + P_CARD]
 %define C_ERROR         dword [pal + P_ERROR]
+%define D_WINDOW        dword [dpal + P_WINDOW]
+%define D_CHROME        dword [dpal + P_CHROME]
+%define D_HAIRLINE      dword [dpal + P_HAIRLINE]
+%define D_INK           dword [dpal + P_INK]
+%define D_SECOND        dword [dpal + P_SECOND]
+%define D_FAINT         dword [dpal + P_FAINT]
+%define D_ACCENT        dword [dpal + P_ACCENT]
+%define D_ACCENT_DK     dword [dpal + P_ACCENT_DK]
+%define D_SELECT        dword [dpal + P_SELECT]
+%define D_PAPER         dword [dpal + P_PAPER]
+%define D_BUTTON        dword [dpal + P_BUTTON]
+%define D_BUTTON_EDGE   dword [dpal + P_BUTTON_EDGE]
+%define D_BUTTON_ON     dword [dpal + P_BUTTON_ON]
+%define D_PRESSED       dword [dpal + P_PRESSED]
+%define D_SEG_TRACK     dword [dpal + P_SEG_TRACK]
+%define D_TABLE_HEAD    dword [dpal + P_TABLE_HEAD]
+%define D_TABLE_LINE    dword [dpal + P_TABLE_LINE]
+%define D_GRID_LINE     dword [dpal + P_GRID_LINE]
+%define D_GRID_HEAD     dword [dpal + P_GRID_HEAD]
+%define D_SIDEBAR       dword [dpal + P_SIDEBAR]
+%define D_CARD          dword [dpal + P_CARD]
+%define D_ERROR         dword [dpal + P_ERROR]
 C_BLACK         equ 0x000000            ; shadows, the presenter's bars
 
 ; PUT_C [memory], C_*: a colour put into a dword. Preserves all.
@@ -78,9 +105,15 @@ C_BLACK         equ 0x000000            ; shadows, the presenter's bars
     pop rax
 %endmacro
 
-UI_FONT         equ WF_SANS * WF_SIZES + WF_PX16
-UI_BOLD         equ WF_BOLD * WF_SIZES + WF_PX16
-UI_SMALL        equ WF_SANS * WF_SIZES + WF_PX13
+UI_FONT         equ UIF + 13            ; the desktop's (compose/draw.inc)
+UI_BOLD         equ UIF + UIF_BOLD + 13
+UI_SMALL        equ UIF + 11
+DOC_FONT        equ WF_SANS * WF_SIZES + WF_PX16    ; the grid's cells
+
+UI_FONT         equ UIF + 13            ; the desktop's (compose/draw.inc)
+UI_BOLD         equ UIF + UIF_BOLD + 13
+UI_SMALL        equ UIF + 11
+DOC_FONT        equ WF_SANS * WF_SIZES + WF_PX16    ; the grid's cells
 
 ; a button: where, its size, what it does, its label
 BT_X            equ 0                   ; word
@@ -88,7 +121,9 @@ BT_Y            equ 2
 BT_W            equ 4
 BT_H            equ 6
 BT_ACT          equ 8                   ; byte: ACT_*
-BT_VIEWS        equ 9                   ; byte: 1 << the views it is in
+BT_VIEWS        equ 9                   ; byte: 1 << the views it is in, and
+BV_RIGHT        equ 0x80                ; its x from the right, as if the
+DEF_W           equ 1040                ; window were DEF_W wide
 BT_STYLE        equ 10                  ; byte: BS_*
 BT_FONT         equ 11                  ; byte
 BT_LABEL        equ 16                  ; qword: UTF-8, NUL-ended
@@ -139,13 +174,13 @@ px_blend:
 ; put_px(EDI = x, ESI2: EDX = y, R8D = colour, ECX = alpha): one pixel,
 ; blended, if it is inside the clip. Preserves all but RAX, R10, R11.
 put_px:
-    cmp edi, [clip_x0]
+    cmp edi, [px_cx0]
     jl .out
-    cmp edi, [clip_x1]
+    cmp edi, [px_cx1]
     jge .out
-    cmp edx, [clip_y0]
+    cmp edx, [px_cy0]
     jl .out
-    cmp edx, [clip_y1]
+    cmp edx, [px_cy1]
     jge .out
     push rsi
     push r9
@@ -164,20 +199,30 @@ put_px:
     ret
 
 blend_rect:
+    add edx, edi                        ; in pixels
+    add ecx, esi
+    PXX edi
+    PXY esi
+    PXX edx
+    PXY ecx
+    sub edx, edi
+    sub ecx, esi
+; px_blend_rect: blend_rect, in pixels
+px_blend_rect:
     push rbx
     push r12
     push r13
     push r14
     lea eax, [rdi + rdx]
     lea ebx, [rsi + rcx]
-    cmp edi, [clip_x0]
-    cmovl edi, [clip_x0]
-    cmp esi, [clip_y0]
-    cmovl esi, [clip_y0]
-    cmp eax, [clip_x1]
-    cmovg eax, [clip_x1]
-    cmp ebx, [clip_y1]
-    cmovg ebx, [clip_y1]
+    cmp edi, [px_cx0]
+    cmovl edi, [px_cx0]
+    cmp esi, [px_cy0]
+    cmovl esi, [px_cy0]
+    cmp eax, [px_cx1]
+    cmovg eax, [px_cx1]
+    cmp ebx, [px_cy1]
+    cmovg ebx, [px_cy1]
     sub eax, edi
     jle .out
     sub ebx, esi
@@ -240,6 +285,9 @@ corner_alpha:
     ret
 
 fill_round:
+    call round_px
+; px_fill_round: fill_round, in pixels
+px_fill_round:
     push rbx
     push rbp
     push r12
@@ -271,7 +319,7 @@ fill_round:
     sub ecx, ebp
     sub ecx, ebp
     mov r8d, ebx
-    call fill_rect
+    call px_fill_rect
     lea edi, [r12 + rbp]                ; the top and bottom bands, between the corners
     mov esi, r13d
     mov edx, r14d
@@ -279,7 +327,7 @@ fill_round:
     sub edx, ebp
     mov ecx, ebp
     mov r8d, ebx
-    call fill_rect
+    call px_fill_rect
     lea edi, [r12 + rbp]
     mov esi, r13d
     add esi, r15d
@@ -289,7 +337,7 @@ fill_round:
     sub edx, ebp
     mov ecx, ebp
     mov r8d, ebx
-    call fill_rect
+    call px_fill_rect
     test ebp, ebp
     jz .out
     xor ecx, ecx                        ; ECX: j, the corners' rows
@@ -345,12 +393,13 @@ frame_round:
     push r15
     push rbp
     sub rsp, 8
+    call round_px
     mov r12d, edi
     mov r13d, esi
     mov r14d, edx
     mov r15d, ecx
     mov ebx, r8d
-    call fill_round                     ; the edge's colour, all of it
+    call px_fill_round                  ; the edge's colour, all of it
     lea edi, [r12 + 1]                  ; then inside it, a pixel in
     lea esi, [r13 + 1]
     lea edx, [r14 - 2]
@@ -361,7 +410,7 @@ frame_round:
     xor r8d, r8d
 .r:
     mov r9d, [ui_fill]
-    call fill_round
+    call px_fill_round
     add rsp, 8
     pop rbp
     pop r15
@@ -379,6 +428,7 @@ shadow:
     push r15
     push rbp
     sub rsp, 8
+    call round_px
     mov r12d, edi
     mov r13d, esi
     mov r14d, edx
@@ -438,7 +488,7 @@ round_blend:
     mov ecx, ebx
     mov r8d, C_BLACK
     mov r9d, [ui_alpha]
-    call blend_rect
+    call px_blend_rect
     mov edi, r12d                       ; the middle
     lea esi, [r13 + rbx]
     mov edx, r14d
@@ -447,7 +497,7 @@ round_blend:
     sub ecx, ebx
     mov r8d, C_BLACK
     mov r9d, [ui_alpha]
-    call blend_rect
+    call px_blend_rect
     lea edi, [r12 + rbx]                ; the bottom band
     mov esi, r13d
     add esi, r15d
@@ -458,7 +508,7 @@ round_blend:
     mov ecx, ebx
     mov r8d, C_BLACK
     mov r9d, [ui_alpha]
-    call blend_rect
+    call px_blend_rect
     pop r15
     pop r14
     pop r13
@@ -466,20 +516,47 @@ round_blend:
     pop rbx
     ret
 
-text_px:
-    call text_w64
-    add rax, 63
-    shr rax, 6
+; field(EDI, ESI, EDX, ECX, R8D = 1 if it has the keys): a text field's
+; box, the desktop's (kit_field)
+field:
+    mov r9d, r8d
+    xor r8d, r8d
+    call round_px
+    mov r8d, r9d
+    jmp kit_field
+
+; round_px(EDI, ESI, EDX, ECX, R8D = radius, points) -> the same, pixels.
+; Preserves all but those.
+round_px:
+    add edx, edi
+    add ecx, esi
+    PXX edi
+    PXY esi
+    PXX edx
+    PXY ecx
+    sub edx, edi
+    sub ecx, esi
+    imul r8d, [g_s]
+    add r8d, 2
+    sar r8d, 2
     ret
 
 ; baseline_mid(R8D = a font, ESI = the middle of a line) -> EDX = the
 ; baseline that centres capitals there. Preserves all but RDX, R11.
 baseline_mid:
     push rax
+    cmp r8d, UIF
+    jae .ui
     mov edx, r8d
     call font_entry
     mov eax, [r11 + WFT_ASCENT]
     sub eax, [r11 + WFT_DESCENT]
+    shr eax, 1
+    lea edx, [rsi + rax]
+    pop rax
+    ret
+.ui:
+    call ui_cap
     shr eax, 1
     lea edx, [rsi + rax]
     pop rax
@@ -504,71 +581,87 @@ label_c:
     sub edi, eax
     jmp label
 
+bt_x:
+    movzx eax, word [rdi + BT_X]
+    test byte [rdi + BT_VIEWS], BV_RIGHT
+    jz .out
+    add eax, [win_w]
+    sub eax, DEF_W
+.out:
+    ret
+
 button:
     push rbx
     push r12
     push r13
     push r14
     push r15
+    push rbp
+    sub rsp, 24
     mov rbx, rdi
     mov r12d, esi                       ; R12D: on; R13D: pressed
     mov r13d, edx
-    movzx eax, byte [rbx + BT_STYLE]
-    cmp eax, BS_PRIMARY
-    je .primary
-    mov r14d, C_BUTTON                  ; R14D: its fill; R15D: its edge
-    mov r15d, C_BUTTON_EDGE
-    cmp eax, BS_GHOST
-    jne .state
-    mov r14d, C_CHROME
-    mov r15d, C_CHROME
-.state:
-    test r12d, r12d
-    jz .pressed
-    mov r14d, C_BUTTON_ON
-    mov r15d, C_BUTTON_ON
-.pressed:
-    test r13d, r13d
-    jz .draw
-    mov r14d, C_PRESSED
-    mov r15d, C_PRESSED
-    jmp .draw
-.primary:
-    mov r14d, C_ACCENT
-    mov r15d, C_ACCENT
-    test r13d, r13d
-    jz .draw
-    mov r14d, C_ACCENT_DK
-    mov r15d, C_ACCENT_DK
-.draw:
-    mov [ui_fill], r14d
-    movzx edi, word [rbx + BT_X]
+    call bt_x                           ; [rsp] .. [rsp+12]: where, pixels
+    mov edi, eax
     movzx esi, word [rbx + BT_Y]
     movzx edx, word [rbx + BT_W]
     movzx ecx, word [rbx + BT_H]
-    mov r8d, 7
-    mov r9d, r15d
-    call frame_round
+    xor r8d, r8d
+    call round_px
+    mov [rsp], edi
+    mov [rsp + 4], esi
+    mov [rsp + 8], edx
+    mov [rsp + 12], ecx
+    movzx eax, byte [rbx + BT_STYLE]
+    cmp eax, BS_GHOST
+    je .ghost
+    xor r9d, r9d                        ; the desktop's button
+    cmp eax, BS_PRIMARY
+    jne .down
+    mov r9d, KB_DEFAULT
+.down:
+    mov eax, r12d
+    or eax, r13d
+    jz .plain
+    or r9d, KB_DOWN
+.plain:
+    xor r8d, r8d
+    call kit_button
+    jmp .label
+.ghost:                                 ; nothing until it is on or pressed
+    mov eax, r12d
+    or eax, r13d
+    jz .label
+    mov edi, TC_TEXT                    ; then a tint of the text's colour
+    call kit_c
+    and eax, 0xFFFFFF
+    or eax, KA(0x22)
+    test r13d, r13d
+    jz .tint
+    xor eax, KA(0x22) ^ KA(0x40)
+.tint:
+    mov ebp, eax
+    mov edi, 6
+    call kit_pt
+    mov r8d, eax
+    mov r9d, ebp
+    mov edi, [rsp]
+    mov esi, [rsp + 4]
+    mov edx, [rsp + 8]
+    mov ecx, [rsp + 12]
+    call kit_round
+.label:
     movzx eax, word [rbx + BT_H]        ; the label, centred
     shr eax, 1
     movzx ecx, word [rbx + BT_Y]
     add eax, ecx
     mov [ui_mid], eax
     mov rsi, [rbx + BT_LABEL]
-    test rsi, rsi                       ; none: the theme's (theme_label)
-    jnz .labelled_by
-    mov rsi, [theme_label]
-.labelled_by:
-    xor ecx, ecx
-.len:
-    cmp byte [rsi + rcx], 0
-    je .len_done
-    inc ecx
-    jmp .len
-.len_done:
+    call cstr
+    mov rdi, rbx
+    call bt_x
     movzx edi, word [rbx + BT_W]
     shr edi, 1
-    movzx eax, word [rbx + BT_X]
     add edi, eax
     movzx r8d, byte [rbx + BT_FONT]
     mov r9d, C_INK
@@ -581,6 +674,8 @@ button:
     mov r9d, 0xFFFFFF                   ; white on the accent, light or dark
 .labelled:
     call label_c
+    add rsp, 24
+    pop rbp
     pop r15
     pop r14
     pop r13
@@ -588,8 +683,12 @@ button:
     pop rbx
     ret
 
-; ui_theme(EDI = 1 for dark, 0 for light): pal from that theme's colours
+; ui_theme(EDI = 1 if the window is dark, ESI = 1 if the document is):
+; pal and dpal from those themes' colours; pal's text, lines and accent,
+; and both's chosen text, from the desktop's look if there is one
 ui_theme:
+    push rbx
+    push rsi
     lea rsi, [pal_light]
     test edi, edi
     jz .copy
@@ -598,6 +697,44 @@ ui_theme:
     lea rdi, [pal]
     mov ecx, P_BYTES / 4
     rep movsd
+    pop rax
+    lea rsi, [pal_light]
+    test eax, eax
+    jz .copy_doc
+    lea rsi, [pal_dark]
+.copy_doc:
+    lea rdi, [dpal]
+    mov ecx, P_BYTES / 4
+    rep movsd
+    cmp qword [kit_lk], 0
+    je .chosen
+    lea rbx, [look_slots]
+.slot:
+    movzx edi, byte [rbx]
+    cmp edi, 0xFF
+    je .accent
+    call kit_c
+    movzx ecx, byte [rbx + 1]
+    mov [pal + rcx], eax
+    add rbx, 2
+    jmp .slot
+.accent:
+    call kit_accent
+    mov [pal + P_ACCENT], eax
+    mov [pal + P_ACCENT_DK], eax
+    mov [dpal + P_ACCENT], eax
+.chosen:
+    mov eax, [pal + P_PAPER]            ; what is chosen: the accent, faint
+    mov esi, [pal + P_ACCENT]
+    mov ecx, 0x50
+    call px_blend
+    mov [pal + P_SELECT], eax
+    mov eax, [dpal + P_PAPER]
+    mov esi, [dpal + P_ACCENT]
+    mov ecx, 0x50
+    call px_blend
+    mov [dpal + P_SELECT], eax
+    pop rbx
     ret
 
 section .rodata
@@ -615,10 +752,14 @@ ui_half:        dq 0.5
 ui_one:         dq 1.0
 ui_255:         dq 255.0
 shadow_alpha:   db 6, 10, 18
+look_slots:     db TC_TEXT, P_INK, TC_TEXT2, P_SECOND, TC_TEXT3, P_FAINT
+                db TC_TITLE, P_CHROME, TC_SEP, P_HAIRLINE, TC_PANEL, P_SIDEBAR
+                db 0xFF                 ; (the look's colours: pal's slots)
 
 section .bss
 alignb 4
-pal:            resd P_BYTES / 4        ; the colours now (ui_theme)
+pal:            resd P_BYTES / 4        ; the window's colours now (ui_theme)
+dpal:           resd P_BYTES / 4        ; the document's
 ui_fill:        resd 1
 ui_mid:         resd 1
 ui_alpha:       resd 1
