@@ -85,12 +85,12 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   `threads | where pinned = yes | count` mean what they say; text comes only
   at the end, on the screen or into a file (`> list.txt`, `>> list.txt`).
   Quotes, `*` and `?`, `$name` (from `set name value`), `;`, `&&` and `||`
-  work as written. `cpus`, `mem`, `threads` and `tasks` (`tasks stop <id>`)
-  are records too; the rest (`info objects rings run user win shell pci
-  acpi iommu usb disks nvme store vol date net ip ip6 dhcp ping host arp
-  http httpd ask claude tcp crypto log demo bench uptime echo clear panic
-  reboot poweroff`) print as before, and a `|` takes what they print as
-  lines.
+  work as written. `cpus`, `mem`, `threads`, `tasks` (`tasks stop <id>`)
+  and `bench` (what things cost: docs/PERFORMANCE.md) are records too; the
+  rest (`info objects rings run user win shell pci acpi iommu usb disks nvme
+  store vol date net ip ip6 dhcp ping host arp http httpd ask claude tcp
+  crypto log demo uptime echo clear panic reboot poweroff`) print as
+  before, and a `|` takes what they print as lines.
 - **A log on the boot stick**: everything Axiom prints, the commands typed
   and any panic report go into `AXIOM.LOG` on the USB stick it booted from,
   readable from Windows afterwards.
