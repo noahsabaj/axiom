@@ -19,6 +19,7 @@ KEY_INS         equ 0x88
 KEY_DEL         equ 0x89
 KEY_BTAB        equ 0x8A                ; shift+tab
 KEY_F1          equ 0x90                ; to F12, KEY_F1 + 11
+KBD_RING        equ 4096                ; key codes waiting (a line pasted, typed down COM1)
 
 section .text
 
@@ -270,15 +271,16 @@ kbd_scancode:
 kbd_push:
     push rcx
     push rdx
-    movzx ecx, byte [kbd_head]
+    movzx ecx, word [kbd_head]
     lea edx, [ecx + 1]
-    and edx, 0xFF
-    cmp dl, [kbd_tail]
+    and edx, KBD_RING - 1
+    cmp dx, [kbd_tail]
     je .full
+    push rdx
     lea rdx, [kbd_ring]
     mov [rdx + rcx], al
-    inc cl
-    mov [kbd_head], cl
+    pop rdx
+    mov [kbd_head], dx
 .full:
     pop rdx
     pop rcx
@@ -289,13 +291,14 @@ kbd_getc:
     push rcx
     push rdx
     call serial_poll
-    movzx ecx, byte [kbd_tail]
-    cmp cl, [kbd_head]
+    movzx ecx, word [kbd_tail]
+    cmp cx, [kbd_head]
     je .empty
     lea rdx, [kbd_ring]
     movzx eax, byte [rdx + rcx]
-    inc cl
-    mov [kbd_tail], cl
+    inc ecx
+    and ecx, KBD_RING - 1
+    mov [kbd_tail], cx
     jmp .out
 .empty:
     xor eax, eax
@@ -307,8 +310,8 @@ kbd_getc:
 ; kbd_pending -> ZF clear if a key is waiting
 kbd_pending:
     push rax
-    mov al, [kbd_tail]
-    cmp al, [kbd_head]
+    mov ax, [kbd_tail]
+    cmp ax, [kbd_head]
     pop rax
     ret
 
@@ -368,8 +371,8 @@ kbd_shift:      db 0
 kbd_ctrl:       db 0
 kbd_alt:        db 0
 kbd_caps:       db 0
-kbd_head:       db 0
-kbd_tail:       db 0
+kbd_head:       dw 0
+kbd_tail:       dw 0
 
 section .bss
-kbd_ring:       resb 256
+kbd_ring:       resb KBD_RING

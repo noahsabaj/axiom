@@ -34,7 +34,15 @@ and runs in the shell:
     the alternate screen left again, UTF-8, a line wrapped), then the
     shell's 'screen' saying what the window shows;
   - Ubuntu's terminal programs, through libtinfo and the root's terminfo:
-    stty size, tput cols, stty -a, clear, and less on a file, left with q.
+    stty size, tput cols, stty -a, clear, and less on a file, left with q;
+  - /test/procs, ours in C (procs.c): fork (its memory its own), exec,
+    vfork, posix_spawn, pipes (EOF, poll, O_NONBLOCK, EPIPE and SIGPIPE,
+    200 KB through), a pipeline through /bin/sh, wait4 with WNOHANG, ECHILD,
+    waitid, SIGCHLD, process groups and kill, setsid, a #! script, CLOEXEC;
+  - bash -c (arithmetic, a pipe, command substitution, a loop, ||, exit 5),
+    sh -c (dash: tr, grep, cut, xargs), then bash typed at: a command,
+    sleep ended by ctrl+C (job control: its own process group), cd, the
+    line again from readline's history (up), exit.
 Outputs go to build/test/linux/.
 """
 import argparse
@@ -61,11 +69,33 @@ def result(ok, text):
     return ok
 
 
+def typed(text):
+    """text as a 'type' step has it: a ';' would end the step, and run.py
+    reads a backslash as the start of an escape."""
+    return text.replace("\\", "\\\\").replace(";", "\\x3b")
+
+
+def marked(text):
+    """text for the shell's echo to say as it is: a backslash before each
+    character the shell would read (a space, a quote, a backslash, $, |, >,
+    ;, &)."""
+    return "".join("\\" + c if c in " '\"\\$|>;&" else c for c in text)
+
+
 def run(cmd, name, until=None):
     """'linux cmd', marked in the log first (the shell does not echo what
     is typed), then its end said."""
-    return [f'type echo -- "{cmd}"\\n', "wait 0.2",     # quoted: the mark keeps its quotes
-            f"type linux {cmd}\\n", f"until linux: {until or name}", "wait 0.3"]
+    return [f"type echo -- {typed(marked(cmd))}\\n", "wait 0.2",
+            f"type linux {typed(cmd)}\\n", f"until linux: {until or name}", "wait 0.3"]
+
+
+BASH = ("bash -c 'echo sum $((6*7)); echo one two three | wc -w; echo \"sub $(echo inner)\"; "
+        "for i in 1 2 3; do printf \"i%s \" $i; done; echo; false || echo or; "
+        "echo top $(seq 5 | sort -r | head -1); exit 5'")
+DASH = "sh -c 'echo dash $((2+3)) | tr a-z A-Z; grep -c bash /etc/passwd; cut -d: -f1 /etc/passwd | xargs echo users'"
+PROCS = ["fork", "memory", "exec", "vfork", "spawn", "pipe", "fifo", "eof", "pollpipe",
+         "nonblock", "epipe", "sigpipe", "big", "pipeline", "wnohang", "echild", "waitid",
+         "sigchld", "pgid", "setsid", "enoent", "script", "cloexec"]
 
 
 def script():
@@ -116,6 +146,18 @@ def script():
         "type echo -- less /etc/passwd\\n", "wait 0.2",
         "type linux less /etc/passwd\\n", "wait 3", "type q", "until linux: less exited",
         "wait 0.3",
+        *run("/test/procs", "procs", "procs exited"),
+        *run(BASH, "bash", "bash exited"),
+        *run(DASH, "dash", "dash exited"),
+        "type echo -- bash\\n", "wait 0.2",
+        "type linux bash\\n", "wait 4",
+        "type echo inter $((1+1))\\n", "until inter 2", "wait 0.3",
+        "type sleep 30\\n", "wait 2", "sendkey ctrl-c", "wait 1",
+        "type echo after $?\\n", "until after 1", "wait 0.3",
+        "type cd /etc\\n", "wait 0.5",
+        "type echo dir $(pwd)\\n", "until dir /etc", "wait 0.5",
+        "sendkey up", "wait 0.5", "type \\n", "until dir /etc", "wait 0.3",
+        "type exit\\n", "until linux: bash exited", "wait 0.3",
         "type poweroff\\n", "ended",
     ]
 
@@ -243,7 +285,29 @@ def check(log, err):
     less = after(log, "less /etc/passwd")
     result("root:x:0:0:root:/root:/bin/bash" in less, "less: the file shown")
     ended(log, "less /etc/passwd", "less", 0)
-    calls = sorted(set(re.findall(r"system call (\d+) is not there yet", log)), key=int)
+    procs = after(log, "/test/procs")
+    for name in PROCS:
+        m = re.search(rf"^(ok|FAIL) {name}\b.*$", procs, re.M)
+        result(m is not None and m.group(1) == "ok", f"procs: {m.group(0) if m else name + ' not said'}")
+    result("\nprocs: all ok\n" in procs, "procs: all ok")
+    ended(log, "/test/procs", "procs", 0)
+    bash = after(log, BASH)
+    for line in ("sum 42", "3", "sub inner", "i1 i2 i3 ", "or", "top 5"):
+        result(f"\n{line}\n" in bash, f"bash -c: {line!r}")
+    ended(log, BASH, "bash", 5)
+    dash = after(log, DASH)
+    for line in ("DASH 5", "2", "users root user"):
+        result(f"\n{line}\n" in dash, f"sh -c: {line!r}")
+    ended(log, DASH, "dash", 0)
+    inter = after(log, "bash")
+    result(re.search(r"^inter 2$", inter, re.M) is not None, "bash: a command typed, run")
+    m = re.search(r"^after (\d+)$", inter, re.M)
+    result(m is not None and m.group(1) == "130", "bash: sleep ended by ctrl+C, $? 130"
+           + (f", not {m.group(1)}" if m and m.group(1) != "130" else ""))
+    n = len(re.findall(r"^dir /etc$", inter, re.M))
+    result(n == 2, f"bash: cd, then the line again from its history ({n} of 2)")
+    ended(log, "bash", "bash", 0)
+    calls =sorted(set(re.findall(r"system call (\d+) is not there yet", log)), key=int)
     print(f"      (calls not there yet: {', '.join(calls) or 'none'})")
     result("AXIOM PANIC" not in log, "no panic")
     rest = log.replace(segv, "")            # (the fault there is the point)
@@ -264,7 +328,7 @@ def main():
     subprocess.run([sys.executable, str(ROOT / "tools" / "mkstick.py"), str(stick),
                     "--linux", str(LINUX)], cwd=ROOT, check=True, capture_output=True)
     logs = boot_all(OUT, {"linux": (script(), ["--smp", "4", "--stick",
-                                                stick.relative_to(ROOT).as_posix()], 300, 1)})
+                                                stick.relative_to(ROOT).as_posix()], 420, 1)})
     print("-- linux")
     check(*logs["linux"])
     print(f"{'all passed' if FAILS == 0 else f'{FAILS} failed'}")

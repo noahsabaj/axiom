@@ -2,7 +2,7 @@
 ;  lxsig.asm - a Linux process's threads, futexes and signals
 ;
 ;  clone with CLONE_VM | CLONE_THREAD | CLONE_SIGHAND makes another thread
-;  of the process: a TF_LINUX thread of the same task that starts from a
+;  of the process (without CLONE_THREAD, a process: lxproc.asm): a TF_LINUX thread of the same task that starts from a
 ;  copy of its parent's frame, with RAX 0, the stack and FS base it was
 ;  given. Every Linux thread starts that way, from a frame (lx_thread_new,
 ;  the first one's made by lx_spawn), so whenever one goes back to ring 3
@@ -217,8 +217,11 @@ lx_first_frame:
     ret
 
 ; clone(flags, stack, parent_tid, child_tid, tls): a thread of this process
-; (CLONE_VM | CLONE_THREAD | CLONE_SIGHAND); new processes come with L4
+; (CLONE_VM | CLONE_THREAD | CLONE_SIGHAND), or without CLONE_THREAD a
+; process (lxproc.asm)
 lx_sys_clone:
+    test edi, CLONE_THREAD
+    jz lx_fork
     push rbx
     push r12
     push r13
@@ -1242,61 +1245,6 @@ lx_interrupt:
     mov rdi, rax
     call task_kill
     pop rdi
-.out:
-    ret
-
-; kill(pid, sig): this process's own, for now (L4 adds others)
-lx_sys_kill:
-    mov rax, -EINVAL
-    cmp esi, LX_NSIG
-    ja .out
-    push rsi
-    push rdi
-    call lx_cur_proc
-    pop rdi
-    pop rsi
-    test edi, edi                       ; 0, -1, our pid or our group's
-    jz .ours
-    cmp edi, -1
-    je .ours
-    mov ecx, edi
-    neg ecx
-    cmp edi, [rax + LP_PID]
-    je .ours
-    cmp ecx, [rax + LP_PID]
-    je .ours
-    mov rax, -ESRCH
-    ret
-.ours:
-    test esi, esi
-    jz .zero
-    mov rdi, rax
-    call lx_signal_proc
-.zero:
-    xor eax, eax
-.out:
-    ret
-
-; tgkill(tgid, tid, sig)
-lx_sys_tgkill:
-    mov rax, -EINVAL
-    cmp edx, LX_NSIG
-    ja .out
-    test edi, edi
-    jle .out
-    push rsi
-    push rdx
-    push rdi
-    call lx_cur_proc
-    pop rdi
-    pop rdx
-    pop rsi
-    cmp edi, [rax + LP_PID]
-    jne .none
-    mov rdi, rax
-    jmp lx_signal_tid
-.none:
-    mov rax, -ESRCH
 .out:
     ret
 

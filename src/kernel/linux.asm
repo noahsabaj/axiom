@@ -22,8 +22,10 @@
 ;  process as a signal would, said as user.asm says faults.
 ;
 ;  A process ends when its last thread does: by exit_group, the last exit,
-;  a fault, or a kill (ctrl+C in its shell). Its descriptors close then,
-;  and the shell says how it ended. One runs at a time, for now.
+;  a fault, or a kill. Its descriptors close then. The one 'linux' started
+;  leads a session (lxproc.asm: fork, execve, wait4, process groups); the
+;  shell says how it ended, and the rest of its session ends with it. One
+;  session runs at a time.
 ; =============================================================================
 
 ; errno
@@ -57,6 +59,7 @@ ENAMETOOLONG    equ 36
 ENOSYS          equ 38
 ELOOP           equ 40
 ENODATA         equ 61
+ENOTSOCK        equ 88
 EOPNOTSUPP      equ 95
 EAFNOSUPPORT    equ 97
 ETIMEDOUT       equ 110
@@ -88,7 +91,14 @@ LP_UMASK        equ 88                  ; dword
 LP_COMM         equ 96                  ; 16 bytes: its name (prctl)
 LP_SIGPEND      equ 112                 ; signals sent to it, not yet taken (lxsig.asm)
 LP_SIGACTS      equ 120                 ; its actions for them: LX_NSIG * LSA_SIZE
-LP_SIZE         equ 128
+LP_NEXT         equ 128                 ; every process: lx_procs (lxproc.asm)
+LP_PARENT       equ 136                 ; its parent's process; 0 for none, or once it ended
+LP_PGID         equ 144                 ; dword: its process group
+LP_SID          equ 148                 ; dword: its session
+LP_EXITSIG      equ 152                 ; dword: sent to its parent as it ends (SIGCHLD)
+LP_VFORK        equ 156                 ; dword: 1 while its parent waits for it to exec or end
+LP_REAPED       equ 160                 ; dword: 1 once off lx_procs
+LP_SIZE         equ 168
 
 ; what an ELF file mapped says (lx_elf_map)
 EI_ENTRY        equ 0
@@ -146,6 +156,14 @@ lx_syscall:
     jz lx_unknown
     call r11
 lx_back:
+%ifdef LX_TRACE                         ; (build.py --define LX_TRACE) each call said
+    push rcx
+    mov rcx, [gs:PC_CURRENT]
+    mov ecx, [rcx + TH_TID]
+    KLOG "lx %u: %u (%x, %x, %x, %x) = %x", rcx, qword [rbp + FR_ERROR], qword [rbp + FR_RDI], \
+        qword [rbp + FR_RSI], qword [rbp + FR_RDX], qword [rbp + FR_R10], rax
+    pop rcx
+%endif
     cmp rax, -ERESTARTSYS               ; cut short by a signal: made again,
     jne .result                         ; unless a handler says otherwise
     mov rax, [gs:PC_CURRENT]
@@ -228,6 +246,7 @@ lx_init:
 .done:
     mov byte [lx_ready], 1
     call lx_sig_init
+    call lx_pipe_init
 .out:
     ret
 
@@ -309,7 +328,8 @@ lx_thread_exit:
     jmp thread_exit
 
 ; lx_proc_exit(RDI = process): its last thread is ending. Its descriptors
-; close, what it wrote is said, and those waiting for it are told.
+; close, what it wrote is said, and those waiting for it are told
+; (lx_proc_gone).
 lx_proc_exit:
     push rbx
     push r12
@@ -330,9 +350,8 @@ lx_proc_exit:
     mov rsi, rbx
     call ly_end
 .said:
-    mov dword [rbx + LP_ENDED], 1
-    lea rdi, [rbx + LP_WQ]
-    call wq_wake
+    mov rdi, rbx                        ; its parent told, or it goes
+    call lx_proc_gone
     mov byte [lx_pending], 1            ; and the main loop, to say so
     mov rdi, [main_thread]
     call thread_unpark
@@ -1076,6 +1095,8 @@ lx_spawn:
     lock xadd [lx_next_pid], eax
     add eax, LX_PID_FIRST
     mov [rbp + LP_PID], eax
+    mov [rbp + LP_PGID], eax            ; a session of its own, and a group
+    mov [rbp + LP_SID], eax
     mov dword [rbp + LP_PPID], 1
     mov dword [rbp + LP_UMASK], 0o022
     mov rsi, [r12 + LN_NAME]
@@ -1153,6 +1174,10 @@ lx_spawn:
     mov eax, [rbp + LP_PID]
     mov [r12 + TH_TID], eax
     mov dword [rbp + LP_LIVE], 1
+    mov rdi, rbx                        ; on lx_procs, with a reference of its own
+    call obj_get
+    mov rdi, rbp
+    call lx_proc_add
     mov rdi, r12
     call thread_start
     mov rdi, r12
@@ -2072,9 +2097,14 @@ lx_sys_socket:
     mov rax, -EAFNOSUPPORT
     ret
 
-; getpgrp, getpgid, getsid, setsid: the process is its own
-lx_sys_getpgrp:
-    jmp lx_sys_getpid
+; getsockname / getpeername(fd, ...): no descriptor is a socket yet
+lx_sys_notsock:
+    call lx_fd_get
+    cmp rax, -4095
+    jae .out
+    mov rax, -ENOTSOCK
+.out:
+    ret
 
 ; getresuid(ruid, euid, suid) / getresgid: root's, 0 each
 lx_sys_getresuid:
@@ -2174,9 +2204,11 @@ lx_calls:
     dq 19, lx_sys_readv
     dq 20, lx_sys_writev
     dq 21, lx_sys_access
+    dq 22, lx_sys_pipe
     dq 23, lx_sys_select
     dq 24, lx_sys_sched_yield
     dq 25, lx_sys_mremap
+    dq 27, lx_sys_enosys                ; mincore: not said, programs do without
     dq 28, lx_sys_madvise
     dq 32, lx_sys_dup
     dq 33, lx_sys_dup2
@@ -2184,8 +2216,14 @@ lx_calls:
     dq 35, lx_sys_nanosleep
     dq 39, lx_sys_getpid
     dq 41, lx_sys_socket
+    dq 51, lx_sys_notsock               ; getsockname
+    dq 52, lx_sys_notsock               ; getpeername
     dq 56, lx_sys_clone
+    dq 57, lx_sys_fork
+    dq 58, lx_sys_vfork
+    dq 59, lx_sys_execve
     dq 60, lx_sys_exit
+    dq 61, lx_sys_wait4
     dq 62, lx_sys_kill
     dq 63, lx_sys_uname
     dq 72, lx_sys_fcntl
@@ -2207,16 +2245,17 @@ lx_calls:
     dq 106, lx_sys_zero                 ; setgid
     dq 107, lx_sys_zero                 ; geteuid
     dq 108, lx_sys_zero                 ; getegid
+    dq 109, lx_sys_setpgid
     dq 110, lx_sys_getppid
     dq 111, lx_sys_getpgrp
-    dq 112, lx_sys_getpgrp              ; setsid
+    dq 112, lx_sys_setsid
     dq 115, lx_sys_getgroups
     dq 118, lx_sys_getresuid
     dq 120, lx_sys_getresuid            ; getresgid
-    dq 121, lx_sys_getpgrp              ; getpgid
+    dq 121, lx_sys_getpgid
     dq 122, lx_sys_zero                 ; setfsuid: it was root's
     dq 123, lx_sys_zero                 ; setfsgid
-    dq 124, lx_sys_getpgrp              ; getsid
+    dq 124, lx_sys_getsid
     dq 127, lx_sys_rt_sigpending
     dq 130, lx_sys_rt_sigsuspend
     dq 131, lx_sys_sigaltstack
@@ -2251,6 +2290,7 @@ lx_calls:
     dq 230, lx_sys_clock_nanosleep
     dq 231, lx_sys_exit_group
     dq 234, lx_sys_tgkill
+    dq 247, lx_sys_waitid
     dq 257, lx_sys_openat
     dq 262, lx_sys_newfstatat
     dq 267, lx_sys_readlinkat
@@ -2259,8 +2299,10 @@ lx_calls:
     dq 271, lx_sys_ppoll
     dq 273, lx_sys_zero                 ; set_robust_list
     dq 292, lx_sys_dup3
+    dq 293, lx_sys_pipe2
     dq 302, lx_sys_prlimit64
     dq 318, lx_sys_getrandom
+    dq 322, lx_sys_execveat
     dq 332, lx_sys_statx
     dq 334, lx_sys_enosys               ; rseq
     dq 435, lx_sys_enosys               ; clone3: glibc falls back to clone
