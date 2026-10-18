@@ -14,7 +14,15 @@ and runs in the shell:
     Python makes it), env (the environment programs start with), wc -c on a
     file of 140 KB (the bytes all there), sleep 0.3;
   - a name not in the root, said so;
-  - sleep 60 stopped by ctrl+C in the shell, and another program after it.
+  - /test/threads, ours in C through glibc and libpthread (threads.c):
+    mutexes, TLS, condition variables, timed waits, many threads, signal
+    handlers with their own SIMD state, sigaltstack, blocked and pending
+    signals, kill, a SIGSEGV handler leaving by siglongjmp, a sleep cut
+    short (EINTR), a join made again (SA_RESTART), sigsuspend; then abort
+    (SIGABRT), a fault with no handler (SIGSEGV), the last thread's exit
+    after main's pthread_exit, and exit from a thread while main joins;
+  - sleep 60 ended by ctrl+C in the shell (SIGINT), a program ignoring
+    SIGINT stopped by a second ctrl+C, and another program after them.
 Outputs go to build/test/linux/.
 """
 import argparse
@@ -65,8 +73,17 @@ def script():
         *run("wc -c /usr/bin/ls", "wc", "wc exited"),
         *run("sleep 0.3", "sleep", "sleep exited"),
         *run("nosuch", "", "nosuch: no such program"),
+        *run("/test/threads", "threads", "threads exited"),
+        *run("/test/threads abort", "threads", "threads ended"),
+        *run("/test/threads segv", "threads", "threads ended"),
+        *run("/test/threads lastexit", "threads", "threads exited"),
+        *run("/test/threads exitgroup", "threads", "threads exited"),
         "type echo -- sleep 60\\n", "wait 0.2",
-        "type linux sleep 60\\n", "wait 3", "sendkey ctrl-c", "until linux: sleep stopped",
+        "type linux sleep 60\\n", "wait 3", "sendkey ctrl-c", "until linux: sleep ended",
+        "wait 0.3",
+        "type echo -- /test/threads nointr\\n", "wait 0.2",
+        "type linux /test/threads nointr\\n", "until ignoring SIGINT", "wait 0.5",
+        "sendkey ctrl-c", "wait 1", "sendkey ctrl-c", "until linux: threads stopped",
         "wait 0.3",
         *run("echo again", "echo", "echo exited"),
         "type poweroff\\n", "ended",
@@ -135,13 +152,34 @@ def check(log, err):
            f"wc -c /usr/bin/ls: {size}")
     ended(log, "sleep 0.3", "sleep", 0)
     result("linux: nosuch: no such program in the Linux root" in log, "a name not there: said so")
-    stopped = after(log, "sleep 60")
-    result("linux: sleep stopped" in stopped, "sleep 60: stopped by ctrl+C")
-    result("\nagain\n" in after(log, "echo again"), "a program after it runs")
+    threads = after(log, "/test/threads")
+    for name in ("mutex", "tls", "gettid", "cond", "timedwait", "many", "handler", "fpstate",
+                 "sigaltstack", "blocked", "kill", "ignored", "sigsegv", "eintr", "restart",
+                 "sigsuspend"):
+        m = re.search(rf"^(ok|FAIL) {name}\b.*$", threads, re.M)
+        result(m is not None and m.group(1) == "ok", f"threads: {m.group(0) if m else name + ' not said'}")
+    result("\nthreads: all ok\n" in threads, "threads: all ok")
+    ended(log, "/test/threads", "threads", 0)
+    result("linux: threads ended by signal 6" in after(log, "/test/threads abort"),
+           "threads abort: ended by SIGABRT")
+    segv = after(log, "/test/threads segv")
+    result("linux: threads ended by signal 11" in segv, "threads segv: ended by SIGSEGV")
+    last = after(log, "/test/threads lastexit")
+    result("\nlast thread\n" in last, "threads lastexit: the last thread ran on")
+    ended(log, "/test/threads lastexit", "threads", 0)
+    group = after(log, "/test/threads exitgroup")
+    result("not expected" not in group, "threads exitgroup: the join never returned")
+    ended(log, "/test/threads exitgroup", "threads", 3)
+    result("linux: sleep ended by signal 2" in after(log, "sleep 60"), "sleep 60: ctrl+C, SIGINT")
+    nointr = after(log, "/test/threads nointr")
+    result("linux: threads stopped" in nointr and "not expected" not in nointr,
+           "SIGINT ignored: the second ctrl+C stops it")
+    result("\nagain\n" in after(log, "echo again"), "a program after them runs")
     calls = sorted(set(re.findall(r"system call (\d+) is not there yet", log)), key=int)
     print(f"      (calls not there yet: {', '.join(calls) or 'none'})")
     result("AXIOM PANIC" not in log, "no panic")
-    result(not re.search(r"^\w+: (page fault|general protection)", log, re.M), "no fault")
+    rest = log.replace(segv, "")            # (the fault there is the point)
+    result(not re.search(r"^\w+: (page fault|general protection)", rest, re.M | re.I), "no fault")
     result("QEMU ended by itself" in err, "powered off")
 
 

@@ -253,7 +253,8 @@ syscall_entry:
     jmp thread_exit
 
 ; user_leave: on the way back to ring 3, interrupts off: a thread whose task
-; is being killed goes no further. Preserves all.
+; is being killed goes no further; a Linux thread takes its signals (RBP is
+; its frame). Preserves all.
 user_leave:
     push rax
     mov rax, [gs:PC_CURRENT]
@@ -261,6 +262,11 @@ user_leave:
     test byte [rax + TK_KILL], 1
     pop rax
     jnz .killed
+    push rax
+    mov rax, [gs:PC_CURRENT]
+    test qword [rax + TH_FLAGS], TF_LINUX
+    pop rax
+    jnz lx_leave                        ; its signals (lxsig.asm)
     ret
 .killed:
     mov rax, [gs:PC_CURRENT]
@@ -270,11 +276,14 @@ user_leave:
     jmp thread_exit
 
 ; user_killed -> EAX = 1 if the running thread is a user thread whose task
-; is being killed (so it waits no more), else 0. Preserves others.
+; is being killed (so it waits no more), or a Linux thread with a signal to
+; take, else 0. Preserves others.
 user_killed:
     mov rax, [gs:PC_CURRENT]
     test byte [rax + TH_FLAGS], TF_USER
     jz .no
+    test byte [rax + TH_FLAGS], TF_LINUX
+    jnz lx_interrupted                  ; or a signal is pending (lxsig.asm)
     mov rax, [rax + TH_TASK]
     mov eax, [rax + TK_KILL]
     and eax, 1
@@ -2085,7 +2094,6 @@ user_service:
 ; user_forget(RDI = a terminal): the program run there is killed (ctrl+C
 ; there, or it closed)
 user_forget:
-    call lx_forget                      ; a Linux program too
     cmp rdi, [user_con]
     je user_cancel
     ret

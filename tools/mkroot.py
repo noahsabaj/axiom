@@ -11,7 +11,8 @@ DT_NEEDED, followed) are copied from a WSL distribution, with each
 symbolic link on the way (/bin -> usr/bin, the loader's name, ...).
 /etc is Axiom's own (passwd, group, hosts, nsswitch.conf), never the
 distribution's, but for ld.so.cache. Test programs of our own, assembled
-from tools/test/linux/*.asm, go in /test.
+from tools/test/linux/*.asm or compiled from tools/test/linux/*.c by WSL's
+gcc (against the distribution's glibc), go in /test.
 
 META, a line each, tab-separated:
     d <path> <mode>          a directory
@@ -37,7 +38,8 @@ PROGRAMS = [
     "/usr/bin/head", "/usr/bin/sha256sum", "/usr/bin/date", "/usr/bin/id",
     "/usr/bin/sleep",
 ]
-FILES = ["/etc/ld.so.cache", "/bin"]
+FILES = ["/etc/ld.so.cache", "/bin", "/lib/x86_64-linux-gnu/libm.so.6",
+         "/lib/x86_64-linux-gnu/libgcc_s.so.1"]
 LIBDIRS = ["/lib/x86_64-linux-gnu", "/usr/lib/x86_64-linux-gnu", "/lib64", "/usr/lib64"]
 
 ETC = {
@@ -176,6 +178,24 @@ def assemble_tests():
     return out
 
 
+def compile_tests(distro, meta):
+    """tools/test/linux/*.c -> ROOT/test/<name>, by gcc in WSL; each library
+    they need must be in the root already."""
+    out = {}
+    for src in sorted((ROOT / "tools" / "test" / "linux").glob("*.c")):
+        dst = OUT / "ROOT" / "test" / src.stem
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        r = subprocess.run(["wsl.exe", "-d", distro, "--", "gcc", "-O2", "-Wall", "-pthread",
+                            "-o", wsl_path(dst), wsl_path(src), "-lm"])
+        if r.returncode:
+            sys.exit(f"mkroot: gcc failed on {src.name}")
+        for lib in needed(dst):
+            if not any(p.endswith("/" + os.path.basename(lib)) for p in meta):
+                sys.exit(f"mkroot: {src.name} needs {lib}, which is not in the root")
+        out["/test/" + src.stem] = dst.stat().st_size
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--distro", default="Ubuntu")
@@ -212,6 +232,8 @@ def main():
         dst.write_bytes(text.encode())
         meta[path] = f"f\t{path}\t644\t{len(text.encode())}"
     for path, size in assemble_tests().items():
+        meta[path] = f"f\t{path}\t755\t{size}"
+    for path, size in compile_tests(opts.distro, meta).items():
         meta[path] = f"f\t{path}\t755\t{size}"
     names = {}
     for p in meta:                  # FAT keeps no case: two names one apart?

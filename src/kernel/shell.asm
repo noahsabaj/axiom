@@ -171,6 +171,7 @@ shell_key:
     mov rdi, rbx                        ; what this terminal started stops:
     call net_forget                     ; a ping, a lookup or a fetch,
     mov rdi, rbx
+    call lx_interrupt                   ; a Linux program, SIGINT,
     call user_forget                    ; and a program
     mov dword [rbx + TW_SH_LEN], 0
     lea rdi, [str_ctrl_c]

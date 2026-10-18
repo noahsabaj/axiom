@@ -191,13 +191,14 @@ TH_UARG         equ 296                 ; and its RDI
 TH_FSBASE       equ 320                 ; ring 3's FS base (a Linux thread's TLS)
 TH_GSBASE       equ 328                 ; and its GS base
 TH_TID          equ 336                 ; dword: a Linux thread's id
-TH_LXFL         equ 340                 ; dword: LTF_* (linux.asm)
+TH_LXFL         equ 340                 ; dword: LXF_* (lxsig.asm)
 TH_CTID         equ 344                 ; its clear_child_tid, or 0
 TH_SIGMASK      equ 352                 ; signals it blocks
 TH_SIGPEND      equ 360                 ; signals sent to it, not yet taken
 TH_ALTSP        equ 368                 ; its sigaltstack, 0 if none
 TH_ALTSIZE      equ 376
-TH_LXWAIT       equ 384                 ; 32 bytes: what it waits on (linux.asm)
+TH_LXINFO       equ 384                 ; 32 bytes: a fault, for its signal (lxsig.asm)
+TH_SAVEMASK     equ 416                 ; the mask rt_sigsuspend put aside
 TH_SIZE         equ 448
 
 ; a wait queue (kobj.asm): threads waiting for a flag

@@ -1173,7 +1173,7 @@ text rows.
   for the host, so a page can be laid out and drawn there; the QEMU suite,
   `tools/test/browse/run.py`, compares browse's window with that.
 
-## Linux programs: `linux.asm`, `lxmm.asm`, `lxfs.asm`
+## Linux programs: `linux.asm`, `lxmm.asm`, `lxfs.asm`, `lxsig.asm`
 
 - `linux <program> [arguments]` runs an unchanged Linux x86-64 program
   from a root on the boot stick: `tools/mkroot.py` copies programs and
@@ -1182,9 +1182,9 @@ text rows.
   Axiom's own, and writes `META`, a line per path with what FAT cannot
   keep (kind, mode, size, a link's target); `mkstick.py --linux` puts both
   at `/LINUX` with 4 KiB clusters. A name without a slash is looked for on
-  the Linux PATH. One runs at a time; ctrl+C in its shell stops it, and
-  the shell says how it ended (`exited with N`, `ended by signal N`,
-  `stopped`).
+  the Linux PATH. One runs at a time; ctrl+C in its shell sends it SIGINT
+  (a second ctrl+C kills it), closing the shell kills it, and the shell
+  says how it ended (`exited with N`, `ended by signal N`, `stopped`).
 - **A process** is a task (its own address space, as `run`'s) with a
   Linux process's state in `TK_LX` (`LP_*`): its pid, descriptors,
   directory, program and terminal. Its threads are user threads marked
@@ -1193,8 +1193,9 @@ text rows.
   register but RAX as it was. A call not there yet is said once
   (`system call N is not there yet`) and gets `-ENOSYS`. Each thread has
   its own FS base (`arch_prctl`, `TH_FSBASE`), loaded by `sched_switch`.
-  It ends with its last thread: `exit_group`, a fault (said as `run`'s
-  are, and ending it as the signal would), or a kill.
+  It ends with its last thread: `exit_group`, the last `exit`, a signal's
+  default action, a fault with no handler (said as `run`'s are, and ending
+  it as the signal would), or a kill.
 - **Loading** (`lx_elf_map`, `lx_exec_image`): the program's PT_LOAD
   segments are mapped from its file in the cache, ET_EXEC where it was
   linked and ET_DYN at 0x555555554000; its PT_INTERP (ld.so) highest below
@@ -1224,16 +1225,58 @@ text rows.
   `getcwd`, `chdir` work on it, and writing is refused (`EROFS`). What a
   program writes to its terminal is shown line by line in the shell it was
   run in.
-- The rest of L1: `uname` (`Linux axiom 6.8.0-axiom`), the ids (root's),
+- **Threads** (`lxsig.asm`): `clone` with `CLONE_VM | CLONE_THREAD |
+  CLONE_SIGHAND` (what `pthread_create` asks for; `clone3` says `ENOSYS`,
+  so glibc falls back to it) makes another `TF_LINUX` thread of the task,
+  starting from a copy of its parent's frame with RAX 0, its own stack and
+  TLS (`CLONE_SETTLS`), its id written where `CLONE_PARENT_SETTID` and
+  `CLONE_CHILD_SETTID` say; as it exits, its `CLONE_CHILD_CLEARTID` word
+  is zeroed and a waiter there woken (`pthread_join`). Every Linux thread
+  starts from a frame (`lx_thread_new`, `lx_thread_begin`), so whenever
+  one goes back to ring 3 RBP is its frame.
+- **Futexes**: a waiter waits on a queue of its own, on its stack, in one
+  of 256 buckets keyed by where the direct map has the word (made
+  writable first, so a copy on write cannot come between a wait and its
+  wake). WAIT and WAIT_BITSET (relative on the monotonic clock, or
+  absolute on either), WAKE and WAKE_BITSET, REQUEUE and CMP_REQUEUE
+  (waiters moved between buckets, both locked, the lower first), and
+  WAKE_OP (the operation done with a locked CMPXCHG). The PI ones say
+  `ENOSYS`.
+- **Signals**: a process has its actions (`LP_SIGACTS`, `rt_sigaction`)
+  and the signals sent to it (`LP_SIGPEND`); a thread has its mask, its
+  own pending signals, its alternate stack (`sigaltstack`) and what a
+  fault said (`TH_LXINFO`). Sending one (`kill` to the process itself,
+  `tkill`, `tgkill`, ctrl+C) sets it pending, unless it would be ignored,
+  and kicks the threads that may take it: unparked if parked, an IPI if
+  running on another CPU. `user_leave` sends a Linux thread to
+  `lx_leave`, which takes the lowest signal its mask lets through: the
+  default action (nothing, or the process ends by it), or a frame on its
+  stack as Linux builds one (`siginfo`, a `ucontext` with the registers
+  and mask, and the XSAVE state with Linux's magic numbers, the handler
+  starting with a clean one), entered with RDI, RSI, RDX the signal,
+  `&siginfo` and `&ucontext` and the restorer as its return address;
+  `rt_sigreturn` puts it all back, the flags and the XSAVE header made
+  safe first. A wait in a system call ends early when a signal its mask
+  lets through is pending (`user_killed` asks `lx_interrupted`): with
+  `EINTR`, or for the calls Linux restarts (futex waits), made again when
+  no handler runs or the handler has `SA_RESTART`. A fault the process
+  has a handler for, and does not block, is delivered the same way, with
+  its address and code. Also `rt_sigprocmask`, `rt_sigpending`,
+  `rt_sigsuspend` and `pause`.
+- The rest: `uname` (`Linux axiom 6.8.0-axiom`), the ids (root's),
   `clock_gettime` and the other clocks (the CMOS clock at boot taken as
   UTC, then the TSC), `nanosleep` and `clock_nanosleep` (cut short by a
-  kill), `getrandom`, `sysinfo`, `prlimit64`, `sched_getaffinity`,
-  `prctl`'s name, and signals' masks kept but none delivered yet.
+  signal), `getrandom`, `sysinfo`, `prlimit64`, `sched_getaffinity`, and
+  `prctl`'s name.
 - `tools/test/linux/run.py` builds the root and a stick and runs, in QEMU,
   `/test/hello` (`tools/test/linux/hello.asm`, a static program of our
   own), then Ubuntu's `true`, `false`, `echo`, `cat`, `ls -la`, `uname
   -a`, `id`, `date`, `sha256sum`, `env`, `wc` and `sleep`, checking what
-  each prints against the host, and ctrl+C on `sleep 60`.
+  each prints against the host; `/test/threads` (`threads.c`, compiled by
+  WSL's gcc against Ubuntu's glibc) with its sixteen checks of threads,
+  futexes and signals, and its ways out (`abort`, an unhandled fault, the
+  last thread's exit, `exit` from a thread); ctrl+C on `sleep 60`
+  (SIGINT), and twice on a program that ignores SIGINT.
 
 ## Terminals: `term.asm`
 

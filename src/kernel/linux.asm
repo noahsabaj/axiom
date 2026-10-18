@@ -86,6 +86,8 @@ LP_LIVE         equ 80                  ; dword: its threads, not yet ended
 LP_EXITING      equ 84                  ; dword: 1 once LP_STATUS says how it ends
 LP_UMASK        equ 88                  ; dword
 LP_COMM         equ 96                  ; 16 bytes: its name (prctl)
+LP_SIGPEND      equ 112                 ; signals sent to it, not yet taken (lxsig.asm)
+LP_SIGACTS      equ 120                 ; its actions for them: LX_NSIG * LSA_SIZE
 LP_SIZE         equ 128
 
 ; what an ELF file mapped says (lx_elf_map)
@@ -135,6 +137,7 @@ section .text
 ; lx_syscall: from syscall_entry, interrupts on, RBP = the frame, RAX = the
 ; number, RDI, RSI, RDX, RCX (R10), R8, R9 = the arguments
 lx_syscall:
+    mov [rbp + FR_ERROR], rax           ; the number, should it be made again
     cmp rax, LX_NSYS
     jae lx_unknown
     lea r11, [lx_table]
@@ -143,6 +146,12 @@ lx_syscall:
     jz lx_unknown
     call r11
 lx_back:
+    cmp rax, -ERESTARTSYS               ; cut short by a signal: made again,
+    jne .result                         ; unless a handler says otherwise
+    mov rax, [gs:PC_CURRENT]
+    or dword [rax + TH_LXFL], LXF_RESTART
+    mov rax, -EINTR
+.result:
     mov [rbp + FR_RAX], rax
 ; lx_return(RBP = a frame): back to ring 3 as it says, every register
 lx_return:
@@ -218,6 +227,7 @@ lx_init:
     jmp .call
 .done:
     mov byte [lx_ready], 1
+    call lx_sig_init
 .out:
     ret
 
@@ -248,6 +258,11 @@ lx_fault:
     jae .ends
     movzx esi, byte [rcx + rax]
 .ends:
+    call lx_fault_signal                ; to its handler, if it has one
+    jc .no_handler
+    cli
+    ret
+.no_handler:
     push rdi
     call lx_cur_proc
     mov edi, esi
@@ -354,6 +369,8 @@ lx_proc_free:
     jz .no_tty
     call ly_put
 .no_tty:
+    mov rdi, [rbx + LP_SIGACTS]
+    call kfree
     mov rdi, rbx
     call kfree
     pop r12
@@ -362,6 +379,9 @@ lx_proc_free:
 
 ; exit(code): this thread; the process, if it is the last
 lx_sys_exit:
+    push rdi
+    call lx_clear_tid
+    pop rdi
     call lx_cur_proc
     cmp dword [rax + LP_LIVE], 1
     ja lx_thread_exit
@@ -1046,6 +1066,11 @@ lx_spawn:
     mov rbp, rax                        ; RBP = the process
     mov [rbx + TK_LX], rbp
     mov [rbp + LP_TASK], rbx
+    mov edi, LX_NSIG * LSA_SIZE         ; its signals' actions: SIG_DFL
+    call kmalloc
+    test rax, rax
+    jz .nomem
+    mov [rbp + LP_SIGACTS], rax
     mov eax, 1
     lock xadd [lx_next_pid], eax
     add eax, LX_PID_FIRST
@@ -1110,15 +1135,17 @@ lx_spawn:
     call lx_exec_image
     cmp rax, -4095
     jae .failed
-    mov rdi, rax                        ; its first thread
+    mov rdi, rax                        ; its first thread, from a frame
     mov rsi, rdx
-    xor edx, edx
-    mov rcx, rbx
-    call user_thread
+    call lx_first_frame
+    test rax, rax
+    jz .nomem
+    mov rdi, rbx
+    mov rsi, rax
+    call lx_thread_new
     test rax, rax
     jz .nomem
     mov r12, rax
-    or qword [r12 + TH_FLAGS], TF_LINUX
     mov eax, [rbp + LP_PID]
     mov [r12 + TH_TID], eax
     mov dword [rbp + LP_LIVE], 1
@@ -1324,6 +1351,7 @@ cmd_linux:
     jae .failed
     call con_owner                      ; what it says goes there
     mov [lx_con], rax
+    mov byte [lx_ctrl_c], 0
     mov [lx_session], r13               ; (its end, lx_pending, is seen
     call shell_wait                     ; by lx_service, on this thread)
     jmp .out
@@ -1437,8 +1465,8 @@ lx_said:
     KLOG "linux: %s exited with %u", rcx, rdx
     ret
 
-; lx_forget(RDI = a terminal): the process run there is killed (ctrl+C
-; there, or it closed). Preserves RDI.
+; lx_forget(RDI = a terminal): the process run there is killed (the
+; terminal closed). Preserves RDI.
 lx_forget:
     mov rax, [lx_session]
     test rax, rax
@@ -1862,101 +1890,6 @@ lx_sys_set_tid_address:
     mov eax, [rax + TH_TID]
     ret
 
-; rt_sigaction(sig, act, oact, size): the default, for now (L2)
-lx_sys_rt_sigaction:
-    mov rax, -EINVAL
-    dec edi
-    cmp edi, 64
-    jae .out
-    xor eax, eax
-    test rdx, rdx
-    jz .out
-    mov rdi, rdx
-    mov esi, 32
-    call lx_zero_out
-.out:
-    ret
-
-; rt_sigprocmask(how, set, oset, size)
-lx_sys_rt_sigprocmask:
-    push rbx
-    push r12
-    mov ebx, edi
-    mov r12, rsi
-    mov r8, [gs:PC_CURRENT]
-    test rdx, rdx
-    jz .set
-    mov rdi, rdx
-    mov rsi, [r8 + TH_SIGMASK]
-    call lx_put64
-    test rax, rax
-    jnz .out
-.set:
-    xor eax, eax
-    test r12, r12
-    jz .out
-    mov rdi, r12
-    call lx_get64
-    test rax, rax
-    jnz .out
-    mov r8, [gs:PC_CURRENT]
-    mov rcx, (1 << (SIGKILL - 1)) | (1 << 18)   ; SIGKILL, SIGSTOP: never
-    not rcx
-    and rdx, rcx
-    cmp ebx, 0                          ; SIG_BLOCK
-    je .block
-    cmp ebx, 1                          ; SIG_UNBLOCK
-    je .unblock
-    cmp ebx, 2                          ; SIG_SETMASK
-    mov rax, -EINVAL
-    jne .out
-    mov [r8 + TH_SIGMASK], rdx
-    xor eax, eax
-    jmp .out
-.block:
-    or [r8 + TH_SIGMASK], rdx
-    jmp .out
-.unblock:
-    not rdx
-    and [r8 + TH_SIGMASK], rdx
-.out:
-    pop r12
-    pop rbx
-    ret
-
-; sigaltstack(ss, oss)
-lx_sys_sigaltstack:
-    xor eax, eax
-    test rsi, rsi
-    jz .out
-    sub rsp, 24
-    mov qword [rsp], 0
-    mov qword [rsp + 8], 2              ; SS_DISABLE
-    mov qword [rsp + 16], 0
-    mov rdi, rsi
-    mov rsi, rsp
-    mov edx, 24
-    call lx_copy_out
-    add rsp, 24
-.out:
-    ret
-
-; futex(uaddr, op, val, ...): one thread, for now (L2)
-lx_sys_futex:
-    and esi, 0x7F                       ; less FUTEX_PRIVATE_FLAG
-    cmp esi, 1                          ; FUTEX_WAKE
-    je .none
-    cmp esi, 0                          ; FUTEX_WAIT: it changed, or nothing
-    je .wait                            ; would ever wake it
-    mov rax, -ENOSYS
-    ret
-.none:
-    xor eax, eax
-    ret
-.wait:
-    mov rax, -EAGAIN
-    ret
-
 ; prlimit64(pid, resource, new, old) / getrlimit(resource, rlim)
 lx_sys_getrlimit:
     mov rdx, rsi
@@ -2229,6 +2162,7 @@ lx_calls:
     dq 12, lx_sys_brk
     dq 13, lx_sys_rt_sigaction
     dq 14, lx_sys_rt_sigprocmask
+    dq 15, lx_sys_rt_sigreturn
     dq 16, lx_sys_ioctl
     dq 17, lx_sys_pread
     dq 19, lx_sys_readv
@@ -2239,10 +2173,13 @@ lx_calls:
     dq 28, lx_sys_madvise
     dq 32, lx_sys_dup
     dq 33, lx_sys_dup2
+    dq 34, lx_sys_pause
     dq 35, lx_sys_nanosleep
     dq 39, lx_sys_getpid
     dq 41, lx_sys_socket
+    dq 56, lx_sys_clone
     dq 60, lx_sys_exit
+    dq 62, lx_sys_kill
     dq 63, lx_sys_uname
     dq 72, lx_sys_fcntl
     dq 79, lx_sys_getcwd
@@ -2269,6 +2206,8 @@ lx_calls:
     dq 120, lx_sys_getresuid            ; getresgid
     dq 121, lx_sys_getpgrp              ; getpgid
     dq 124, lx_sys_getpgrp              ; getsid
+    dq 127, lx_sys_rt_sigpending
+    dq 130, lx_sys_rt_sigsuspend
     dq 131, lx_sys_sigaltstack
     dq 137, lx_sys_statfs
     dq 138, lx_sys_fstatfs
@@ -2288,6 +2227,7 @@ lx_calls:
     dq 197, lx_sys_xattr
     dq 198, lx_sys_xattr
     dq 199, lx_sys_xattr
+    dq 200, lx_sys_tkill
     dq 201, lx_sys_time
     dq 202, lx_sys_futex
     dq 203, lx_sys_zero                 ; sched_setaffinity
@@ -2299,6 +2239,7 @@ lx_calls:
     dq 229, lx_sys_clock_getres
     dq 230, lx_sys_clock_nanosleep
     dq 231, lx_sys_exit_group
+    dq 234, lx_sys_tgkill
     dq 257, lx_sys_openat
     dq 262, lx_sys_newfstatat
     dq 267, lx_sys_readlinkat
@@ -2309,6 +2250,7 @@ lx_calls:
     dq 318, lx_sys_getrandom
     dq 332, lx_sys_statx
     dq 334, lx_sys_enosys               ; rseq
+    dq 435, lx_sys_enosys               ; clone3: glibc falls back to clone
     dq 439, lx_sys_faccessat            ; faccessat2
     dq -1
 

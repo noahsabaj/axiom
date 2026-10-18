@@ -131,9 +131,10 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   --linux build/linux` puts it at `/LINUX`): its ELF file and ld.so mapped
   as Linux would, glibc's system calls answered by Axiom's own (memory
   filled in on demand and shared with the file cache, a read-only view of
-  the root, the clocks, `uname`, the ids), and what it prints shown in the
-  shell. Ubuntu's `ls -la`, `cat`, `date`, `id`, `uname -a`, `sha256sum`
-  and others run; ctrl+C stops one. Threads, a real terminal, processes,
+  the root, the clocks, `uname`, the ids, threads, futexes and signals with
+  handlers), and what it prints shown in the shell. Ubuntu's `ls -la`,
+  `cat`, `date`, `id`, `uname -a`, `sha256sum` and others run, and
+  programs using pthreads; ctrl+C sends SIGINT. A real terminal, processes,
   the network and Claude Code itself come next (see `docs/VISION.md`).
 - ACPI (MADT, MCFG, FADT, the DSDT's `_S5_`), SMBIOS, PCI Express enumeration,
   x2APIC (falling back to xAPIC), I/O APIC, TSC-deadline timer, and a panic
@@ -376,7 +377,8 @@ tools/test/             host-side tests for self-contained modules (tls: the
                         against clients there; ip6: IPv6 on QEMU's
                         network, and between two guests on a hub that is
                         their router; linux: Linux programs from
-                        Ubuntu, from a stick with a root on it); all.py
+                        Ubuntu, and threads and signals in C, from a
+                        stick with a root on it); all.py
                         runs them
                         all at once, and qemu.py boots side by side
 tools/mkfont.py         rasterize the console font into src/kernel/gen/

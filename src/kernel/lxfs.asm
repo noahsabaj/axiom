@@ -823,10 +823,14 @@ lx_file_data:
     popfq
     mov rdi, [main_thread]
     call thread_unpark
+    mov rax, [gs:PC_CURRENT]            ; (a signal does not cut this short:
+    or dword [rax + TH_LXFL], LXF_NOSIG ; a fault may be waiting on it)
     lea rdi, [rbx + LN_WQ]
     lea rsi, [rbx + LN_DONE]
     xor edx, edx
     call wq_wait
+    mov rax, [gs:PC_CURRENT]
+    and dword [rax + TH_LXFL], ~LXF_NOSIG
 .result:
     mov rax, -EIO
     cmp dword [rbx + LN_STATE], LNS_LOADED

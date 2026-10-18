@@ -660,6 +660,7 @@ con_forget:
     push rdi
     call net_forget
     pop rdi
+    call lx_forget                      ; (preserves RDI)
     jmp user_forget
 
 ; con_write(RDI = string). Under print_lock. Preserves all.
