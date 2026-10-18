@@ -1,12 +1,13 @@
 //! A program's start: the kernel starts its first thread at _start with RDI
 //! = the start block (USER_START) and a 64 KiB stack. `axiom::entry!` makes
-//! _start; it takes in the start block, moves to a stack of its own (8 MiB,
-//! or what entry! says), runs main, and ends with what main returned.
+//! _start; it takes in the start block, gives the thread its thread-local
+//! block, moves to a stack of its own (8 MiB, or what entry! says), and
+//! runs main: std's runtime first, for a program with std.
 
 use core::sync::atomic::{AtomicPtr, Ordering};
 
 use crate::sys::*;
-use crate::{console, mem, ring, time};
+use crate::{console, mem, ring, time, tls};
 
 static START: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
 
@@ -97,27 +98,79 @@ pub fn console_handle() -> Handle {
     sb_u32(SB_CONSOLE)
 }
 
-/// _start's: RDI = the start block, RSI = the stack's size, RDX = main.
-#[doc(hidden)]
-pub unsafe extern "C" fn start(sb: *mut u8, stack: usize, main: extern "C" fn() -> i64) -> ! {
+fn init(sb: *mut u8) {
     START.store(sb, Ordering::Relaxed);
+    tls::init_first(); // before anything that has thread-local storage
     ring::init(sb_u32(SB_RING), sb_u64(SB_RING_VA) as *mut u8);
     time::init(sb_u64(SB_TSC_PER_US));
     console::init(sb_u32(SB_CONSOLE));
-    let Ok((_, base)) = mem::block_new(stack) else {
+}
+
+/// A stack of its own -> its top (the 64 KiB it has, if none is made).
+fn stack_top(stack: usize) -> Option<*mut u8> {
+    let (_, base) = mem::block_new(stack).ok()?;
+    Some(unsafe { base.add(stack.next_multiple_of(4096)) })
+}
+
+/// _start's: RDI = the start block, RSI = the stack's size, RDX = main.
+#[doc(hidden)]
+pub unsafe extern "C" fn start(sb: *mut u8, stack: usize, main: extern "C" fn() -> i64) -> ! {
+    init(sb);
+    let Some(top) = stack_top(stack) else {
         exit(main()); // on the 64 KiB it has
     };
-    let top = unsafe { base.add(stack.next_multiple_of(4096)) };
     unsafe {
         core::arch::asm!(
             "mov rsp, {top}",
             "call {main}",
             "mov rdi, rax",
+            "mov esi, 1",              // EXIT_TASK
             "xor eax, eax",            // SYS_EXIT
             "syscall",
             "ud2",
             top = in(reg) top,
             main = in(reg) main,
+            options(noreturn));
+    }
+}
+
+/// std's entry (its hermit layer's runtime_entry): (argc, argv, envp).
+#[doc(hidden)]
+pub type StdEntry = unsafe extern "C" fn(i32, *const *const u8, *const *const u8) -> !;
+
+/// _start's, with std: std's runtime given the arguments as C strings
+/// (argv[0] "axe"), and no environment; it runs main, and ends the program
+/// with what main returned.
+#[doc(hidden)]
+#[cfg(feature = "alloc")]
+pub unsafe extern "C" fn start_std(sb: *mut u8, stack: usize, entry: StdEntry) -> ! {
+    use alloc::vec::Vec;
+    init(sb);
+    let mut argv: Vec<*const u8> = Vec::new();
+    for a in core::iter::once("axe").chain(args()) {
+        let mut s = Vec::with_capacity(a.len() + 1);
+        s.extend_from_slice(a.as_bytes());
+        s.push(0);
+        argv.push(s.leak().as_ptr());
+    }
+    let argc = argv.len() as i32;
+    argv.push(core::ptr::null());
+    let argv = argv.leak().as_ptr();
+    static NO_ENV: [usize; 1] = [0];
+    let envp = NO_ENV.as_ptr() as *const *const u8;
+    let Some(top) = stack_top(stack) else {
+        unsafe { entry(argc, argv, envp) }
+    };
+    unsafe {
+        core::arch::asm!(
+            "mov rsp, {top}",
+            "call {entry}",
+            "ud2",
+            top = in(reg) top,
+            entry = in(reg) entry,
+            in("rdi") argc,
+            in("rsi") argv,
+            in("rdx") envp,
             options(noreturn));
     }
 }
@@ -158,15 +211,35 @@ impl<T: Termination, E: core::fmt::Debug> Termination for core::result::Result<T
     }
 }
 
-/// The program's entry, and what it wants given (the shell gives no more):
+/// The program's entry, and what it wants given (the shell gives no more).
+/// With std, main is a plain `fn main`, std's to run:
+///
+///   axiom::entry!(wants = axiom::wants::DESK);
+///   axiom::entry!(wants = axiom::wants::DESK, stack = 16 << 20);
+///
+/// Without std (#![no_std], #![no_main]), it names main:
 ///
 ///   axiom::entry!(main);
 ///   axiom::entry!(main, wants = axiom::wants::DESK | axiom::wants::FILES);
 ///   axiom::entry!(main, wants = axiom::wants::DESK, stack = 16 << 20);
-///
-/// With std, the crate is #![no_main] and still says entry!.
 #[macro_export]
 macro_rules! entry {
+    (wants = $wants:expr) => { $crate::entry!(wants = $wants, stack = 8 << 20); };
+    (wants = $wants:expr, stack = $stack:expr) => {
+        #[unsafe(link_section = ".axe.wants")]
+        #[used]
+        static __AXE_WANTS: u64 = $wants;
+
+        unsafe extern "C" {
+            fn runtime_entry(argc: i32, argv: *const *const u8, envp: *const *const u8) -> !;
+        }
+
+        extern "C" fn __axiom_start(sb: *mut u8) -> ! {
+            unsafe { $crate::rt::start_std(sb, $stack, runtime_entry) }
+        }
+
+        $crate::__start!(__axiom_start);
+    };
     ($main:path) => { $crate::entry!($main, wants = 0, stack = 8 << 20); };
     ($main:path, wants = $wants:expr) => { $crate::entry!($main, wants = $wants, stack = 8 << 20); };
     ($main:path, wants = $wants:expr, stack = $stack:expr) => {
@@ -182,12 +255,20 @@ macro_rules! entry {
             unsafe { $crate::rt::start(sb, $stack, __axiom_main) }
         }
 
-        // RSP comes 16-aligned; a call expects it 8 past
+        $crate::__start!(__axiom_start);
+    };
+}
+
+/// _start itself: RSP comes 16-aligned, and a call expects it 8 past.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __start {
+    ($start:ident) => {
         #[unsafe(no_mangle)]
         #[unsafe(naked)]
         #[unsafe(link_section = ".text._start")]
         unsafe extern "C" fn _start() -> ! {
-            core::arch::naked_asm!("and rsp, -16", "call {}", "ud2", sym __axiom_start)
+            core::arch::naked_asm!("and rsp, -16", "call {}", "ud2", sym $start)
         }
     };
 }

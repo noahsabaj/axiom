@@ -1,7 +1,9 @@
-//! The task's ring: requests submitted at its tail, their completions reaped
-//! at its head, one at a time (or a linked pair) under a lock. And a block
-//! of memory to hand the kernel bytes in (paths, titles, text), since it
-//! reads them from memory by handle.
+//! A thread's ring: requests submitted at its tail, their completions
+//! reaped at its head, one at a time (or a linked pair) under a lock. The
+//! first thread has the task's (the start block's); each other thread makes
+//! its own the first time it asks for something, so one thread waiting
+//! keeps no other from asking. And a block of memory to hand the kernel
+//! bytes in (paths, titles, text), since it reads them from memory by handle.
 
 use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -9,8 +11,12 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use crate::sync::{Guard, SpinLock};
 use crate::sys::*;
 
+/// A thread's ring, its own (made when first asked for).
+const THREAD_RING: u64 = 16;
+
 pub struct State {
     ring: Handle,
+    mem: Handle, // the ring's memory: 0 for the task's, which stays
     va: *mut u8,
     io: Handle,
     io_ptr: *mut u8,
@@ -19,24 +25,35 @@ pub struct State {
 
 unsafe impl Send for State {}
 
+#[thread_local]
 static RING: SpinLock<State> = SpinLock::new(State {
     ring: 0,
+    mem: 0,
     va: ptr::null_mut(),
     io: 0,
     io_ptr: ptr::null_mut(),
     io_cap: 0,
 });
 
+fn mine() -> &'static SpinLock<State> {
+    unsafe { &*ptr::addr_of!(RING) } // (only this thread holds it)
+}
+
+/// The first thread's: the task's ring, from the start block.
 pub(crate) fn init(ring: Handle, va: *mut u8) {
-    let mut s = RING.lock();
+    let mut s = mine().lock();
     s.ring = ring;
     s.va = va;
 }
 
-/// The ring, for a request or two. Nothing that allocates may run while it
-/// is held (the heap takes it, to give memory back).
+/// This thread's ring, for a request or two. Nothing that allocates may
+/// run while it is held (the heap takes it, to give memory back).
 pub fn lock() -> Guard<'static, State> {
-    RING.lock()
+    let mut s = mine().lock();
+    if s.ring == 0 {
+        s.open();
+    }
+    s
 }
 
 /// One request, waited for -> its result (and value).
@@ -51,11 +68,54 @@ pub fn close(h: Handle) {
     }
 }
 
+/// What a thread that is ending made (its ring, its io block), for another
+/// to give back (`release`): it asks nothing more after.
+pub(crate) fn take() -> [Handle; 3] {
+    let mut s = mine().lock();
+    let made = [s.ring, s.mem, s.io];
+    if s.mem == 0 {
+        return [0; 3]; // the task's: never given back
+    }
+    s.ring = 0;
+    s.mem = 0;
+    s.va = ptr::null_mut();
+    s.io = 0;
+    s.io_ptr = ptr::null_mut();
+    s.io_cap = 0;
+    made
+}
+
+/// An ended thread's ring and io block given back.
+pub(crate) fn release(made: [Handle; 3]) {
+    let [ring, mem, io] = made;
+    for m in [mem, io] {
+        if m != 0 {
+            unsafe { syscall(SYS_UNMAP, m as u64, 0, 0, 0, 0) };
+            close(m);
+        }
+    }
+    close(ring);
+}
+
 unsafe fn u32_at(va: *mut u8, off: usize) -> &'static AtomicU32 {
     unsafe { &*(va.add(off) as *const AtomicU32) }
 }
 
 impl State {
+    fn open(&mut self) {
+        let (ring, mem) = unsafe { syscall(SYS_RING_NEW, THREAD_RING, 0, 0, 0, 0) };
+        if ring < 0 {
+            exit(ring); // (no ring to say it with)
+        }
+        let (va, _) = unsafe { syscall(SYS_MAP, mem, 0, 0, 0, 0) };
+        if va < 0 {
+            exit(va);
+        }
+        self.ring = ring as Handle;
+        self.mem = mem as Handle;
+        self.va = va as *mut u8;
+    }
+
     fn submit(&mut self, e: &Entry) {
         unsafe {
             let tail = u32_at(self.va, RA_SQ_TAIL).load(Ordering::Relaxed);

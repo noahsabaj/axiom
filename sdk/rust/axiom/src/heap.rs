@@ -48,6 +48,9 @@ struct Inner {
 
 unsafe impl Send for Inner {}
 
+/// The crate's own: std's System, and threads' stacks.
+pub(crate) static SYSTEM: Heap = Heap::new();
+
 pub struct Heap {
     inner: SpinLock<Inner>,
 }

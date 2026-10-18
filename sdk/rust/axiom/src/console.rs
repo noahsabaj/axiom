@@ -2,7 +2,7 @@
 //!
 //!   axiom::println!("{} frames", n);
 //!
-//! (With std, println! reaches it too, through the zkvm layer.)
+//! (With std, println! reaches it too, through std's Hermit layer.)
 
 use core::fmt::{self, Write};
 use core::sync::atomic::{AtomicU32, Ordering};

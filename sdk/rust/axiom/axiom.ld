@@ -37,7 +37,21 @@ SECTIONS
     .data : {
         *(.data .data.*)
     }
+
+    /* thread-local storage (axiom::tls): the template each thread's block
+       is made from, its data in the file, its zeroes after (in no space:
+       .bss follows .tdata) */
+    .tdata : {
+        __axe_tls_start = .;
+        *(.tdata .tdata.*)
+        __axe_tls_data_end = .;
+    }
     __axe_data_end = .;
+    .tbss : {
+        *(.tbss .tbss.* .tcommon)
+        __axe_tls_end = .;
+    }
+    __axe_tls_align = MAX(ALIGNOF(.tdata), ALIGNOF(.tbss));
 
     .bss (NOLOAD) : {
         *(.bss .bss.*)

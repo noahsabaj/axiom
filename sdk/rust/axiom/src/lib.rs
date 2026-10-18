@@ -1,25 +1,27 @@
 //! Axiom's system interface, for programs written in Rust.
 //!
 //! A program is built for sdk/rust/x86_64-axiom.json and turned into an
-//! .AXE by tools/mkaxe.py (tools/rust.py does both). It names its entry,
-//! and what it wants to be given, once:
+//! .AXE by tools/mkaxe.py (tools/rust.py does both). It says once what it
+//! wants to be given.
+//!
+//! With std (built with -Zbuild-std=std,panic_abort: the target is std's
+//! hermit layer, whose system calls this crate supplies, axiom::hermit), a
+//! program has a plain `fn main`, and says
+//!
+//!   axiom::entry!(wants = axiom::wants::DESK);
+//!
+//! std's threads, clock, locks, thread_local!, files and args are there;
+//! its network is not yet. Without std it is #![no_std] and #![no_main],
+//! names its main, and says axiom::panic_handler!() (and has a
+//! #[global_allocator], to allocate):
 //!
 //!   axiom::entry!(main, wants = axiom::wants::DESK);
 //!
-//! Without std it is #![no_std] and #![no_main], and says
-//! axiom::panic_handler!() (and has a #[global_allocator], to allocate).
-//! With std (built with
-//! -Zbuild-std=std,panic_abort: the target is std's zkvm layer, whose
-//! system calls this crate supplies) it is #![no_main], and says
-//!
-//!   #[global_allocator]
-//!   static HEAP: axiom::Heap = axiom::Heap::new();
-//!
-//! std's threads, its clock and its files are not there: they are
-//! axiom::time, axiom::files, and one thread for now. Sound is
-//! axiom::sound.
+//! Either way, axiom's own modules reach what std doesn't: windows
+//! (axiom::window), sound (axiom::sound), the files' volumes.
 
 #![no_std]
+#![feature(thread_local)]
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -33,10 +35,12 @@ pub mod rt;
 pub mod sound;
 pub mod sync;
 pub mod sys;
+pub mod thread;
 pub mod time;
+pub mod tls;
 pub mod window;
-#[cfg(target_os = "zkvm")]
-pub mod zkvm;
+#[cfg(all(target_os = "hermit", feature = "alloc"))]
+pub mod hermit;
 
 pub use files::Files;
 pub use heap::Heap;

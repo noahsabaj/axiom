@@ -293,6 +293,13 @@ user_leave:
     test qword [rax + TH_FLAGS], TF_LINUX
     jnz lx_killed                       ; its process is told (linux.asm)
     mov rdi, E_KILLED
+    test byte [rax + TH_FLAGS], TF_FIRST
+    jz .end
+    mov rax, [rax + TH_TASK]
+    test byte [rax + TK_KILL], 4        ; ended by EXIT_TASK: with its code
+    jz .end
+    mov rdi, [rax + TK_CODE]
+.end:
     jmp thread_exit
 
 ; user_killed -> EAX = 1 if the running thread is a user thread whose task
@@ -483,15 +490,35 @@ task_kill:
 ;  The calls (RDI, RSI, RDX, RCX = the arguments) -> RAX, RDX
 ; -----------------------------------------------------------------------------
 
+; sys_exit(RDI = code, ESI = EXIT_TASK or 0): this thread ends. The task
+; ends too if it is the first, or with EXIT_TASK: its first thread returns
+; the code the first EXIT_TASK said.
 sys_exit:
     mov rax, [gs:PC_CURRENT]
+    mov rcx, [rax + TH_TASK]
     test byte [rax + TH_FLAGS], TF_FIRST
-    jz .exit
-    push rdi                            ; the first: its task ends with it
-    mov rdi, [rax + TH_TASK]
+    jnz .first
+    cmp esi, EXIT_TASK
+    jne .exit
+    lock bts dword [rcx + TK_KILL], 3   ; one code is said: the first's
+    jc .kill
+    mov [rcx + TK_CODE], rdi
+    lock bts dword [rcx + TK_KILL], 2
+.kill:
+    push rdi
+    mov rdi, rcx
     call task_kill
     pop rdi
 .exit:
+    jmp thread_exit
+.first:
+    push rdi                            ; the first: its task ends with it
+    mov rdi, rcx
+    call task_kill
+    pop rdi
+    test byte [rcx + TK_KILL], 4        ; with a code said before
+    jz .exit
+    mov rdi, [rcx + TK_CODE]
     jmp thread_exit
 
 sys_ring_enter:
@@ -579,6 +606,94 @@ sys_thread_new:
 
 sys_channel_new:
     jmp h_channel_new
+
+; sys_tls(RDI = an FS base, in the lower half): this thread's from now on,
+; kept as a Linux thread's is (TH_FSBASE, loaded by sched_switch)
+sys_tls:
+    mov rax, E_ARG
+    mov rcx, USER_TOP
+    cmp rdi, rcx
+    jae .out
+    pushfq
+    cli
+    mov rax, [gs:PC_CURRENT]
+    mov [rax + TH_FSBASE], rdi
+    mov [gs:PC_FSBASE], rdi
+    mov eax, edi
+    mov rdx, rdi
+    shr rdx, 32
+    mov ecx, MSR_FS_BASE
+    wrmsr
+    popfq
+    xor eax, eax
+.out:
+    xor edx, edx
+    ret
+
+; sys_futex_wait(RDI = an address, ESI = the value, RDX = TSC deadline or
+; 0) -> RAX = 0 once a SYS_FUTEX_WAKE woke it, E_CONFLICT if the dword held
+; another value, E_TIMEOUT, E_KILLED, E_RANGE (not the program's), E_ARG
+; (not 4-aligned). Linux's futexes (lxsig.asm), keyed by where the word is
+; (so tasks sharing memory share them too).
+sys_futex_wait:
+    mov ecx, -1                         ; woken by any wake
+    call lx_futex_wait
+    jmp futex_result
+
+; sys_futex_wake(RDI = an address, ESI = at most) -> RAX = threads woken
+sys_futex_wake:
+    mov edx, -1
+    call lx_futex_wake
+; futex_result(RAX = Linux's result) -> RAX = ours, RDX = 0
+futex_result:
+    xor edx, edx
+    test rax, rax
+    jns .out
+    cmp rax, -EAGAIN
+    je .conflict
+    cmp rax, -ETIMEDOUT
+    je .timeout
+    cmp rax, -EFAULT
+    je .range
+    cmp rax, -EINVAL
+    je .arg
+    mov rax, E_KILLED                   ; (-EINTR, -ERESTARTSYS: being killed)
+    ret
+.conflict:
+    mov rax, E_CONFLICT
+    ret
+.timeout:
+    mov rax, E_TIMEOUT
+    ret
+.range:
+    mov rax, E_RANGE
+    ret
+.arg:
+    mov rax, E_ARG
+.out:
+    ret
+
+; sys_info(EDI = SI_*) -> RAX: SI_CLOCK, microseconds since 1970 (the RTC
+; read at boot, taken as UTC, kept since by the TSC); SI_CPUS, CPUs running
+sys_info:
+    cmp edi, SI_CLOCK
+    je .clock
+    cmp edi, SI_CPUS
+    je .cpus
+    mov rax, E_ARG
+    xor edx, edx
+    ret
+.clock:
+    RDTSC64
+    xor edx, edx
+    div qword [tsc_per_us]
+    add rax, [rtc_epoch_us]
+    xor edx, edx
+    ret
+.cpus:
+    mov eax, [cpus_online]
+    xor edx, edx
+    ret
 
 ; h_task_kill(EDI = a task with an address space) -> RAX = 0 (needs
 ; RT_TASK_KILL): it, and the tasks it started
@@ -2710,6 +2825,7 @@ ut_kill_list:   dq str_uts_4, E_KILLED, 0, 20000         ; spinning in ring 3
 sys_table:      dq sys_exit, sys_ring_enter, sys_ring_new, sys_mem_new, sys_map
                 dq sys_event_new, sys_thread_new, sys_yield, sys_unmap
                 dq sys_spawn, sys_channel_new, sys_window_new, sys_sound_new
+                dq sys_tls, sys_futex_wait, sys_futex_wake, sys_info
 
 section .bss
 alignb 8

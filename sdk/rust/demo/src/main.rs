@@ -8,17 +8,12 @@
 //!
 //!   rdemo [--full] [title]
 
-#![no_main]
-
 use std::collections::HashMap;
 use std::time::Duration;
 
 use axiom::{Event, Instant, Key, Pointer, Window};
 
-#[global_allocator]
-static HEAP: axiom::Heap = axiom::Heap::new();
-
-axiom::entry!(main, wants = axiom::wants::DESK);
+axiom::entry!(wants = axiom::wants::DESK);
 
 const GROUND: u32 = 0x20_3040;
 const BAR: u32 = 0x5A_C8FA;

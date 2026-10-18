@@ -94,7 +94,8 @@ The first thread starts at `AXE_ENTRY` with:
 
 **The entry never returns.** There is nothing to return to, so a `ret`
 faults. It ends with `SYS_EXIT`, and the task ends when its first thread
-does, along with every thread and program it started. An exit code other
+does, along with every thread and program it started. Any thread can end
+the whole task at once with `SYS_EXIT`'s `EXIT_TASK`. An exit code other
 than 0 is a failure to the shell's `&&` and `||`.
 
 The start block is a read-only page. Each handle field is a dword, 0 when
@@ -148,7 +149,7 @@ on a ring.
 
 | # | Name | Arguments | Returns |
 |---|---|---|---|
-| 0 | `SYS_EXIT` | RDI = code | (no return) this thread ends; the first thread's ending ends the task |
+| 0 | `SYS_EXIT` | RDI = code, RSI = `EXIT_TASK` (1) or 0 | (no return) this thread ends; with `EXIT_TASK`, or from the first thread, the task too |
 | 1 | `SYS_RING_ENTER` | RDI = ring, RSI = entries to take, RDX = completions to wait for, R10 = a TSC deadline or 0 | RAX = entries taken |
 | 2 | `SYS_RING_NEW` | RDI = entries (4096 at most) | RAX = a ring, RDX = its memory |
 | 3 | `SYS_MEM_NEW` | RDI = bytes (1 to 64 MiB) | RAX = memory, zeroed, whole pages |
@@ -161,6 +162,10 @@ on a ring.
 | 10 | `SYS_CHANNEL_NEW` | | RAX, RDX = the two ends |
 | 11 | `SYS_WINDOW_NEW` | RDI = desktop, RSI = width, RDX = height, R10 = a channel's end, R8 = `WNF_*` | RAX = the window, RDX = its pixels (memory) |
 | 12 | `SYS_SOUND_NEW` | RDI = the speakers, RSI = frames | RAX = a stream, playing; RDX = its memory (`SN_*`) |
+| 13 | `SYS_TLS` | RDI = an address | this thread's FS base |
+| 14 | `SYS_FUTEX_WAIT` | RDI = address, RSI = value, RDX = a TSC deadline or 0 | 0 when woken; `E_CONFLICT` if the dword there isn't the value; `E_TIMEOUT` |
+| 15 | `SYS_FUTEX_WAKE` | RDI = address, RSI = how many at most | RAX = how many woke |
+| 16 | `SYS_INFO` | RDI = `SI_*` | RAX = what it asked |
 
 Notes:
 
@@ -176,6 +181,21 @@ Notes:
   and the thread's entry starts as the first thread's does: nothing to
   return to, ending with `SYS_EXIT`. RO_JOIN on the thread gets its exit
   code.
+- **`SYS_EXIT`**'s code with `EXIT_TASK` is the task's: the shell reports
+  it, as if the first thread had ended with it. If two threads say
+  `EXIT_TASK` at once, the first one's code is kept.
+- **`SYS_TLS`** sets FS's base for the calling thread only; it is kept
+  across switches. The address must be below `USER_TOP`, or it is
+  `E_ARG`. GS's base stays 0.
+- **`SYS_FUTEX_WAIT`** sleeps if the dword at the address (4-aligned, in
+  memory already mapped) still holds the value, until a `SYS_FUTEX_WAKE`
+  on that address or the deadline. Checking and sleeping are one step,
+  so no wake is lost between them. A dword that isn't aligned is `E_ARG`;
+  one that isn't mapped, `E_RANGE`. As with any wait, it may wake without
+  a reason: check the dword again.
+- **`SYS_INFO`**: `SI_CLOCK` (0) is the microseconds since 1970, from the
+  RTC read at boot (taken as UTC) and kept by the TSC; `SI_CPUS` (1) is
+  the CPUs running. Anything else is `E_ARG`.
 - **`SYS_SPAWN`**: the text is at most 255 bytes, and programs nest eight
   deep. The gifts move to the child before it runs. The child is the
   caller's own: the caller's task handle can `RO_KILL` it, and when the
@@ -362,15 +382,20 @@ a short name.
   one 4 KiB "io block" for this. Memory objects start zeroed.
 - **No pointers in requests**, only handle + offset. So the kernel never
   touches a program's addresses, and the program can't hand it one that
-  isn't its own.
+  isn't its own. The futexes are the one exception: an address of the
+  program's own, which the kernel looks up in its mappings and only reads.
 - **SIMD**: x87, SSE, AVX and AVX-512 state is the thread's own, kept across
   system calls, interrupts and switches. The kernel never uses SIMD itself.
-- **No thread-local storage**: FS and GS bases are 0, and a native program
-  can't change them (FSGSBASE is off: `wrfsbase` is `#UD`). A program that
-  needs per-thread data keeps it on the thread's stack, or indexes by
-  something it passes in RDI.
+- **Thread-local storage** is FS's base, which `SYS_TLS` sets for each
+  thread (FSGSBASE is off: `wrfsbase` is `#UD`). It starts 0. The x86-64
+  ELF layout ("variant II") fits: the block below the thread pointer, the
+  pointer's own address at `[fs:0]`. The Rust crate does this (axiom::tls).
 - **Threads** share the task's handles, mappings and ring. Give each one a
-  stack of its own: a mapped block, RSP at its top.
+  stack of its own: a mapped block, RSP at its top. Two threads submitting
+  on one ring take turns; a thread that waits a lot is better off with a
+  ring of its own (`SYS_RING_NEW`).
+- **Futexes** (`SYS_FUTEX_WAIT`, `SYS_FUTEX_WAKE`) are how threads wait for
+  each other without a ring: locks, joins, condition variables.
 
 ## Windows and their events
 
@@ -501,7 +526,10 @@ rdtsc + microseconds * SB_TSC_PER_US
 To sleep, `RO_TIMEOUT` at that deadline. To wait for an event or a time,
 `RO_WAIT` with that deadline. A wait ends at its deadline or a little
 after, as the threads that finish waits are scheduled (the slice is 4 ms).
-There is no wall clock for native programs yet.
+`SYS_FUTEX_WAIT` with a deadline sleeps without a ring.
+
+The wall clock is `SYS_INFO`'s `SI_CLOCK`: microseconds since 1970, UTC
+as far as the RTC knows.
 
 ## What a program may not do
 
@@ -512,8 +540,8 @@ shell says `ended by a fault` and logs what it ran into.
   mapped memory is NX but the code, so there is no JIT.
 - `int N`, `int3`, `in`, `out`, `cli`, `hlt`, or any privileged instruction.
   Calls go only through `SYSCALL`.
-- `rdfsbase`, `wrfsbase`, or any `fs:` or `gs:` access: the bases are 0, and
-  nothing is mapped below 0x200000.
+- `rdfsbase`, `wrfsbase`, or any `gs:` access (its base is 0, and nothing
+  is mapped below 0x200000); `fs:` too before `SYS_TLS` has set its base.
 - `ret` from the entry.
 
 ## Limits
@@ -544,8 +572,10 @@ shell says `ended by a fault` and logs what it ran into.
   entry calls `main`, then `SYS_EXIT`.
 - `python tools/build.py` assembles every program.
 
-**Rust**: `sdk/rust`, with `std`. Its README covers the target, the crate
-and `entry!`. `python tools/rust.py` builds it.
+**Rust**: `sdk/rust`, with `std` (threads, locks, `thread_local!`, time,
+files) on std's hermit layer, which the `axiom` crate fills in with the
+calls above. Its README covers the target, the crate and `entry!`.
+`python tools/rust.py` builds it.
 
 **MASM**: `sdk/masm`, assembled by ml64, linked by link.exe and made an
 .AXE by `tools/mkaxe.py`:

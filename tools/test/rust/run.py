@@ -24,7 +24,16 @@ screen.
     there; q ends it;
   - the keys down and up again from a USB keyboard (hid.asm, where the first
     boot's are the PS/2 one's, kbd.asm): w held is one key there, since a
-    USB keyboard says a key is down, not that it repeats.
+    USB keyboard says a key is down, not that it repeats;
+  - rstd (std, on its hermit layer): threads (spawned, joined, scoped, 300
+    in turn, 50 never joined and given back, named), Mutex, atomics,
+    Condvar (and its timeout), RwLock, Once, OnceLock, Barrier, mpsc and a
+    rendezvous, park; thread_local! (each thread's own, their destructors);
+    sleep, Instant, SystemTime's year; files on the read-only stick (mkdir
+    and write: "Read-only file system", read works), then after `vol 0 rw`
+    a folder made, written, appended to, 256 KiB sought in, its metadata,
+    listed, NotFound, removed; a thread's panic ends it, 134; a thread's
+    std::process::exit ends it with that code; main's ExitCode is its own.
 Skipped (passing) if there is no nightly toolchain. Outputs go to
 build/test/rust/.
 """
@@ -111,6 +120,19 @@ def script_usb():
     ]
 
 
+def script_std():
+    return [
+        "until log: kept in", "wait 1",
+        "type rstd one two\\n", "until run: RSTD exited", "wait 0.3",
+        "type rstd ro rstdro\\n", "until run: RSTD exited", "wait 0.3",
+        "type vol 0 rw\\n", "wait 0.5",                     # (a test copy of the stick)
+        "type rstd fs rstdtest\\n", "until run: RSTD exited", "wait 0.3",
+        "type rstd panic\\n", "until run: RSTD exited", "wait 0.3",
+        "type rstd exit\\n", "until run: RSTD exited", "wait 0.3",
+        "type rstd code\\n", "until run: RSTD exited", "wait 0.5",
+    ]
+
+
 def pixel(name, x, y):
     from PIL import Image
     try:
@@ -133,6 +155,67 @@ def check_keys(log, who, repeats):
     downs, ups, keys = (log.count(t) for t in ("rdemo: down 0x1a", "rdemo: up 0x1a", "rdemo: key Char('w')"))
     result((downs, ups, keys) == (1, 1, repeats),
            f"{who}: w held: down once, up once, {repeats} as text ({downs}, {ups}, {keys})")
+
+
+def check_std(log):
+    """rstd: std's threads, locks, thread_local!, time and files, on
+    hermit's layer (axiom::hermit)."""
+    def has(text):
+        return text in log
+
+    first = log.split("run: RSTD exited", 1)[0]
+    result(has('rstd: args ["one", "two"]'), "rstd: std::env::args")
+    m = re.search(r"rstd: cpus (\d+)", log)
+    result(bool(m) and m.group(1) == "4", f"rstd: available_parallelism ({m.group(0) if m else 'no line'})")
+    for line, what in [
+        ("rstd: 8 threads, their sums right", "threads spawned and joined"),
+        ("rstd: scoped, sum 3000", "thread::scope"),
+        ("rstd: 300 in turn 300, 50 unjoined, then 1", "300 in turn, 50 never joined, given back"),
+        ('rstd: named Some("worker"), main is Some("main")', "names"),
+        ("rstd: mutex 80000", "Mutex"),
+        ("rstd: atomic 200000", "atomics"),
+        ("rstd: condvar, turns 400", "Condvar"),
+        ("rstd: condvar timed out true", "Condvar's timeout"),
+        ("rstd: rwlock, written 200, read 28800", "RwLock"),
+        ("rstd: once ran 1, oncelock agreed true", "Once, OnceLock"),
+        ("rstd: barrier held true", "Barrier"),
+        ("rstd: mpsc 1000 messages", "mpsc"),
+        ("rstd: rendezvous 4950", "sync_channel(0)"),
+        ("rstd: parked and unparked 1", "park, unpark"),
+        ("rstd: thread_local each its own true, the first's 100, destructors 6",
+         "thread_local!, each its own, destructors run"),
+    ]:
+        result(line in first, f"rstd: {what}")
+    m = re.search(r"rstd: slept (\d+) ms, spun (\d+) ms \((\w+) looks\)", log)
+    result(bool(m) and 50 <= int(m.group(1)) < 500 and m.group(3) == "true",
+           f"rstd: sleep and Instant ({m.group(0) if m else 'no line'})")
+    m = re.search(r"rstd: the year (\d+)", log)
+    result(bool(m) and 2024 <= int(m.group(1)) < 2100, f"rstd: SystemTime ({m.group(0) if m else 'no line'})")
+    result(has("rstd: done") and "run: RSTD exited with 0" in log.split('"ro"', 1)[0], "rstd: exit 0")
+    ro = 'rstd: ro mkdir Err("Read-only file system (os error 30)"), ' \
+         'write Err("Read-only file system (os error 30)"), read Ok(true)'
+    result(has(ro), "rstd ro: a read-only volume says so; reading works")
+    for line, what in [
+        ("rstd: fs made rstdtest", "create_dir"),
+        ("rstd: fs wrote and read back true", "write, read_to_string"),
+        ("rstd: fs appended, 3 lines", "OpenOptions::append"),
+        ("rstd: fs big 262144 bytes, at 1000 [232, 233, 234, 235]", "256 KiB, seek and read"),
+        ("rstd: fs metadata: file true 262144 bytes, folder true, written within a day true", "metadata"),
+        ('rstd: fs listed ["a.txt", "big.bin", "sub"]', "read_dir"),
+        ("rstd: fs missing Err(NotFound)", "NotFound"),
+        ("rstd: fs removed, gone true", "remove_file, remove_dir"),
+    ]:
+        result(has(line), f"rstd fs: {what}")
+    result(has("rstd: a thread panics") and has("run: RSTD exited with 134"),
+           "rstd panic: a thread's panic ends the program, 134")
+    result(has("rstd: a thread exits") and has("run: RSTD exited with 7") and not has("rstd: still here"),
+           "rstd exit: std::process::exit from a thread ends the program, 7")
+    result(has("run: RSTD exited with 3"), "rstd code: main's ExitCode, 3")
+    panics = log.count("panicked")
+    result(panics == 1, f"rstd: no panic but the one asked for ({panics})")
+    for line in log.splitlines():
+        if "PANIC" in line or "ended by a fault" in line:
+            result(False, f"rstd: no faults: {line}")
 
 
 def check(log, err):
@@ -231,13 +314,18 @@ def main():
                    check=True, capture_output=True)
     stick_usb = OUT / "stick-usb.img"                  # (a boot locks its image)
     shutil.copyfile(stick, stick_usb)
+    stick_std = OUT / "stick-std.img"
+    shutil.copyfile(stick, stick_std)
     logs = boot_all(OUT, {
         "rust": (script(""), ["--smp", "4", "--demo", "--extra", TABLET, "--stick",
                               stick.relative_to(ROOT).as_posix()], 120, 2),
         "rust-usb": (script_usb(), ["--smp", "2", "--extra", TABLET + USB_KBD, "--stick",
-                                    stick_usb.relative_to(ROOT).as_posix()], 120, 1)})
+                                    stick_usb.relative_to(ROOT).as_posix()], 120, 1),
+        "rust-std": (script_std(), ["--smp", "4", "--stick",
+                                    stick_std.relative_to(ROOT).as_posix()], 120, 2)})
     check(*logs["rust"])
     check_keys(logs["rust-usb"][0], "usb", 1)
+    check_std(logs["rust-std"][0])
     print(f"{'all passed' if not FAILS else f'{FAILS} FAILED'}")
     return 1 if FAILS else 0
 

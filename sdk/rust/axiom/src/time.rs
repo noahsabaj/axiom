@@ -2,10 +2,9 @@
 //! start block), and deadlines on the ring are TSC values.
 
 use core::ops::{Add, Sub};
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use core::time::Duration;
 
-use crate::ring;
 use crate::sys::*;
 
 static TSC_PER_US: AtomicU64 = AtomicU64::new(1000);
@@ -31,6 +30,11 @@ impl Instant {
     /// As the ring's deadlines have it.
     pub fn from_tsc(tsc: u64) -> Instant {
         Instant(tsc)
+    }
+
+    /// Nanoseconds since the machine started (as nanos() says them).
+    pub fn from_nanos(ns: u64) -> Instant {
+        Instant(((ns as u128) * tsc_per_us() as u128 / 1000).min(u64::MAX as u128) as u64)
     }
 
     pub fn tsc(self) -> u64 {
@@ -86,11 +90,13 @@ pub fn nanos() -> u64 {
     ((rdtsc() as u128) * 1000 / tsc_per_us() as u128) as u64
 }
 
-/// This thread waits until then (RO_TIMEOUT).
+/// This thread waits until then: a futex's wait that nothing wakes, so it
+/// asks nothing of the ring.
 pub fn sleep_until(t: Instant) {
-    let mut e = Entry::new(RO_TIMEOUT, 0);
-    e.deadline = t.0.max(1);
-    let _ = ring::call(&e);
+    let never = AtomicU32::new(0);
+    while Instant::now() < t {
+        let _ = futex_wait(&never, 0, t.0.max(1));
+    }
 }
 
 pub fn sleep(d: Duration) {

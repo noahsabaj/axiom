@@ -2,7 +2,7 @@
 # tools/rust.py: for x86_64-axiom.json, std and core from source, into
 # build/rust; tools/mkaxe.py turns each into an .AXE.
 [workspace]
-members = ["axiom", "hello", "demo", "tone"]
+members = ["axiom", "hello", "demo", "tone", "std"]
 resolver = "3"
 
 [profile.dev]

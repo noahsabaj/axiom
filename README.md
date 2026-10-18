@@ -186,11 +186,15 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   `docs/VISION.md`).
 - **Programs in Rust, natively** (`sdk/rust`): the `axiom` crate is the
   system interface for Rust (the ring, windows and their events, files,
-  the clock, a heap), and a program built with it is an `.AXE` like any
-  other, through no Linux layer. With std too: the target is std's zkvm
-  layer, whose few system calls the crate supplies, so `println!`, `Vec`,
-  `HashMap` and the rest work. `rhello`, `rdemo` and `rtone` come with it; `python
-  tools/rust.py` builds them (rustup's nightly with rust-src, offline).
+  the clock, a heap, threads), and a program built with it is an `.AXE`
+  like any other, through no Linux layer. With std too: the target is
+  std's Hermit layer, whose calls the crate supplies on Axiom's own, so
+  threads, `Mutex` and the rest of `std::sync`, `thread_local!`,
+  `Instant`, `SystemTime`, `std::fs`, `println!` and `HashMap` work. The
+  kernel gives native programs thread-local storage (FS's base), futexes
+  and the wall clock for it. `rhello`, `rdemo`, `rtone` and `rstd` come
+  with it; `python tools/rust.py` builds them (rustup's nightly with
+  rust-src, offline).
 - **Programs in MASM** (`sdk/masm`): ml64 and link.exe, with the kernel's
   constants as `axiom.inc`; `python tools/masm.py` builds `mhello`. What
   every native program sees (the .AXE, the start block, the system calls,
@@ -425,7 +429,7 @@ src/boot/uefi.asm       the loader: a hand-built PE32+ UEFI application
 src/kernel/*.asm        the kernel, one flat image at 0xFFFFFFFF80000000
 src/user/               programs for ring 3 (axe.inc: their header and runtime)
 src/include/            structures shared by the two
-sdk/rust/               programs in Rust: the axiom crate, the target, three programs
+sdk/rust/               programs in Rust: the axiom crate, the target, four programs
 tools/rust.py           build them; tools/mkaxe.py turns each into an .AXE
 sdk/masm/               programs in MASM: axiom.inc (made from defs.inc), mhello
 tools/masm.py           build them with ml64 and link.exe, then tools/mkaxe.py
@@ -468,7 +472,8 @@ tools/test/             host-side tests for self-contained modules (tls: the
                         Ubuntu, and threads and signals in C, from a
                         stick with a root on it; rust: the Rust programs,
                         their heap, files, a window and its events, keys
-                        down and up from both keyboards; masm: mhello,
+                        down and up from both keyboards, std's threads,
+                        locks, thread_local! and files; masm: mhello,
                         from MASM; sound: HD Audio, the mixer and
                         streams, judged from the WAV file QEMU's codec
                         writes); all.py runs them

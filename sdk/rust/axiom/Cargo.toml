@@ -2,7 +2,7 @@
 name = "axiom"
 version = "0.1.0"
 edition = "2024"
-description = "Axiom's system interface, for programs in Rust (no_std; std through its zkvm layer)"
+description = "Axiom's system interface, for programs in Rust (no_std; std through its Hermit layer)"
 
 [features]
 default = ["alloc"]

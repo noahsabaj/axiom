@@ -234,11 +234,14 @@ TK_OPS          equ 96                  ; handle operations it made
 TK_DENIED       equ 104                 ; of those, refused
 TK_ENDED        equ 112                 ; dword, bit 0: no thread and no handle
                                         ; to it were left, and its handles went
-TK_KILL         equ 116                 ; dword, bit 0: killed; bit 1: by a fault
+TK_KILL         equ 116                 ; dword, bit 0: killed; bit 1: by a fault;
+                                        ; bit 2: by SYS_EXIT's EXIT_TASK, with
+                                        ; TK_CODE (bit 3: that code being said)
 TK_AS           equ 120                 ; its address space (user.asm), 0 if none
 TK_LX           equ 128                 ; a Linux process: its state (linux.asm), or 0
 TK_CON          equ 136                 ; the terminal its console writes go to
                                         ; (0: the first); its children's too
+TK_CODE         equ 144                 ; what its first thread returns, by EXIT_TASK
 TK_SIZE         equ 192
 
 ; a slot of a handle table; a handle is (HS_GEN << 16) | its index, never 0
@@ -670,8 +673,9 @@ SB_ARGS_MAX     equ 4096 - SB_ARGS - 1
 ; system calls: SYSCALL with RAX = the number and the arguments in RDI, RSI,
 ; RDX, R10 (and R8, a fifth); the result in RAX (and RDX), RCX and R11 lost,
 ; the rest kept (docs/ABI.md)
-SYS_EXIT        equ 0                   ; (code): this thread ends
-SYS_RING_ENTER  equ 1                   ; (ring, take, wait for, TSC deadline) -> taken
+SYS_EXIT        equ 0                   ; (code, EXIT_TASK or 0): this thread ends;
+                                        ; with EXIT_TASK its task too, with that code
+SYS_RING_ENTER  equ 1                  ; (ring, take, wait for, TSC deadline) -> taken
 SYS_RING_NEW    equ 2                   ; (entries) -> RAX = a ring, RDX = its memory
 SYS_MEM_NEW     equ 3                   ; (bytes) -> zeroed memory
 SYS_MAP         equ 4                   ; (memory) -> where it is mapped now
@@ -692,7 +696,18 @@ SYS_WINDOW_NEW  equ 11                  ; (desktop, width, height, a channel's e
                                         ; width * 4 a row, its height of rows)
 SYS_SOUND_NEW   equ 12                  ; (the speakers, frames) -> RAX = a stream
                                         ; playing, RDX = its memory (SN_*)
-SYS_COUNT       equ 13
+SYS_TLS         equ 13                  ; (FS base): this thread's, for its
+                                        ; thread-local storage
+SYS_FUTEX_WAIT  equ 14                  ; (address, value, TSC deadline or 0): waits
+                                        ; while the dword there holds that value,
+                                        ; until a SYS_FUTEX_WAKE -> 0, E_CONFLICT
+                                        ; (it held another), E_TIMEOUT
+SYS_FUTEX_WAKE  equ 15                  ; (address, at most) -> threads woken there
+SYS_INFO        equ 16                  ; (SI_*) -> RAX
+SYS_COUNT       equ 17
+EXIT_TASK       equ 1                   ; SYS_EXIT: the whole task ends
+SI_CLOCK        equ 0                   ; microseconds since 1970, by the RTC (as UTC)
+SI_CPUS         equ 1                   ; CPUs running
 
 ; a stream's memory (SYS_SOUND_NEW): this header, then SN_FRAMES frames at
 ; SN_DATA, each a left and a right sample, 16 bits signed, SN_RATE a second.

@@ -10,7 +10,9 @@ An ELF file is linked by sdk/rust/axiom/axiom.ld, which made the AXE header
 AXE_TEXT_END, the constants to AXE_RODATA_END, the data to AXE_DATA_END
 (the end of the file), and zeroes to AXE_BSS_END. Every section the program
 loads is put where it runs, the header checked as the kernel will check it,
-and the image written.
+and the image written. Its thread-local template (.tdata, in the data;
+.tbss's zeroes in no space) is the crate's to copy for each thread
+(axiom::tls), from where the linker put it: aligned, in the file.
 
 A PE file is from MSVC's link.exe (for MASM: docs/ABI.md), linked to run at
 0x400000 as it is (/BASE:0x400000 /FIXED, /ENTRY, /NODEFAULTLIB, no imports).
@@ -28,6 +30,7 @@ AXE_HDR = 56
 AW_ALL = 7 | 16 | 32
 SHF_ALLOC, SHF_TLS = 0x2, 0x400
 SHT_NOBITS = 8
+TLS_SEGMENT = None                      # (vaddr, filesz, memsz, align) of PT_TLS
 
 
 def fail(why):
@@ -42,7 +45,14 @@ def sections(elf):
     if e_type != 2 or e_machine != 62:
         fail("not an x86-64 executable (ET_EXEC)")
     entry, = struct.unpack_from("<Q", elf, 24)
-    shoff, = struct.unpack_from("<Q", elf, 40)
+    phoff, shoff = struct.unpack_from("<QQ", elf, 32)
+    phentsize, phnum = struct.unpack_from("<HH", elf, 54)
+    global TLS_SEGMENT
+    for i in range(phnum):
+        p_type, _, _, p_vaddr, _, p_filesz, p_memsz, p_align = struct.unpack_from(
+            "<IIQQQQQQ", elf, phoff + i * phentsize)
+        if p_type == 7:                                 # PT_TLS
+            TLS_SEGMENT = (p_vaddr, p_filesz, p_memsz, p_align)
     shentsize, shnum, shstrndx = struct.unpack_from("<HHH", elf, 58)
     raw = [struct.unpack_from("<IIQQQQIIQQ", elf, shoff + i * shentsize) for i in range(shnum)]
     names = raw[shstrndx]
@@ -139,9 +149,10 @@ def main():
     loaded = [s for s in secs if s[2] & SHF_ALLOC and s[5]]
     if not loaded or loaded[0][3] != USER_IMAGE:
         fail("nothing at 0x400000: not linked by axiom.ld")
-    tls = [s[0] for s in loaded if s[2] & SHF_TLS]
-    if tls:
-        fail(f"thread-local sections {tls}: Axiom programs have none")
+    if TLS_SEGMENT:
+        vaddr, filesz, memsz, align = TLS_SEGMENT
+        if align and vaddr % align:
+            fail(f"the thread-local template at {vaddr:#x} is not aligned to {align}")
     hdr = elf[loaded[0][4]:loaded[0][4] + AXE_HDR]
     magic, h_entry, text_end, rodata_end, data_end, bss_end, wants = struct.unpack("<8s6Q", hdr)
     if magic != b"AXIOMEX2":
@@ -155,7 +166,11 @@ def main():
     if wants & ~AW_ALL:
         fail(f"it wants {wants:#x}: more than there is")
     image = bytearray(data_end - USER_IMAGE)
+    if TLS_SEGMENT and not TLS_SEGMENT[0] + TLS_SEGMENT[1] <= data_end:
+        fail("the thread-local template is past the file's end")
     for name, typ, flags, addr, offset, size in loaded:
+        if typ == SHT_NOBITS and flags & SHF_TLS:
+            continue                                    # .tbss: each thread's, not loaded
         if typ == SHT_NOBITS:
             if not (data_end <= addr and addr + size <= bss_end):
                 fail(f"{name}: zeroes outside the bss")

@@ -226,7 +226,7 @@ SB_GIFT2        EQU 56  ; dword: a second thing it was given, or 0
 SB_SOUND        EQU 60  ; dword: to the speakers, or 0
 SB_ARGS         EQU 64  ; the arguments it was run with, NUL-ended
 SB_ARGS_MAX     EQU 4096 - SB_ARGS - 1
-SYS_EXIT        EQU 0  ; (code): this thread ends
+SYS_EXIT        EQU 0  ; (code, EXIT_TASK or 0): this thread ends;
 SYS_RING_ENTER  EQU 1  ; (ring, take, wait for, TSC deadline) -> taken
 SYS_RING_NEW    EQU 2  ; (entries) -> RAX = a ring, RDX = its memory
 SYS_MEM_NEW     EQU 3  ; (bytes) -> zeroed memory
@@ -239,7 +239,14 @@ SYS_SPAWN       EQU 9  ; (memory, offset, bytes of "program args",
 SYS_CHANNEL_NEW EQU 10  ; -> RAX, RDX = the two ends of a channel
 SYS_WINDOW_NEW  EQU 11  ; (desktop, width, height, a channel's end,
 SYS_SOUND_NEW   EQU 12  ; (the speakers, frames) -> RAX = a stream
-SYS_COUNT       EQU 13
+SYS_TLS         EQU 13  ; (FS base): this thread's, for its
+SYS_FUTEX_WAIT  EQU 14  ; (address, value, TSC deadline or 0): waits
+SYS_FUTEX_WAKE  EQU 15  ; (address, at most) -> threads woken there
+SYS_INFO        EQU 16  ; (SI_*) -> RAX
+SYS_COUNT       EQU 17
+EXIT_TASK       EQU 1  ; SYS_EXIT: the whole task ends
+SI_CLOCK        EQU 0  ; microseconds since 1970, by the RTC (as UTC)
+SI_CPUS         EQU 1  ; CPUs running
 SN_WRITE        EQU 0  ; dword: frames written, in all (the program's)
 SN_READ         EQU 4  ; dword: frames taken to play, in all
 SN_FRAMES       EQU 8  ; dword: the ring's, a power of two

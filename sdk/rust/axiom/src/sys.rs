@@ -19,6 +19,16 @@ pub const SYS_SPAWN: u64 = 9;
 pub const SYS_CHANNEL_NEW: u64 = 10;
 pub const SYS_WINDOW_NEW: u64 = 11;
 pub const SYS_SOUND_NEW: u64 = 12;
+pub const SYS_TLS: u64 = 13;
+pub const SYS_FUTEX_WAIT: u64 = 14;
+pub const SYS_FUTEX_WAKE: u64 = 15;
+pub const SYS_INFO: u64 = 16;
+
+/// SYS_EXIT's second: the whole task ends, from any thread.
+pub const EXIT_TASK: u64 = 1;
+/// SYS_INFO's: microseconds since 1970 (the RTC's, as UTC); CPUs running.
+pub const SI_CLOCK: u64 = 0;
+pub const SI_CPUS: u64 = 1;
 
 // what a ring entry asks for (RO_*)
 pub const RO_NOP: u8 = 0;
@@ -144,6 +154,7 @@ impl Error {
     pub const FAULT: Error = Error(-13);
     pub const PEER: Error = Error(-14);
     pub const EMPTY: Error = Error(-15);
+    pub const CONFLICT: Error = Error(-16);
     pub const IO: Error = Error(-18);
     pub const NOFILE: Error = Error(-21);
     pub const READONLY: Error = Error(-22);
@@ -220,12 +231,46 @@ pub unsafe fn syscall(n: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> (i
     (rax, rdx)
 }
 
-/// This thread ends (the program, if it is the first).
+/// The program ends, with every thread, from whichever thread says so.
 pub fn exit(code: i64) -> ! {
+    unsafe {
+        syscall(SYS_EXIT, code as u64, EXIT_TASK, 0, 0, 0);
+        asm!("ud2", options(noreturn));
+    }
+}
+
+/// This thread alone ends (the program, if it is the first).
+pub fn exit_thread(code: i64) -> ! {
     unsafe {
         syscall(SYS_EXIT, code as u64, 0, 0, 0, 0);
         asm!("ud2", options(noreturn));
     }
+}
+
+/// While the dword at `word` holds `value`, this thread waits, until a
+/// futex_wake there or the deadline (TSC, 0 for none) -> Ok once woken;
+/// CONFLICT if it held another value, TIMEOUT.
+pub fn futex_wait(word: &core::sync::atomic::AtomicU32, value: u32, deadline: u64) -> Result<()> {
+    let (r, _) = unsafe {
+        syscall(SYS_FUTEX_WAIT, word.as_ptr() as u64, value as u64, deadline, 0, 0)
+    };
+    check(r).map(|_| ())
+}
+
+/// Up to `count` of the threads waiting at `word` woken -> how many were.
+pub fn futex_wake(word: &core::sync::atomic::AtomicU32, count: u32) -> u32 {
+    let (r, _) = unsafe { syscall(SYS_FUTEX_WAKE, word.as_ptr() as u64, count as u64, 0, 0, 0) };
+    r.max(0) as u32
+}
+
+/// Microseconds since 1970, by the machine's clock (taken as UTC).
+pub fn clock_us() -> u64 {
+    unsafe { syscall(SYS_INFO, SI_CLOCK, 0, 0, 0, 0) }.0.max(0) as u64
+}
+
+/// CPUs running.
+pub fn cpus() -> usize {
+    (unsafe { syscall(SYS_INFO, SI_CPUS, 0, 0, 0, 0) }.0).max(1) as usize
 }
 
 /// Others run first.
@@ -237,4 +282,37 @@ pub fn yield_now() {
 #[inline]
 pub fn rdtsc() -> u64 {
     unsafe { core::arch::x86_64::_rdtsc() }
+}
+
+/// RDRAND where the CPU has it; else the TSC, stirred.
+pub fn random_u32() -> u32 {
+    use core::arch::x86_64::{__cpuid, _rdrand32_step};
+    use core::sync::atomic::{AtomicU64, Ordering};
+    static HAS: AtomicU64 = AtomicU64::new(2); // 2: not asked yet
+    if HAS.load(Ordering::Relaxed) == 2 {
+        let ecx = __cpuid(1).ecx;
+        HAS.store((ecx >> 30) as u64 & 1, Ordering::Relaxed);
+    }
+    if HAS.load(Ordering::Relaxed) == 1 {
+        #[target_feature(enable = "rdrand")]
+        unsafe fn rd() -> Option<u32> {
+            let mut v = 0;
+            for _ in 0..10 {
+                if _rdrand32_step(&mut v) == 1 {
+                    return Some(v);
+                }
+            }
+            None
+        }
+        if let Some(v) = unsafe { rd() } {
+            return v;
+        }
+    }
+    static STATE: AtomicU64 = AtomicU64::new(0x9E37_79B9_7F4A_7C15);
+    let mut x = STATE.load(Ordering::Relaxed) ^ rdtsc();
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    STATE.store(x, Ordering::Relaxed);
+    (x >> 32) as u32
 }

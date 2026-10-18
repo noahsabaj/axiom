@@ -21,6 +21,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rstd"
+version = "0.1.0"
+dependencies = [
+ "axiom",
+]
+
+[[package]]
 name = "rtone"
 version = "0.1.0"
 dependencies = [

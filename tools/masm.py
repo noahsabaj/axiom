@@ -27,7 +27,7 @@ SOURCES = [K / "defs.inc", K / "kbd.asm", K / "kobj.asm", K / "user.asm", K / "f
 PUBLIC = ("OT_", "RT_", "E_", "RA_", "SQ_", "SQF_", "CQ_", "RO_", "FS_PATH", "FV_", "FVF_",
           "FE_", "FEA_", "USER_", "AXE_", "AW_", "SB_", "SYS_", "WE_", "WM_", "WNF_", "PTRM_",
           "WIN_MAX", "TC_", "LK_", "SKS_", "NETW_", "KEY_", "MEM_MAX", "AS_MAX",
-          "CON_WRITE_MAX", "FS_ROOM_MAX", "SN_")
+          "CON_WRITE_MAX", "FS_ROOM_MAX", "SN_", "SI_", "EXIT_TASK")
 
 
 def tools():
