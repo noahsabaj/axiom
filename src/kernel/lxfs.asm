@@ -14,8 +14,7 @@
 ;  A program's open files are LF_* objects, shared by the descriptors dup
 ;  made (LF_REFS); its descriptor table (LP_FDS) holds them, bit 0 of each
 ;  entry its FD_CLOEXEC. Its standard input, output and error are its
-;  terminal (LY_*): what it writes there goes to the shell it was run in
-;  and the serial log, a line at a time; reading it finds nothing yet.
+;  terminal (lxtty.asm's LY_*): the window it was run in, as a tty.
 ; =============================================================================
 
 ; a node of the tree
@@ -67,14 +66,6 @@ LFK_FILE        equ 1
 LFK_DIR         equ 2
 LFK_DEV         equ 3
 LFK_TTY         equ 4
-
-; a terminal, as programs have it
-LY_CON          equ 0                   ; the terminal (term.asm), 0 once closed
-LY_LOCK         equ 8                   ; dword
-LY_LEN          equ 12                  ; dword: bytes in LY_LINE
-LY_REFS         equ 16                  ; dword
-LY_LINE         equ 24                  ; CON_LINE + 8
-LY_SIZE         equ LY_LINE + CON_LINE + 8
 
 LX_PATH         equ 4096                ; a path, at most (with its NUL)
 LX_NAME         equ 255                 ; a name in it
@@ -1156,136 +1147,6 @@ lx_fd_node:
     ret
 
 ; -----------------------------------------------------------------------------
-;  The terminal
-; -----------------------------------------------------------------------------
-
-; ly_new(RDI = a terminal) -> RAX = a terminal for programs, one reference, or 0
-ly_new:
-    push rdi
-    mov edi, LY_SIZE
-    call kmalloc
-    pop rdi
-    test rax, rax
-    jz .out
-    mov [rax + LY_CON], rdi
-    mov dword [rax + LY_REFS], 1
-.out:
-    ret
-
-; ly_get(RDI) / ly_put(RDI). Preserve all.
-ly_get:
-    lock inc dword [rdi + LY_REFS]
-    ret
-
-ly_put:
-    lock dec dword [rdi + LY_REFS]
-    jnz .out
-    push rax
-    push rdi
-    call ly_flush
-    call kfree
-    pop rdi
-    pop rax
-.out:
-    ret
-
-; ly_write(RDI = terminal, RSI = bytes, RDX = how many): a line at a time
-; to the shell it belongs to, and the serial log
-ly_write:
-    push rbx
-    push r12
-    push r13
-    mov rbx, rdi
-    mov r12, rsi
-    mov r13, rdx
-    lea rdi, [rbx + LY_LOCK]
-    call lx_mutex_lock
-.byte:
-    test r13, r13
-    jz .done
-    movzx eax, byte [r12]
-    inc r12
-    dec r13
-    cmp al, 10
-    je .line
-    cmp al, 13
-    je .byte
-    cmp al, 9
-    je .put
-    cmp al, ' '
-    jae .put
-    mov al, '.'
-.put:
-    mov ecx, [rbx + LY_LEN]
-    mov [rbx + LY_LINE + rcx], al
-    inc ecx
-    mov [rbx + LY_LEN], ecx
-    cmp ecx, CON_LINE
-    jb .byte
-.line:
-    mov rdi, rbx
-    call ly_say
-    jmp .byte
-.done:
-    lea rdi, [rbx + LY_LOCK]
-    call lx_mutex_unlock
-    pop r13
-    pop r12
-    pop rbx
-    ret
-
-; ly_flush(RDI = terminal): a line not ended yet, said. Preserves all.
-ly_flush:
-    push rax
-    push rdi
-    lea rdi, [rdi + LY_LOCK]
-    call lx_mutex_lock
-    mov rdi, [rsp]
-    cmp dword [rdi + LY_LEN], 0
-    je .unlock
-    call ly_say
-.unlock:
-    mov rdi, [rsp]
-    lea rdi, [rdi + LY_LOCK]
-    call lx_mutex_unlock
-    pop rdi
-    pop rax
-    ret
-
-; ly_say(RDI = terminal, its lock held): its line, said. Preserves all.
-ly_say:
-    push rax
-    push rcx
-    push rdx
-    push rsi
-    push rdi
-    push r8
-    push r9
-    push r10
-    push r11
-    mov ecx, [rdi + LY_LEN]
-    mov byte [rdi + LY_LINE + rcx], 0
-    mov dword [rdi + LY_LEN], 0
-    mov r11, [rdi + LY_CON]
-    lea rdi, [rdi + LY_LINE]
-    lea rax, [ly_klog]
-    call con_call
-    pop r11
-    pop r10
-    pop r9
-    pop r8
-    pop rdi
-    pop rsi
-    pop rdx
-    pop rcx
-    pop rax
-    ret
-
-ly_klog:
-    KLOG "%s", rdi
-    ret
-
-; -----------------------------------------------------------------------------
 ;  The calls
 ; -----------------------------------------------------------------------------
 
@@ -1363,7 +1224,11 @@ lf_read:
     call lx_random_out
     jmp .out
 .tty:
-    xor eax, eax                        ; nothing to read yet
+    mov rdi, [rbx + LF_TTY]
+    mov rsi, r12
+    mov rdx, r13
+    mov ecx, [rbx + LF_FLAGS]
+    call ly_read
 .out:
     pop r14
     pop r13
@@ -2453,7 +2318,7 @@ lx_sys_dup3:
     pop rbx
     ret
 
-; ioctl(fd, request, arg): a terminal is not one yet (L3)
+; ioctl(fd, request, arg): a terminal's (lxtty.asm), and O_NONBLOCK
 lx_sys_ioctl:
     call lx_fd_get
     cmp rax, -4095
@@ -2464,12 +2329,30 @@ lx_sys_ioctl:
     je .done
     cmp esi, 0x5450                     ; FIONCLEX
     je .done
+    cmp dword [rax + LF_KIND], LFK_TTY
+    jne .not_tty
+    mov rdi, [rax + LF_TTY]
+    jmp ly_ioctl
+.not_tty:
     mov rax, -ENOTTY
 .out:
     ret
 .fionbio:
-    xor eax, eax
-    ret
+    push rax
+    sub rsp, 16
+    mov rdi, rsp
+    mov rsi, rdx
+    mov edx, 4
+    call lx_copy_in
+    mov ecx, [rsp]
+    add rsp, 16
+    pop rdx
+    cmp rax, -4095
+    jae .out
+    and dword [rdx + LF_FLAGS], ~O_NONBLOCK
+    test ecx, ecx
+    jz .done
+    or dword [rdx + LF_FLAGS], O_NONBLOCK
 .done:
     xor eax, eax
     ret

@@ -1173,7 +1173,7 @@ text rows.
   for the host, so a page can be laid out and drawn there; the QEMU suite,
   `tools/test/browse/run.py`, compares browse's window with that.
 
-## Linux programs: `linux.asm`, `lxmm.asm`, `lxfs.asm`, `lxsig.asm`
+## Linux programs: `linux.asm`, `lxmm.asm`, `lxfs.asm`, `lxsig.asm`, `lxtty.asm`
 
 - `linux <program> [arguments]` runs an unchanged Linux x86-64 program
   from a root on the boot stick: `tools/mkroot.py` copies programs and
@@ -1182,9 +1182,10 @@ text rows.
   Axiom's own, and writes `META`, a line per path with what FAT cannot
   keep (kind, mode, size, a link's target); `mkstick.py --linux` puts both
   at `/LINUX` with 4 KiB clusters. A name without a slash is looked for on
-  the Linux PATH. One runs at a time; ctrl+C in its shell sends it SIGINT
-  (a second ctrl+C kills it), closing the shell kills it, and the shell
-  says how it ended (`exited with N`, `ended by signal N`, `stopped`).
+  the Linux PATH. One runs at a time in a shell, and has its window's
+  keys while it runs (ctrl+C is its terminal's: SIGINT); closing the
+  window kills it, and the shell says how it ended (`exited with N`,
+  `ended by signal N`, `stopped`).
 - **A process** is a task (its own address space, as `run`'s) with a
   Linux process's state in `TK_LX` (`LP_*`): its pid, descriptors,
   directory, program and terminal. Its threads are user threads marked
@@ -1222,9 +1223,27 @@ text rows.
   (a program's thread queues it and waits); `open`, `openat`, `read`,
   `pread64`, `readv`, `writev`, `lseek`, `close`, `dup`s, `fcntl`, the
   `stat` family with `statx`, `getdents64`, `readlink`, `access`,
-  `getcwd`, `chdir` work on it, and writing is refused (`EROFS`). What a
-  program writes to its terminal is shown line by line in the shell it was
-  run in.
+  `getcwd`, `chdir` work on it, and writing is refused (`EROFS`).
+- **The terminal** (`lxtty.asm`): a shell's window has one terminal for
+  programs (`LY_*`), made the first time one runs there, with what a tty
+  has on Linux: termios (`TCGETS`, `TCSETS` and the termios2 calls, reset
+  for each program to a cooked terminal), the window's size
+  (`TIOCGWINSZ`; the program gets SIGWINCH when it changes), the
+  foreground process group and session, `FIONREAD`, `TIOCSTI`, `TCFLSH`.
+  Keys go through a line discipline: ICRNL and the other input flags,
+  ISIG (ctrl+C, ctrl+\ and ctrl+Z send SIGINT, SIGQUIT and SIGTSTP to
+  the program, the input flushed), ICANON's line editing (erase, kill,
+  word erase, ctrl+D) with ECHO and ECHOCTL, or raw bytes with VMIN and
+  VTIME; arrows, home and end, page up and down, insert, delete and F1 to
+  F12 arrive as xterm's sequences (`ESC O x` for the arrows under
+  DECCKM), alt as an ESC before the key. A read waits for a line, or for
+  VMIN bytes or VTIME; `O_NONBLOCK` (`fcntl`, `FIONBIO`) says `EAGAIN`; a
+  signal ends the wait (`EINTR`, or the read made again with
+  `SA_RESTART`). Output goes through OPOST's ONLCR to `vt.asm`, and a
+  copy, escape sequences left out, to the serial log a line at a time.
+  `poll`, `ppoll`, `select` and `pselect6` are here too: a terminal is
+  readable when a read would not wait, and writable always, as is every
+  other file.
 - **Threads** (`lxsig.asm`): `clone` with `CLONE_VM | CLONE_THREAD |
   CLONE_SIGHAND` (what `pthread_create` asks for; `clone3` says `ENOSYS`,
   so glibc falls back to it) makes another `TF_LINUX` thread of the task,
@@ -1276,14 +1295,34 @@ text rows.
   WSL's gcc against Ubuntu's glibc) with its sixteen checks of threads,
   futexes and signals, and its ways out (`abort`, an unhandled fault, the
   last thread's exit, `exit` from a thread); ctrl+C on `sleep 60`
-  (SIGINT), and twice on a program that ignores SIGINT.
+  (SIGINT), and ctrl+\ on a program that ignores SIGINT (SIGQUIT);
+  `/test/tty` (`tty.c`) with its checks of the terminal (termios, the
+  size, xterm's answers, the alternate screen, VMIN and VTIME, poll,
+  select, SIGWINCH) and of keys typed (a line edited, arrows, ctrl+C raw
+  and as SIGINT, ctrl+D); `/test/tty draw`, checked row by row through
+  the shell's `screen`; and Ubuntu's `stty`, `tput`, `clear` and `less`
+  through libtinfo and the root's terminfo.
 
-## Terminals: `term.asm`
+## Terminals: `term.asm`, `vt.asm`
 
 - Each shell is a window with a terminal (`TW_*`): 1000 lines of 256 cells
-  (a character and its colour), the cursor, the scroll-back, its own input
-  line and history (`TW_SH_*`, `shell.asm`), and whether a command is still
-  running in it. `+ shell` or `shell` opens one; its close button closes it.
+  (a glyph, its attributes, a foreground and a background colour of 24
+  bits each), the cursor, the scroll-back, its own input line and history
+  (`TW_SH_*`, `shell.asm`), and whether a command is still running in it.
+  `+ shell` or `shell` opens one; its close button closes it. `screen`
+  writes what the window shows to the serial log, as text (for tests).
+- **xterm** (`vt.asm`): what a Linux program writes is read as xterm
+  would: UTF-8 (wide characters take two cells, combining ones none, a
+  character the font lacks drawn as one like it or '?'), cursor movement,
+  erasing, inserting and deleting characters and lines, scroll regions,
+  SGR (bold, dim, italic, underline, inverse, hidden; 16, 256 and 24-bit
+  colours), DEC's line drawing, the alternate screen (1049, 1047, 47),
+  DECCKM, DECAWM, DECTCEM, origin and insert modes, saved cursors, tabs,
+  synchronized output (2026, drawing held back up to 150 ms), and the OSC
+  title, shown as the window's. Questions are answered as typed input:
+  DSR and the cursor's place, DA1, DA2, XTVERSION, DECRQM, the size in
+  cells and pixels, and the OSC colours. Scrolling the main screen keeps
+  its top rows in the scroll-back; a program's end resets the terminal.
 - **Where output goes:** a thread's `TH_CON` names the terminal it prints
   to (`con_target`: if that one is gone, the first shell, else the oldest).
   Work that answers later records its terminal when it starts (a lookup, a

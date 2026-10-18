@@ -324,10 +324,11 @@ lx_proc_exit:
     inc r12d
     jmp .fd
 .closed:
-    mov rdi, [rbx + LP_TTY]
+    mov rdi, [rbx + LP_TTY]             ; its terminal, the shell's again
     test rdi, rdi
     jz .said
-    call ly_flush
+    mov rsi, rbx
+    call ly_end
 .said:
     mov dword [rbx + LP_ENDED], 1
     lea rdi, [rbx + LP_WQ]
@@ -1102,6 +1103,9 @@ lx_spawn:
     test rax, rax
     jz .nomem
     mov [rbp + LP_TTY], rax
+    mov rdi, rax                        ; (its own, in the foreground)
+    mov rsi, rbp
+    call ly_start
     lea rdi, [str_lxp_tty]
     mov rsi, [lx_root]
     xor edx, edx
@@ -1340,7 +1344,7 @@ cmd_linux:
     mov rdi, rbx
     mov rsi, r12
     lea rdx, [lx_env]
-    call con_owner
+    call con_target                     ; its terminal: this window's
     mov rcx, rax
     mov r8, rsp
     call lx_spawn
@@ -1349,7 +1353,7 @@ cmd_linux:
     call kfree
     cmp r13, -4095
     jae .failed
-    call con_owner                      ; what it says goes there
+    call con_target                     ; what it says goes there
     mov [lx_con], rax
     mov byte [lx_ctrl_c], 0
     mov [lx_session], r13               ; (its end, lx_pending, is seen
@@ -2133,14 +2137,15 @@ lx_fault_signals:
 align 8
 ; the environment programs start with
 lx_env:
-    dd 7, lx_env_end - lx_env_strings
+    dd 8, lx_env_end - lx_env_strings
 lx_env_strings:
     db 'PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin', 0
     db 'HOME=/root', 0
     db 'USER=root', 0
     db 'LOGNAME=root', 0
     db 'SHELL=/bin/bash', 0
-    db 'TERM=dumb', 0
+    db 'TERM=xterm-256color', 0
+    db 'COLORTERM=truecolor', 0
     db 'PWD=/', 0
 lx_env_end:
 align 8
@@ -2155,6 +2160,7 @@ lx_calls:
     dq 4, lx_sys_stat
     dq 5, lx_sys_fstat
     dq 6, lx_sys_lstat
+    dq 7, lx_sys_poll
     dq 8, lx_sys_lseek
     dq 9, lx_sys_mmap
     dq 10, lx_sys_mprotect
@@ -2168,6 +2174,7 @@ lx_calls:
     dq 19, lx_sys_readv
     dq 20, lx_sys_writev
     dq 21, lx_sys_access
+    dq 23, lx_sys_select
     dq 24, lx_sys_sched_yield
     dq 25, lx_sys_mremap
     dq 28, lx_sys_madvise
@@ -2182,6 +2189,8 @@ lx_calls:
     dq 62, lx_sys_kill
     dq 63, lx_sys_uname
     dq 72, lx_sys_fcntl
+    dq 74, lx_sys_zero                  ; fsync: nothing is written
+    dq 75, lx_sys_zero                  ; fdatasync
     dq 79, lx_sys_getcwd
     dq 80, lx_sys_chdir
     dq 81, lx_sys_fchdir
@@ -2205,6 +2214,8 @@ lx_calls:
     dq 118, lx_sys_getresuid
     dq 120, lx_sys_getresuid            ; getresgid
     dq 121, lx_sys_getpgrp              ; getpgid
+    dq 122, lx_sys_zero                 ; setfsuid: it was root's
+    dq 123, lx_sys_zero                 ; setfsgid
     dq 124, lx_sys_getpgrp              ; getsid
     dq 127, lx_sys_rt_sigpending
     dq 130, lx_sys_rt_sigsuspend
@@ -2244,6 +2255,8 @@ lx_calls:
     dq 262, lx_sys_newfstatat
     dq 267, lx_sys_readlinkat
     dq 269, lx_sys_faccessat
+    dq 270, lx_sys_pselect6
+    dq 271, lx_sys_ppoll
     dq 273, lx_sys_zero                 ; set_robust_list
     dq 292, lx_sys_dup3
     dq 302, lx_sys_prlimit64

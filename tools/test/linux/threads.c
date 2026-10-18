@@ -5,7 +5,7 @@
  *   threads segv       a fault with no handler: SIGSEGV
  *   threads lastexit   main leaves by pthread_exit, the last thread exits 0
  *   threads exitgroup  a thread calls exit(3) while main waits in a join
- *   threads nointr     SIGINT ignored, then a long sleep: ctrl+C twice stops it
+ *   threads nointr     SIGINT ignored, then a long sleep: ctrl+backslash ends it
  *
  * Built by tools/mkroot.py with WSL's gcc; run by tools/test/linux/run.py.
  */

@@ -1133,18 +1133,18 @@ hid_press:
     push rdx
     cmp eax, 0x39
     je .caps
-    mov edx, KEY_RIGHT
-    cmp eax, 0x4F
-    je .emit
-    mov edx, KEY_LEFT
-    cmp eax, 0x50
-    je .emit
-    mov edx, KEY_DOWN
-    cmp eax, 0x51
-    je .emit
-    mov edx, KEY_UP
-    cmp eax, 0x52
-    je .emit
+    lea rdx, [hid_special]              ; arrows, home, end, F1..F12 and the like
+.special:
+    cmp byte [rdx], 0
+    je .not_special
+    cmp [rdx], al
+    je .found
+    add rdx, 2
+    jmp .special
+.found:
+    movzx edx, byte [rdx + 1]
+    jmp .emit
+.not_special:
     cmp eax, 0x54                       ; keypad
     jb .main
     cmp eax, 0x63
@@ -1162,7 +1162,7 @@ hid_press:
 .lookup:
     movzx edx, byte [rdx + rax - 4]
     cmp eax, 0x1D                       ; letters: caps lock and ctrl
-    ja .emit
+    ja .other
     cmp byte [hid_caps], 0
     je .ctrl
     xor edx, 0x20
@@ -1170,10 +1170,35 @@ hid_press:
     test byte [hid_mods], 0x11
     jz .emit
     and edx, 0x1F
+    jmp .emit
+.other:
+    cmp edx, 9                          ; shift+tab
+    jne .punct
+    test byte [hid_mods], 0x22
+    jz .emit
+    mov edx, KEY_BTAB
+    jmp .emit
+.punct:
+    test byte [hid_mods], 0x11          ; ctrl+[ \ ] ^ _, and ctrl+/ as ctrl+_
+    jz .emit
+    cmp edx, '/'
+    jne .ctrl_punct
+    mov edx, '_'
+.ctrl_punct:
+    cmp edx, '['
+    jb .emit
+    cmp edx, '_'
+    ja .emit
+    and edx, 0x1F
 .emit:
     test edx, edx
     jz .out
     push rax
+    test byte [hid_mods], 0x44          ; alt+key: ESC first
+    jz .push
+    mov al, 27
+    call kbd_push
+.push:
     mov al, dl
     call kbd_push
     pop rax
@@ -1225,6 +1250,15 @@ hid_map_shift:
 ; keypad usages 0x54..0x63
 hid_keypad:
     db '/*-+', 10, '1234567890.'
+; usages that are keys past ASCII, and their codes (kbd.asm)
+hid_special:
+    db 0x4F, KEY_RIGHT, 0x50, KEY_LEFT, 0x51, KEY_DOWN, 0x52, KEY_UP
+    db 0x4A, KEY_HOME, 0x4D, KEY_END, 0x4B, KEY_PGUP, 0x4E, KEY_PGDN
+    db 0x49, KEY_INS, 0x4C, KEY_DEL
+    db 0x3A, KEY_F1, 0x3B, KEY_F1 + 1, 0x3C, KEY_F1 + 2, 0x3D, KEY_F1 + 3
+    db 0x3E, KEY_F1 + 4, 0x3F, KEY_F1 + 5, 0x40, KEY_F1 + 6, 0x41, KEY_F1 + 7
+    db 0x42, KEY_F1 + 8, 0x43, KEY_F1 + 9, 0x44, KEY_F1 + 10, 0x45, KEY_F1 + 11
+    db 0
 
 section .data
 hid_caps:       db 0

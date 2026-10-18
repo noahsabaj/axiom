@@ -21,8 +21,20 @@ and runs in the shell:
     short (EINTR), a join made again (SA_RESTART), sigsuspend; then abort
     (SIGABRT), a fault with no handler (SIGSEGV), the last thread's exit
     after main's pthread_exit, and exit from a thread while main joins;
-  - sleep 60 ended by ctrl+C in the shell (SIGINT), a program ignoring
-    SIGINT stopped by a second ctrl+C, and another program after them.
+  - sleep 60 ended by ctrl+C (SIGINT, the terminal's), a program ignoring
+    SIGINT ended by ctrl+backslash (SIGQUIT), and another program after them;
+  - /test/tty, ours in C (tty.c): the terminal as a program has it, a tty
+    with termios, its size, a process group, xterm's answers to questions
+    (the cursor, wide characters, DA, DECRQM, the size, OSC colors), the
+    alternate screen, VMIN and VTIME, poll, select, O_NONBLOCK, SIGWINCH;
+    then keys typed: a line edited (a backspace), an arrow plain and in
+    DECCKM, ctrl+C raw and as SIGINT, ctrl+D;
+  - /test/tty draw, the screen drawn on with escape sequences (places, SGR,
+    DEC line drawing, deleted and inserted characters, an erased line end,
+    the alternate screen left again, UTF-8, a line wrapped), then the
+    shell's 'screen' saying what the window shows;
+  - Ubuntu's terminal programs, through libtinfo and the root's terminfo:
+    stty size, tput cols, stty -a, clear, and less on a file, left with q.
 Outputs go to build/test/linux/.
 """
 import argparse
@@ -83,9 +95,27 @@ def script():
         "wait 0.3",
         "type echo -- /test/threads nointr\\n", "wait 0.2",
         "type linux /test/threads nointr\\n", "until ignoring SIGINT", "wait 0.5",
-        "sendkey ctrl-c", "wait 1", "sendkey ctrl-c", "until linux: threads stopped",
+        "sendkey ctrl-c", "wait 1", "sendkey ctrl-backslash", "until linux: threads ended",
         "wait 0.3",
         *run("echo again", "echo", "echo exited"),
+        "type echo -- /test/tty\\n", "wait 0.2",
+        "type linux /test/tty\\n", "until tty: press a line", "wait 0.3",
+        "type abx\\x7fc\\n", "until tty: press up", "wait 0.3",
+        "sendkey up", "until tty: press up again", "wait 0.3",
+        "sendkey up", "until tty: press ctrl+C as a byte", "wait 0.3",
+        "sendkey ctrl-c", "until tty: press ctrl+C for SIGINT", "wait 0.3",
+        "sendkey ctrl-c", "until tty: press ctrl+D", "wait 0.3",
+        "sendkey ctrl-d", "until linux: tty exited", "wait 0.3",
+        "type echo -- /test/tty draw\\n", "wait 0.2",
+        "type linux /test/tty draw\\n", "until linux: tty exited", "wait 0.3",
+        "type screen\\n", "until | cursor", "wait 0.3",
+        *run("stty size", "stty", "stty exited"),
+        *run("tput cols", "tput", "tput exited"),
+        *run("stty -a", "stty", "stty exited"),
+        *run("clear", "clear", "clear exited"),
+        "type echo -- less /etc/passwd\\n", "wait 0.2",
+        "type linux less /etc/passwd\\n", "wait 3", "type q", "until linux: less exited",
+        "wait 0.3",
         "type poweroff\\n", "ended",
     ]
 
@@ -145,7 +175,8 @@ def check(log, err):
         result(f"{hashlib.sha256(data).hexdigest()}  {name}" in sums,
                f"sha256sum {name}: as Python has it")
     env = after(log, "env")
-    for var in ("PATH=/usr/local/bin:/usr/bin:/bin", "HOME=/root", "TERM=dumb"):
+    for var in ("PATH=/usr/local/bin:/usr/bin:/bin", "HOME=/root", "TERM=xterm-256color",
+                "COLORTERM=truecolor"):
         result(f"\n{var}" in env, f"env: {var}")
     size = (LINUX / "ROOT" / "usr" / "bin" / "ls").stat().st_size
     result(f"\n{size} /usr/bin/ls\n" in after(log, "wc -c /usr/bin/ls"),
@@ -172,9 +203,46 @@ def check(log, err):
     ended(log, "/test/threads exitgroup", "threads", 3)
     result("linux: sleep ended by signal 2" in after(log, "sleep 60"), "sleep 60: ctrl+C, SIGINT")
     nointr = after(log, "/test/threads nointr")
-    result("linux: threads stopped" in nointr and "not expected" not in nointr,
-           "SIGINT ignored: the second ctrl+C stops it")
+    result("linux: threads ended by signal 3" in nointr and "not expected" not in nointr,
+           "SIGINT ignored: ctrl+backslash ends it (SIGQUIT)")
     result("\nagain\n" in after(log, "echo again"), "a program after them runs")
+    tty = after(log, "/test/tty")
+    for name in ("isatty", "winsize", "termios", "pgrp", "dsr", "cursor", "wide", "da", "decrqm",
+                 "size", "altscreen", "osc", "vmin0", "vtime", "poll", "pollout", "select",
+                 "nonblock", "sigwinch", "line", "arrow", "decckm", "rawctrlc", "sigint", "eof"):
+        m = re.search(rf"^(ok|FAIL) {name}\b.*$", tty, re.M)
+        result(m is not None and m.group(1) == "ok", f"tty: {m.group(0) if m else name + ' not said'}")
+    result("\ntty: all ok\n" in tty, "tty: all ok")
+    ended(log, "/test/tty", "tty", 0)
+    draw = after(log, "/test/tty draw")
+    rows = re.findall(r"^\| ?(.*)$", draw, re.M)
+    rows = [r for r in rows if not r.startswith("cursor ")]
+    want = {3: "    placed at 3,5 red", 5: "┌──┐", 6: "│  │",
+            7: "└──┘", 8: "abef", 9: "x yz", 10: "12",
+            11: "utf8: é ❯ * ● └", 13: "next"}
+    for row, text in ((1, ""), (2, ""), (4, ""), *want.items()):
+        got = rows[row - 1] if len(rows) >= row else None
+        result(got == text, f"tty draw: row {row} {text!r}" + ("" if got == text else f", not {got!r}"))
+    wrap = rows[11] if len(rows) > 11 else ""
+    result(re.fullmatch(r"wrap: \.{30,}", wrap) is not None,
+           f"tty draw: row 12 dots to the edge ({len(wrap)} columns), then wrapped")
+    m = re.search(r"^\| cursor (\d+),(\d+)$", draw, re.M)
+    result(m is not None and int(m.group(1)) > 13, "tty draw: the cursor below what was drawn"
+           + (f" ({m.group(1)},{m.group(2)})" if m else ""))
+    m = re.search(r"^(\d+) (\d+)$", after(log, "stty size"), re.M)
+    size = (int(m.group(1)), int(m.group(2))) if m else None
+    result(size is not None and size[0] > 13 and size[1] > 40, f"stty size: {size}")
+    m = re.search(r"^(\d+)$", after(log, "tput cols"), re.M)
+    result(m is not None and size is not None and int(m.group(1)) == size[1],
+           f"tput cols: {m.group(1) if m else 'nothing'}, as stty has it")
+    sa = after(log, "stty -a")
+    result(size is not None and f"rows {size[0]}; columns {size[1]};" in sa
+           and re.search(r"\bisig icanon\b", sa) is not None and "intr = ^C;" in sa,
+           "stty -a: the size, isig icanon, intr = ^C")
+    ended(log, "clear", "clear", 0)
+    less = after(log, "less /etc/passwd")
+    result("root:x:0:0:root:/root:/bin/bash" in less, "less: the file shown")
+    ended(log, "less /etc/passwd", "less", 0)
     calls = sorted(set(re.findall(r"system call (\d+) is not there yet", log)), key=int)
     print(f"      (calls not there yet: {', '.join(calls) or 'none'})")
     result("AXIOM PANIC" not in log, "no panic")
@@ -188,6 +256,7 @@ def main():
     ap.add_argument("--no-root", action="store_true",
                     help="use build/linux as it is, without WSL")
     opts = ap.parse_args()
+    sys.stdout.reconfigure(errors="backslashreplace")   # (the box drawing, on cp1252)
     OUT.mkdir(parents=True, exist_ok=True)
     if not (opts.no_root and (LINUX / "META").exists()):
         subprocess.run([sys.executable, str(ROOT / "tools" / "mkroot.py")], cwd=ROOT, check=True)

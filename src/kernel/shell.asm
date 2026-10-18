@@ -106,6 +106,13 @@ shell_key:
     pop rax
     test rbx, rbx
     jz .out
+    push rax                            ; a Linux program's, while one has
+    mov rdi, rbx                        ; this terminal (lxtty.asm)
+    mov esi, eax
+    call lt_key
+    test eax, eax
+    pop rax
+    jnz .out
     cmp eax, 3                          ; ctrl+C, always
     je .cancel
     cmp byte [rbx + TW_SH_WAIT], 0
@@ -532,6 +539,7 @@ align 8
 commands:
     COMMAND 'help',     cmd_help,     'this list'
     COMMAND 'shell',    cmd_shell,    'a new shell, in a window of its own'
+    COMMAND 'screen',   cmd_screen,   "what this shell's window shows, as text, to the serial log"
     COMMAND 'win',      cmd_win,      'win [move <n> <x> <y> | size <n> <w> <h> | raise <n> | min <n> | close <n>]: the windows'
     COMMAND 'info',     cmd_info,     'what this machine is'
     COMMAND 'cpus',     cmd_cpus,     'each logical CPU: kind, clock, heat, work'

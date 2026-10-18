@@ -36,10 +36,11 @@ PROGRAMS = [
     "/usr/bin/true", "/usr/bin/false", "/usr/bin/echo", "/usr/bin/cat",
     "/usr/bin/ls", "/usr/bin/uname", "/usr/bin/env", "/usr/bin/wc",
     "/usr/bin/head", "/usr/bin/sha256sum", "/usr/bin/date", "/usr/bin/id",
-    "/usr/bin/sleep",
+    "/usr/bin/sleep", "/usr/bin/stty", "/usr/bin/tput", "/usr/bin/clear", "/usr/bin/less",
 ]
 FILES = ["/etc/ld.so.cache", "/bin", "/lib/x86_64-linux-gnu/libm.so.6",
-         "/lib/x86_64-linux-gnu/libgcc_s.so.1"]
+         "/lib/x86_64-linux-gnu/libgcc_s.so.1", "/usr/share/terminfo/x/xterm-256color",
+         "/usr/share/terminfo/x/xterm", "/usr/share/terminfo/d/dumb"]
 LIBDIRS = ["/lib/x86_64-linux-gnu", "/usr/lib/x86_64-linux-gnu", "/lib64", "/usr/lib64"]
 
 ETC = {
