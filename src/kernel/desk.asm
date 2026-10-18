@@ -1,24 +1,40 @@
 ; =============================================================================
-;  desk.asm - the desktop: windows over a background, a bar along the top.
+;  desk.asm - the desktop: windows over the wallpaper, the menu bar along
+;  the top, the dock along the bottom.
 ;
-;  A window (WN_*) is a frame on the screen around a surface of its own, the
-;  client, which its owner draws into (gfx_target) and then says what changed
-;  (win_damage). What changed on the screen is a list of rectangles;
-;  desk_update composes each one into the back buffer, bottom window to top,
-;  the bar last, and copies it to the screen. Windows overlap, move by their
-;  title bar, resize from the bottom right corner, raise and take the keys
-;  when clicked, and minimise to the bar; the bar has a button for each
-;  window and one for a new shell. All of it runs on the main thread, but
-;  win_damage and desk_damage, which any thread may call.
+;  A window (WN_*) is a title bar over a surface of its own, the client,
+;  which its owner draws into (gfx_target) and then says what changed
+;  (win_damage). It has round corners, a shadow, and three buttons at the
+;  left of its title bar: close, minimise into the dock, and zoom to fill
+;  the screen (or back). It moves by its title bar, is resized from any
+;  edge, raises and takes the keys when clicked; a double click on its
+;  title zooms it.
+;
+;  What changed on the screen is a list of rectangles; desk_update composes
+;  each into the back buffer - the wallpaper, the windows bottom to top,
+;  the dock, the menu bar - and copies it to the screen. The dock is frosted
+;  glass: what is behind it, blurred, so a rectangle that touches it is
+;  composed with all the dock and what the blur reads around it.
+;
+;  The dock: the apps (DOCK_APPS of them, each launched or brought forward
+;  by a click), then programs with windows that are not among them, then,
+;  past a line, the windows minimised, each as a small picture of itself.
+;  A dot under an app says it runs; the pointer over one names it.
+;
+;  The menu bar: Axiom's mark, the name of the app in front, and at the
+;  right what the system is doing and the time.
+;
+;  All of it runs on the main thread, but win_damage and desk_damage,
+;  which any thread may call. Measures are points (theme.asm: pt).
 ; =============================================================================
 
 DESK_MAX        equ 32                  ; windows at once
 DMG_MAX         equ 16                  ; rectangles waiting to be composed
 
-WN_X            equ 0                   ; the frame's top left on the screen
+WN_X            equ 0                   ; the window's top left on the screen
 WN_Y            equ 8
-WN_W            equ 16                  ; the client's size
-WN_H            equ 24
+WN_W            equ 16                  ; the client's size (the window is as
+WN_H            equ 24                  ; wide; its title bar is over it)
 WN_SF           equ 32                  ; SF_SIZE: the client's pixels
 WN_FLAGS        equ 72                  ; dword WF_*
 WN_ID           equ 76                  ; dword: its number in 'win'
@@ -28,13 +44,22 @@ WN_MIN_W        equ 96                  ; the smallest client it takes
 WN_MIN_H        equ 104
 WN_TITLE        equ 112
 WN_TITLE_MAX    equ 160
-WN_SIZE         equ WN_TITLE + WN_TITLE_MAX
+WN_APP          equ WN_TITLE + WN_TITLE_MAX ; whose it is: the app's name
+WN_APP_MAX      equ 32
+WN_THUMB        equ WN_APP + WN_APP_MAX ; SF_SIZE: its picture, minimised
+WN_ICON         equ WN_THUMB + SF_SIZE  ; SF_SIZE: its app's, if not the dock's
+WN_ZX           equ WN_ICON + SF_SIZE   ; where it was before it zoomed
+WN_ZY           equ WN_ZX + 8
+WN_ZW           equ WN_ZX + 16
+WN_ZH           equ WN_ZX + 24
+WN_SIZE         equ WN_ZX + 32
 
 WF_SHOWN        equ 1 << 0              ; not minimised
 WF_CLOSE        equ 1 << 1              ; it has a close button
 WF_RESIZE       equ 1 << 2              ; it may be resized
 WF_CLOSING      equ 1 << 3              ; it goes at the next desk_service
 WF_PROGRAM      equ 1 << 4              ; a program's (its pixels are not ours)
+WF_ZOOMED       equ 1 << 5              ; it fills the screen (WN_Z* is where it was)
 
 OP_PAINT        equ 0                   ; RBX = window: draw the whole client
 OP_KEY          equ 8                   ; RBX, EAX = key code
@@ -51,43 +76,257 @@ P_BAR           equ 1
 P_TITLE         equ 2
 P_CLOSE         equ 3
 P_MIN           equ 4
-P_GRIP          equ 5
+P_GRIP          equ 5                   ; an edge: ECX = which (EDGE_*)
 P_CLIENT        equ 6
 P_FRAME         equ 7
+P_ZOOM          equ 8
+P_DOCK          equ 9                   ; ECX = the item
+
+EDGE_L          equ 1
+EDGE_R          equ 2
+EDGE_T          equ 4
+EDGE_B          equ 8
 
 DRAG_NONE       equ 0
 DRAG_MOVE       equ 1
 DRAG_SIZE       equ 2
 
+; the dock's items
+DOCK_APPS       equ 7
+DOCK_MAX        equ DOCK_APPS + 2 * DESK_MAX
+DI_KIND         equ 0                   ; dword DK_*
+DI_APP          equ 4                   ; dword: which app (DK_APP)
+DI_WIN          equ 8                   ; its window (DK_EXTRA: one of them)
+DI_X            equ 16                  ; where it is
+DI_ICON         equ 24                  ; its picture: a surface
+DI_LABEL        equ 32
+DI_RUN          equ 40                  ; dword: it has windows
+DI_SIZE         equ 48
+DK_APP          equ 0
+DK_EXTRA        equ 1                   ; a program's that is not one of the apps
+DK_MIN          equ 2                   ; a window minimised
+
+APP_TERMINAL    equ 0
+APP_SYSTEM      equ 6
+
+DOUBLE_MS       equ 400                 ; two clicks this close are a double click
+
 section .text
 
 ; -----------------------------------------------------------------------------
-;  desk_init: the frame's measures, the background and the bar
+;  desk_init: the measures, the wallpaper, the menu bar, the dock's icons
 ; -----------------------------------------------------------------------------
 desk_init:
-    mov rax, [ui_line]
-    mov [fr_b], rax
-    mov rax, [title_h]
-    mov [fr_t], rax
-    mov rax, [font_cw]
-    imul rax, rax, 3
-    mov [fr_btn], rax                   ; a title bar button
-    mov rax, [font_ch]
-    mov [fr_grip], rax                  ; the corner that resizes
+    call desk_metrics
+    call desk_looks
     mov byte [desk_ready], 1
+    mov byte [dock_dirty], 1
+    mov qword [dock_hover], -1
     xor edi, edi
     xor esi, esi
     mov rdx, [scr_w]
     mov rcx, [scr_h]
     jmp desk_damage
 
+; desk_metrics: the measures, at this scale. Preserves all.
+desk_metrics:
+    push rax
+    push rdi
+    push rsi
+%macro PT 2                             ; PT var, points
+    mov edi, %2
+    call pt
+    mov [%1], rax
+%endmacro
+%macro PT_EVEN 2
+    mov edi, %2
+    call pt
+    inc rax
+    and rax, -2
+    mov [%1], rax
+%endmacro
+    PT m_bar_h, 24
+    mov rax, [m_bar_h]
+    mov [hdr_h], rax
+    PT fr_t, 28
+    mov rax, [fr_t]
+    mov [title_h], rax
+    mov qword [fr_b], 0
+    PT m_r, 10
+    PT_EVEN m_light, 12
+    PT m_light_x, 8
+    PT m_light_step, 20
+    PT m_grab, 4
+    PT_EVEN m_icon, 48
+    PT m_dock_pad, 5
+    PT m_dock_space, 4
+    PT m_dock_gap, 5
+    PT m_dock_r, 16
+    PT_EVEN m_dot, 4
+    PT m_blur, 10
+    PT m_tip_h, 24
+    PT m_tip_pad, 10
+    PT m_tip_gap, 10
+    PT m_bar_pad, 14
+    PT m_gap, 16
+    PT m_mark, 15
+    mov rax, [m_blur]
+    cmp rax, 64
+    jbe .blur_ok
+    mov qword [m_blur], 64
+.blur_ok:
+    mov rax, [m_icon]
+    add rax, [m_dock_pad]
+    add rax, [m_dock_pad]
+    mov [m_dock_h], rax
+    mov rax, [scr_h]
+    sub rax, [m_dock_gap]
+    sub rax, [m_dock_h]
+    mov [m_dock_y], rax
+    mov edi, 6                          ; windows stop a little above it
+    call pt
+    mov rdi, [m_dock_y]
+    sub rdi, rax
+    mov [m_work_y1], rdi
+    ; shadows: the window with the keys casts the larger
+    mov rax, [m_r]
+    mov [sh_focus + SH_R], rax
+    mov [sh_other + SH_R], rax
+    PT sh_focus + SH_M, 26
+    PT sh_focus + SH_OY, 10
+    PT sh_other + SH_M, 14
+    PT sh_other + SH_OY, 5
+    mov rax, [sh_focus + SH_M]
+    add rax, [sh_focus + SH_OY]
+    mov [fr_sh], rax                    ; how far past a window it draws
+    ; fonts
+    mov edi, 13
+    call pt
+    mov edi, eax
+    mov esi, UF_REGULAR
+    call uf_size
+    mov [f_body], eax
+    mov esi, UF_SEMIBOLD
+    call uf_size
+    mov [f_title], eax
+    push rdi
+    mov edi, 11
+    call pt
+    mov edi, eax
+    mov esi, UF_REGULAR
+    call uf_size
+    mov [f_small], eax
+    pop rdi
+    pop rsi
+    pop rdi
+    pop rax
+    ret
+
+; desk_looks: what the theme makes: the wallpaper, the menu bar's glass,
+; the shadows, the icons, the pointer. Preserves RBX, RBP, R12-R15.
+desk_looks:
+    call wall_make
+    call bar_make
+    mov eax, [th_c + TC_SHADOW_A]
+    mov [sh_focus + SH_A], eax
+    mov eax, [th_c + TC_SHADOW2_A]
+    mov [sh_other + SH_A], eax
+    lea rdi, [sh_focus]
+    call shadow_build
+    lea rdi, [sh_other]
+    call shadow_build
+    call icons_make
+    call cursor_make
+    ret
+
+; desk_restyle: the theme or the scale changed: everything again
+desk_restyle:
+    cmp byte [desk_ready], 0
+    je .out
+    push rbx
+    push r12
+    call desk_metrics
+    call desk_looks
+    xor r12d, r12d                      ; each window: its new measures,
+.each:                                  ; painted again
+    lea rax, [desk_wins]
+    mov rbx, [rax + r12 * 8]
+    test rbx, rbx
+    jz .next
+    lea rdi, [rbx + WN_ICON]            ; its icon is made again when needed
+    call sf_free
+    lea rdi, [rbx + WN_THUMB]
+    call sf_free
+    test dword [rbx + WN_FLAGS], WF_SHOWN
+    jnz .fit
+    mov rdi, rbx
+    call win_thumb
+.fit:
+    mov rdi, rbx
+    mov rsi, [rbx + WN_W]
+    mov rdx, [rbx + WN_H]
+    call win_fit
+.next:
+    inc r12
+    cmp r12, DESK_MAX
+    jb .each
+    mov byte [dock_dirty], 1
+    xor edi, edi
+    xor esi, esi
+    mov rdx, [scr_w]
+    mov rcx, [scr_h]
+    call desk_damage
+    pop r12
+    pop rbx
+.out:
+    ret
+
+; bar_make: the menu bar's glass: the wallpaper under it, blurred and tinted
+bar_make:
+    push rbx
+    mov rbx, [m_blur]
+    imul rbx, rbx, 3
+    add rbx, [m_bar_h]                  ; the rows the blur reads
+    cmp rbx, [scr_h]
+    jbe .rows
+    mov rbx, [scr_h]
+.rows:
+    lea rdi, [bar_sf]
+    mov rsi, [scr_w]
+    mov rdx, rbx
+    call sf_size
+    jc .out
+    mov rsi, [wall_sf + SF_PTR]
+    mov rdi, [bar_sf + SF_PTR]
+    mov rcx, [wall_sf + SF_PITCH]
+    imul rcx, rbx
+    shr rcx, 2
+    rep movsd
+    lea rdi, [bar_sf]
+    call gfx_target
+    xor edi, edi
+    xor esi, esi
+    mov rdx, [scr_w]
+    mov rcx, [m_bar_h]
+    xor r8d, r8d
+    mov r9, [m_blur]
+    call gfx_frost
+    mov r8d, [th_c + TC_BAR]
+    mov r9d, [th_c + TC_BAR_A]
+    call gfx_fill_a
+    call gfx_target_back
+.out:
+    pop rbx
+    ret
+
 ; -----------------------------------------------------------------------------
 ;  Windows
 ; -----------------------------------------------------------------------------
 
 ; win_new(RDI = handlers, RSI = title, RDX = width, RCX = height of the
-; client, R8 = x, R9 = y of the frame (x = -1: placed for it), R10D = WF_*)
-; -> RAX = the window, 0 if there is no room. It is on top, not focused.
+; client, R8 = x, R9 = y of the window (x = -1: placed for it), R10D = WF_*,
+; R11 = its app's name, 0: the title) -> RAX = the window, 0 if there is no
+; room. It is on top, not focused.
 win_new:
     push rbx
     push r12
@@ -101,15 +340,25 @@ win_new:
     push r8
     push r9
     push r10
+    push r11
     mov edi, WN_SIZE
     call kmalloc
+    pop r11
     pop r10
     pop r9
     pop r8
     test rax, rax
     jz .out
     mov rbx, rax
-    xor ecx, ecx                        ; a slot in the bar
+    push rdi                            ; all of it zero to begin with
+    push rcx
+    mov rdi, rbx
+    mov ecx, WN_SIZE
+    xor eax, eax
+    rep stosb
+    pop rcx
+    pop rdi
+    xor ecx, ecx                        ; a slot
 .slot:
     lea rdx, [desk_wins]
     cmp qword [rdx + rcx * 8], 0
@@ -143,16 +392,23 @@ win_new:
     mov rdi, rbx
     mov rsi, r13
     call win_title_set
+    test r11, r11
+    jnz .app
+    mov r11, r13
+.app:
+    mov rsi, r11
+    call win_app_set
     cmp r8, -1                          ; cascade from the top left
     jne .placed
     mov rax, [desk_next_id]
     and eax, 7
-    imul rax, [title_h]
-    mov r8, [font_cw]
-    imul r8, r8, 4
+    imul rax, [fr_t]
+    mov r8, [m_gap]
+    imul r8, r8, 6
     add r8, rax
-    mov r9, [hdr_h]
-    add r9, [font_ch]
+    mov r9, [m_bar_h]
+    add r9, [m_gap]
+    add r9, [m_gap]
     add r9, rax
 .placed:
     mov [rbx + WN_X], r8
@@ -168,6 +424,7 @@ win_new:
     mov rdi, rbx
     call win_damage_whole
     call desk_bar_damage
+    mov byte [dock_dirty], 1
     mov rax, rbx
 .out:
     pop r15
@@ -200,6 +457,29 @@ win_title_set:
     pop rax
     ret
 
+; win_app_set(RDI = window, RSI = its app's name). Preserves all.
+win_app_set:
+    push rax
+    push rcx
+    push rsi
+    push rdi
+    lea rdi, [rdi + WN_APP]
+    mov ecx, WN_APP_MAX - 1
+.copy:
+    lodsb
+    test al, al
+    jz .end
+    stosb
+    dec ecx
+    jnz .copy
+.end:
+    mov byte [rdi], 0
+    pop rdi
+    pop rsi
+    pop rcx
+    pop rax
+    ret
+
 ; win_title(RDI = window, RSI = title): a new title, shown. Preserves all.
 win_title:
     call win_title_set
@@ -207,7 +487,7 @@ win_title:
     jmp desk_bar_damage
 
 ; win_fit(RDI = window, RSI = width, RDX = height): the client that size, as
-; far as the screen and the window's least allow; the frame kept on the
+; far as the screen and the window's least allow; the window kept on the
 ; screen; then painted. Preserves RBX, RBP, R12-R15.
 win_fit:
     push rbx
@@ -225,17 +505,13 @@ win_fit:
     mov r13, [rbx + WN_MIN_H]
 .h_min:
     mov rax, [scr_w]                    ; at most the screen
-    sub rax, [fr_b]
-    sub rax, [fr_b]
     cmp r12, rax
     jle .w_max
     mov r12, rax
 .w_max:
     mov rax, [scr_h]
-    sub rax, [hdr_h]
+    sub rax, [m_bar_h]
     sub rax, [fr_t]
-    sub rax, [fr_b]
-    sub rax, [fr_b]
     cmp r13, rax
     jle .h_max
     mov r13, rax
@@ -268,7 +544,7 @@ win_fit:
     pop rbx
     ret
 
-; win_place(RDI = window, RSI = x, RDX = y): the frame there, as far as its
+; win_place(RDI = window, RSI = x, RDX = y): the window there, as far as its
 ; title bar stays reachable. Preserves all.
 win_place:
     push rax
@@ -276,8 +552,8 @@ win_place:
     push rdx
     push rsi
     call win_outer_w
-    mov rcx, [font_cw]                  ; at least 6 columns of the title
-    imul rcx, rcx, 6                    ; bar on the screen
+    mov rcx, [m_gap]                    ; at least some of the title bar on
+    imul rcx, rcx, 3                    ; the screen
     neg rax
     add rax, rcx
     cmp rsi, rax
@@ -290,13 +566,12 @@ win_place:
     jle .right
     mov rsi, rax
 .right:
-    cmp rdx, [hdr_h]                    ; under the bar
+    cmp rdx, [m_bar_h]                  ; under the bar
     jge .top
-    mov rdx, [hdr_h]
+    mov rdx, [m_bar_h]
 .top:
     mov rax, [scr_h]
     sub rax, [fr_t]
-    sub rax, [fr_b]
     cmp rdx, rax
     jle .bottom
     mov rdx, rax
@@ -309,37 +584,40 @@ win_place:
     pop rax
     ret
 
-; win_outer_w(RDI) -> RAX = the frame's width
+; win_outer_w(RDI) -> RAX = the window's width
 win_outer_w:
     mov rax, [rdi + WN_W]
-    add rax, [fr_b]
-    add rax, [fr_b]
     ret
 
-; win_outer(RDI = window) -> RDI x, RSI y, RDX w, RCX h of the frame.
+; win_outer(RDI = window) -> RDI x, RSI y, RDX w, RCX h of the window.
 ; Preserves others but RAX.
 win_outer:
     mov rsi, [rdi + WN_Y]
     mov rdx, [rdi + WN_W]
-    add rdx, [fr_b]
-    add rdx, [fr_b]
     mov rcx, [rdi + WN_H]
     add rcx, [fr_t]
-    add rcx, [fr_b]
-    add rcx, [fr_b]
     mov rdi, [rdi + WN_X]
+    ret
+
+; win_extent(RDI = window) -> RDI x, RSI y, RDX w, RCX h of all it draws,
+; its shadow too. Preserves others but RAX.
+win_extent:
+    call win_outer
+    mov rax, [fr_sh]
+    sub rdi, rax
+    sub rsi, rax
+    lea rdx, [rdx + rax * 2]
+    lea rcx, [rcx + rax * 2]
     ret
 
 ; win_client(RDI = window) -> RDI x, RSI y, RDX w, RCX h of the client on
 ; the screen. Preserves others.
 win_client:
     mov rsi, [rdi + WN_Y]
-    add rsi, [fr_b]
     add rsi, [fr_t]
     mov rdx, [rdi + WN_W]
     mov rcx, [rdi + WN_H]
     mov rdi, [rdi + WN_X]
-    add rdi, [fr_b]
     ret
 
 ; win_damage(RDI = window, RSI = x, RDX = y, RCX = w, R8 = h in the client):
@@ -352,9 +630,7 @@ win_damage:
     push rdx
     push rcx
     add rsi, [rdi + WN_X]
-    add rsi, [fr_b]
     add rdx, [rdi + WN_Y]
-    add rdx, [fr_b]
     add rdx, [fr_t]
     mov rdi, rsi
     mov rsi, rdx
@@ -385,14 +661,14 @@ win_damage_all:
     pop rsi
     ret
 
-; win_damage_whole(RDI = window): the frame and all in it. Preserves all.
+; win_damage_whole(RDI = window): it, its shadow and all in it. Preserves all.
 win_damage_whole:
     push rax
     push rdi
     push rsi
     push rdx
     push rcx
-    call win_outer
+    call win_extent
     call desk_damage
     pop rcx
     pop rdx
@@ -410,7 +686,6 @@ win_damage_frame:
     push rcx
     call win_outer
     mov rcx, [fr_t]
-    add rcx, [fr_b]
     call desk_damage
     pop rcx
     pop rdx
@@ -443,6 +718,70 @@ win_resize:
     mov rdi, rbx
     call win_damage_whole
     pop rbx
+.out:
+    ret
+
+; win_set_rect(RDI = window, RSI = x, RDX = y, RCX = width, R8 = height):
+; moved and resized at once. Preserves RBX, RBP, R12-R15.
+win_set_rect:
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rcx
+    mov r13, r8
+    call win_damage_whole
+    mov [rbx + WN_X], rsi
+    mov [rbx + WN_Y], rdx
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    test dword [rbx + WN_FLAGS], WF_RESIZE
+    jz .placed
+    call win_fit
+    jmp .shown
+.placed:
+    mov rsi, [rbx + WN_X]
+    mov rdx, [rbx + WN_Y]
+    call win_place
+.shown:
+    mov rdi, rbx
+    call win_damage_whole
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+; win_zoom(RDI = window): to fill the screen between the bar and the dock,
+; or back to where it was. Preserves RBX, RBP, R12-R15.
+win_zoom:
+    test dword [rdi + WN_FLAGS], WF_RESIZE
+    jz .out
+    test dword [rdi + WN_FLAGS], WF_ZOOMED
+    jnz .back
+    mov rax, [rdi + WN_X]               ; where it was
+    mov [rdi + WN_ZX], rax
+    mov rax, [rdi + WN_Y]
+    mov [rdi + WN_ZY], rax
+    mov rax, [rdi + WN_W]
+    mov [rdi + WN_ZW], rax
+    mov rax, [rdi + WN_H]
+    mov [rdi + WN_ZH], rax
+    or dword [rdi + WN_FLAGS], WF_ZOOMED
+    xor esi, esi
+    mov rdx, [m_bar_h]
+    mov rcx, [scr_w]
+    mov r8, [m_work_y1]
+    sub r8, rdx
+    sub r8, [fr_t]
+    jmp win_set_rect
+.back:
+    and dword [rdi + WN_FLAGS], ~WF_ZOOMED
+    mov rsi, [rdi + WN_ZX]
+    mov rdx, [rdi + WN_ZY]
+    mov rcx, [rdi + WN_ZW]
+    mov r8, [rdi + WN_ZH]
+    jmp win_set_rect
 .out:
     ret
 
@@ -504,8 +843,8 @@ win_focus:
     test rax, rax
     jz .old_done
     push rdi
-    mov rdi, rax
-    call win_damage_frame
+    mov rdi, rax                        ; its shadow and title change too
+    call win_damage_whole
     pop rdi
 .old_done:
     mov [desk_focus], rdi
@@ -514,21 +853,29 @@ win_focus:
     test dword [rdi + WN_FLAGS], WF_SHOWN
     jnz .shown
     or dword [rdi + WN_FLAGS], WF_SHOWN
+    push rdi
+    lea rdi, [rdi + WN_THUMB]           ; out of the dock
+    call sf_free
+    pop rdi
+    mov byte [dock_dirty], 1
 .shown:
     call win_raise
     call win_damage_whole
 .done:
     call desk_bar_damage
+    mov byte [dock_dirty], 1
     pop rdi
     pop rax
     ret
 
-; win_minimise(RDI = window): off the screen, still in the bar. Preserves all.
+; win_minimise(RDI = window): off the screen, into the dock. Preserves all.
 win_minimise:
     test dword [rdi + WN_FLAGS], WF_SHOWN
     jz .out
     call win_damage_whole
+    call win_thumb
     and dword [rdi + WN_FLAGS], ~WF_SHOWN
+    mov byte [dock_dirty], 1
     cmp rdi, [desk_focus]
     jne .bar
     push rdi
@@ -641,7 +988,7 @@ win_destroy:
 .last:
     dec qword [desk_zn]
 .unstacked:
-    xor ecx, ecx                        ; and out of the bar
+    xor ecx, ecx                        ; and out of the list
     lea rdx, [desk_wins]
 .slot:
     cmp [rdx + rcx * 8], rbx
@@ -660,6 +1007,10 @@ win_destroy:
     jne .no_press
     mov qword [press_win], 0
 .no_press:
+    cmp rbx, [hover_win]
+    jne .no_hover
+    mov qword [hover_win], 0
+.no_hover:
     cmp rbx, [desk_focus]
     jne .no_focus
     mov qword [desk_focus], 0
@@ -672,8 +1023,13 @@ win_destroy:
     lea rdi, [rbx + WN_SF]
     call sf_free
 .pixels_theirs:
+    lea rdi, [rbx + WN_THUMB]
+    call sf_free
+    lea rdi, [rbx + WN_ICON]
+    call sf_free
     mov rdi, rbx
     call kfree
+    mov byte [dock_dirty], 1
     jmp desk_bar_damage
 
 ; win_by_id(EDI = number) -> RAX = the window, 0 if none. Preserves others.
@@ -698,6 +1054,184 @@ win_by_id:
 .out:
     pop rdx
     pop rcx
+    ret
+
+; win_thumb(RDI = window): its picture for the dock, from its client.
+; Preserves all.
+win_thumb:
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    mov rbx, rdi
+    cmp qword [rbx + WN_SF + SF_PTR], 0
+    je .out
+    mov rax, [rbx + WN_W]               ; the picture: the icon's size, its
+    mov rcx, [rbx + WN_H]               ; sides as the window's
+    add rcx, [fr_t]
+    test rax, rax
+    jz .out
+    mov r12, [m_icon]                   ; width
+    mov r13, [m_icon]                   ; height
+    cmp rax, rcx
+    jae .wide
+    mov rax, [m_icon]                   ; taller: width = icon * w / h
+    imul rax, [rbx + WN_W]
+    xor edx, edx
+    div rcx
+    mov r12, rax
+    jmp .sized
+.wide:
+    mov rax, [m_icon]                   ; wider: height = icon * h / w
+    imul rax, rcx
+    xor edx, edx
+    div qword [rbx + WN_W]
+    mov r13, rax
+.sized:
+    cmp r12, 4
+    jb .out
+    cmp r13, 4
+    jb .out
+    lea rdi, [rbx + WN_THUMB]
+    mov rsi, r12
+    mov rdx, r13
+    call img_new
+    jc .out
+    ; its title bar's share, in the title bar's color
+    mov rax, [fr_t]
+    imul rax, r13
+    mov rcx, [rbx + WN_H]
+    add rcx, [fr_t]
+    xor edx, edx
+    div rcx
+    mov r14, rax                        ; rows of title bar
+    ; each pixel: the client's pixel at the middle of where it falls
+    xor r9d, r9d                        ; y
+.row:
+    cmp r9, r13
+    jae .shape
+    mov rdi, r9
+    imul rdi, [rbx + WN_THUMB + SF_PITCH]
+    add rdi, [rbx + WN_THUMB + SF_PTR]
+    cmp r9, r14
+    jb .title_row
+    mov rax, r9                         ; the client's row
+    sub rax, r14
+    shl rax, 1
+    inc rax
+    imul rax, [rbx + WN_H]
+    mov rcx, r13
+    sub rcx, r14
+    shl rcx, 1
+    jz .next_row
+    xor edx, edx
+    div rcx
+    cmp rax, [rbx + WN_SF + SF_H]
+    jae .next_row
+    imul rax, [rbx + WN_SF + SF_PITCH]
+    mov r15, rax
+    add r15, [rbx + WN_SF + SF_PTR]
+    xor r8d, r8d                        ; x
+.col:
+    cmp r8, r12
+    jae .next_row
+    lea rax, [r8 * 2 + 1]
+    imul rax, [rbx + WN_W]
+    mov rcx, r12
+    shl rcx, 1
+    xor edx, edx
+    div rcx
+    cmp rax, [rbx + WN_SF + SF_W]
+    jae .col_next
+    mov eax, [r15 + rax * 4]
+    or eax, 0xFF000000
+    mov [rdi + r8 * 4], eax
+.col_next:
+    inc r8
+    jmp .col
+.title_row:
+    mov eax, [th_c + TC_TITLE]
+    or eax, 0xFF000000
+    mov rcx, r12
+    rep stosd
+.next_row:
+    inc r9
+    jmp .row
+.shape:
+    ; round corners: what is outside them, clear
+    lea rdi, [rbx + WN_THUMB]
+    call gfx_target
+    mov edi, 4
+    call pt
+    mov r10, rax
+    xor edi, edi
+    xor esi, esi
+    mov rdx, r12
+    mov rcx, r13
+    call img_round
+    call gfx_target_back
+.out:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+    ret
+
+; img_round(RDI x, RSI y, RDX w, RCX h, R10 = radius): the target's pixels
+; outside the rounded rectangle's corners faded out by how much is outside.
+; Preserves all.
+img_round:
+    push rbx
+    push r11
+    lea rbx, [span_round]
+    mov r11d, RC_ALL
+    call rr_walk
+    pop r11
+    pop rbx
+    ret
+
+; span_round: rr_walk's span: each pixel kept by its coverage
+span_round:
+    test rsi, rsi
+    jz .out
+    push rbx
+.px:
+    movzx eax, byte [rsi]
+    add rsi, rdx
+    cmp eax, 255
+    je .next
+    mov ebx, eax
+    shr ebx, 7
+    add ebx, eax
+    mov eax, [rdi]
+    SCALE eax, ebx, r10d
+    mov [rdi], eax
+.next:
+    add rdi, 4
+    dec rcx
+    jnz .px
+    pop rbx
+.out:
     ret
 
 ; -----------------------------------------------------------------------------
@@ -831,12 +1365,19 @@ gfx_clip_screen_signed:
 ; desk_pending -> ZF clear if there is something to compose. Preserves all.
 desk_pending:
     cmp qword [dmg_n], 0
+    jne .out
+    cmp byte [dock_dirty], 0
+.out:
     ret
 
 ; desk_update: compose what changed and show it (main thread)
 desk_update:
     cmp byte [desk_ready], 0
     je .out
+    cmp byte [dock_dirty], 0
+    je .laid
+    call dock_layout
+.laid:
     cmp qword [dmg_n], 0
     jne .work
 .out:
@@ -872,6 +1413,7 @@ desk_update:
     sub rdx, rdi
     mov rcx, [rax + 24]
     sub rcx, rsi
+    call desk_glass                     ; all the glass it touches, with it
     call desk_compose
     inc rbx
     jmp .rect
@@ -879,6 +1421,61 @@ desk_update:
     add rsp, DMG_MAX * 32
     pop r12
     pop rbx
+    ret
+
+; desk_glass(RDI x, RSI y, RDX w, RCX h) -> the rectangle grown to hold all
+; of the dock and what its blur reads, if it touches that. Preserves others.
+desk_glass:
+    push r8
+    push r9
+    push r10
+    push r11
+    mov rax, [m_blur]
+    imul rax, rax, 3
+    mov r8, [dock_x]                    ; the dock and its margin
+    sub r8, rax
+    mov r9, [m_dock_y]
+    sub r9, rax
+    mov r10, [dock_x]
+    add r10, [dock_w]
+    add r10, rax
+    mov r11, [scr_h]
+    cmp qword [dock_w], 0
+    je .out
+    lea rax, [rdi + rdx]                ; does it touch?
+    cmp rax, r8
+    jle .out
+    cmp rdi, r10
+    jge .out
+    lea rax, [rsi + rcx]
+    cmp rax, r9
+    jle .out
+    add rdx, rdi                        ; to edges, then the union
+    add rcx, rsi
+    cmp rdi, r8
+    jle .x0
+    mov rdi, r8
+.x0:
+    cmp rsi, r9
+    jle .y0
+    mov rsi, r9
+.y0:
+    cmp rdx, r10
+    jge .x1
+    mov rdx, r10
+.x1:
+    cmp rcx, r11
+    jge .y1
+    mov rcx, r11
+.y1:
+    sub rdx, rdi
+    sub rcx, rsi
+    call gfx_clip_screen_signed
+.out:
+    pop r11
+    pop r10
+    pop r9
+    pop r8
     ret
 
 ; desk_compose(RDI x, RSI y, RDX w, RCX h): that part of the screen, again
@@ -894,18 +1491,17 @@ desk_compose:
     mov r15, rcx
     call gfx_target_back
     call gfx_set_clip
-    mov r8d, COL_BG                     ; the background
-    call gfx_fill
+    call wall_draw                      ; the wallpaper
     xor ebx, ebx                        ; windows, bottom to top
 .window:
     cmp rbx, [desk_zn]
-    jae .bar
+    jae .dock
     lea rax, [desk_z]
     mov rdi, [rax + rbx * 8]
     test dword [rdi + WN_FLAGS], WF_SHOWN
     jz .next
     push rdi
-    call win_outer                      ; does it reach the rectangle?
+    call win_extent                     ; does it reach the rectangle?
     lea rax, [rdi + rdx]
     cmp rax, r12
     jle .skip
@@ -920,17 +1516,22 @@ desk_compose:
     jge .skip
     pop rdi
     call desk_frame
-    call desk_copy
     jmp .next
 .skip:
     pop rdi
 .next:
     inc rbx
     jmp .window
-.bar:
-    cmp r13, [hdr_h]
+.dock:
+    lea rax, [r13 + r15]                ; the dock, if it is in it
+    cmp rax, [m_dock_y]
+    jle .tip
+    call dock_paint
+.tip:
+    call tip_paint
+    cmp r13, [m_bar_h]                  ; the menu bar
     jge .shown
-    call desk_bar_paint
+    call bar_paint
 .shown:
     call gfx_target_back                ; the clip off again
     mov rdi, r12
@@ -945,8 +1546,76 @@ desk_compose:
     pop rbx
     ret
 
-; desk_frame(RDI = window): its border and title bar into the back buffer.
-; Preserves RDI.
+; wall_draw: the wallpaper, within the clip
+wall_draw:
+    push rax
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    mov rdi, [tg_cx0]
+    mov rsi, [tg_cy0]
+    mov rdx, [tg_cx1]
+    sub rdx, rdi
+    jle .out
+    mov rcx, [tg_cy1]
+    sub rcx, rsi
+    jle .out
+    cmp qword [wall_sf + SF_PTR], 0
+    je .plain
+    lea r8, [wall_sf]
+    call sf_copy_rows
+    jmp .out
+.plain:
+    mov r8d, COL_BG
+    call gfx_fill
+.out:
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rax
+    ret
+
+; sf_copy_rows(RDI x, RSI y, RDX w, RCX h, R8 = a surface the screen's
+; size): that part of it into the target at the same place. Preserves all.
+sf_copy_rows:
+    push rax
+    push rcx
+    push rsi
+    push rdi
+    push r9
+    push r10
+    mov r9, rsi
+    imul r9, [r8 + SF_PITCH]
+    lea r9, [r9 + rdi * 4]
+    add r9, [r8 + SF_PTR]               ; from
+    mov r10, rsi
+    imul r10, [tg_pitch]
+    lea r10, [r10 + rdi * 4]
+    add r10, [tg_ptr]                   ; to
+    mov rax, rcx
+.row:
+    mov rsi, r9
+    mov rdi, r10
+    mov rcx, rdx
+    rep movsd
+    add r9, [r8 + SF_PITCH]
+    add r10, [tg_pitch]
+    dec rax
+    jnz .row
+    pop r10
+    pop r9
+    pop rdi
+    pop rsi
+    pop rcx
+    pop rax
+    ret
+
+; desk_frame(RDI = window): its shadow, title bar, buttons, title, client
+; and outline into the back buffer, within the clip. Preserves RDI.
 desk_frame:
     push rbx
     push r12
@@ -959,122 +1628,74 @@ desk_frame:
     mov r13, rsi
     mov r14, rdx
     mov r15, rcx
-    mov r8d, COL_LINE                   ; the border
-    call gfx_fill
+    lea r8, [sh_other]                  ; its shadow
+    cmp rbx, [desk_focus]
+    jne .shadow
+    lea r8, [sh_focus]
+.shadow:
+    call gfx_shadow
     mov rdi, r12                        ; the title bar
-    add rdi, [fr_b]
     mov rsi, r13
-    add rsi, [fr_b]
     mov rdx, r14
-    sub rdx, [fr_b]
-    sub rdx, [fr_b]
     mov rcx, [fr_t]
-    mov r8d, COL_PANEL
+    mov r8d, [th_c + TC_TITLE_OFF]
     cmp rbx, [desk_focus]
     jne .bar_color
-    mov r8d, COL_PANEL2
+    mov r8d, [th_c + TC_TITLE]
 .bar_color:
-    call gfx_fill
-    cmp rbx, [desk_focus]               ; the accent mark of the focused one
-    jne .title
-    mov rdi, r12
-    add rdi, [fr_b]
+    mov r9d, 256
+    mov r10, [m_r]
+    mov r11d, RC_TOP
+    cmp qword [rbx + WN_H], 0
+    jne .bar
+    mov r11d, RC_ALL
+.bar:
+    call gfx_rrect
+    mov rdi, r12                        ; the line under it
     mov rsi, r13
-    add rsi, [fr_b]
-    mov rdx, [ui_line]
-    imul rdx, rdx, 3
-    mov rcx, [fr_t]
-    mov r8d, COL_ACCENT
-    call gfx_fill
-.title:
-    mov rax, [fr_t]                     ; text row, centred in the bar
-    sub rax, [font_ch]
-    sar rax, 1
-    add rax, r13
-    add rax, [fr_b]
-    mov [frame_ty], rax
-    mov rax, r14                        ; columns for the title: all but
-    sub rax, [fr_btn]                   ; the buttons and a margin
-    sub rax, [fr_btn]
-    sub rax, [font_cw]
-    sub rax, [font_cw]
-    cqo
-    idiv qword [font_cw]
-    test rax, rax
-    jle .buttons
-    mov r9, rax
-    mov rdi, r12
-    add rdi, [font_cw]
-    mov rsi, [frame_ty]
-    lea rdx, [rbx + WN_TITLE]
-    mov ecx, COL_DIM
-    mov r8d, COL_PANEL
-    cmp rbx, [desk_focus]
-    jne .title_text
-    mov ecx, COL_TEXT
-    mov r8d, COL_PANEL2
-.title_text:
-    call ui_text_max
-.buttons:
-    mov r15d, COL_PANEL                 ; right to left: close, minimise
-    cmp rbx, [desk_focus]
-    jne .btn_bg
-    mov r15d, COL_PANEL2
-.btn_bg:
-    mov rdi, r12
-    add rdi, r14
-    sub rdi, [fr_b]
-    test dword [rbx + WN_FLAGS], WF_CLOSE
-    jz .minimise
-    sub rdi, [fr_btn]
-    mov rdx, [font_cw]                  ; the glyph, in the middle
-    add rdx, rdi
-    mov rsi, [frame_ty]
-    push rdi
-    mov rdi, rdx
-    lea rdx, [str_btn_close]
-    mov ecx, COL_DIM
-    mov r8d, r15d
-    call ui_text
-    pop rdi
-.minimise:
-    sub rdi, [fr_btn]
-    mov rdx, [font_cw]
-    add rdx, rdi
-    mov rsi, [frame_ty]
-    mov rdi, rdx
-    lea rdx, [str_btn_min]
-    mov ecx, COL_DIM
-    mov r8d, r15d
-    call ui_text
-    test dword [rbx + WN_FLAGS], WF_RESIZE
-    jz .done
-    mov rdi, rbx                        ; the grip: two marks in the corner
+    add rsi, [fr_t]
+    dec rsi
+    mov rdx, r14
+    mov ecx, 1
+    mov r8d, [th_c + TC_SEP]
+    mov r9d, 160
+    call gfx_fill_a
+    call frame_buttons
+    call frame_title
+    ; the client, its bottom corners round
+    cmp qword [rbx + WN_SF + SF_PTR], 0
+    je .outline
+    mov rdi, rbx
     call win_client
-    add rdi, rdx
-    add rsi, rcx
-    mov rax, [ui_line]
-    imul rax, rax, 2
-    sub rdi, rax
-    sub rsi, rax
-    mov r12, rdi
-    mov r13, rsi
-    mov rax, [fr_grip]
-    shr rax, 1
-    sub rdi, rax
+    mov [span_sf], rbx                  ; (WN_SF is at WN_SF: a surface)
+    add qword [span_sf], WN_SF
+    mov [span_x], rdi
+    mov [span_y], rsi
+    mov rax, [rbx + WN_SF + SF_W]       ; no more than its pixels
+    cmp rdx, rax
+    jbe .w
     mov rdx, rax
-    mov rcx, [ui_line]
-    mov r8d, COL_FAINT
-    call gfx_fill
+.w:
+    mov rax, [rbx + WN_SF + SF_H]
+    cmp rcx, rax
+    jbe .h
+    mov rcx, rax
+.h:
+    mov r10, [m_r]
+    mov r11d, RC_BOTTOM
+    push rbx
+    lea rbx, [span_copy]
+    call rr_walk
+    pop rbx
+.outline:
     mov rdi, r12
     mov rsi, r13
-    mov rax, [fr_grip]
-    shr rax, 1
-    sub rsi, rax
-    mov rdx, [ui_line]
-    mov rcx, rax
-    call gfx_fill
-.done:
+    mov rdx, r14
+    mov rcx, r15
+    mov r8d, [th_c + TC_EDGE]
+    mov r9d, [th_c + TC_EDGE_A]
+    mov r10, [m_r]
+    call gfx_rring
     mov rdi, rbx
     pop r15
     pop r14
@@ -1083,50 +1704,292 @@ desk_frame:
     pop rbx
     ret
 
-; desk_copy(RDI = window): its client into the back buffer, within the clip.
-; Preserves RDI.
-desk_copy:
+; frame_buttons (RBX = window, R12, R13 = its top left): close, minimise,
+; zoom; colored on the window with the keys or under the pointer
+frame_buttons:
+    push r14
+    push r15
+    xor r14d, r14d                      ; which
+.each:
+    cmp r14, 3
+    jae .out
+    mov rdi, r14                        ; RDI, RSI = its box
+    imul rdi, [m_light_step]
+    add rdi, r12
+    add rdi, [m_light_x]
+    mov rsi, [fr_t]
+    sub rsi, [m_light]
+    sar rsi, 1
+    add rsi, r13
+    lea rax, [light_colors]
+    mov r8d, [rax + r14 * 4]
+    cmp rbx, [desk_focus]
+    je .lit
+    cmp rbx, [hover_win]
+    je .lit
+    mov r8d, [th_c + TC_LIGHT_OFF]
+.lit:
+    cmp r14, 2                          ; no zoom for a window of one size
+    jne .able
+    test dword [rbx + WN_FLAGS], WF_RESIZE
+    jnz .able
+    mov r8d, [th_c + TC_LIGHT_OFF]
+.able:
+    test r14, r14                       ; nor a close without its button
+    jnz .draw
+    test dword [rbx + WN_FLAGS], WF_CLOSE
+    jnz .draw
+    mov r8d, [th_c + TC_LIGHT_OFF]
+.draw:
+    mov rdx, [m_light]
+    mov r9d, 256
+    call gfx_circle
+    mov r9d, 40                         ; an edge a little darker
+    mov r15d, r8d
+    mov r8d, 0x000000
+    mov rcx, rdx
+    mov r10, rdx
+    shr r10, 1
+    call gfx_rring
+    cmp rbx, [hover_win]                ; under the pointer: what each does
+    jne .next
+    call light_mark
+.next:
+    inc r14
+    jmp .each
+.out:
+    pop r15
+    pop r14
+    ret
+
+; light_mark(RDI, RSI = a button's box, R14 = which): what it does on it,
+; in a darker shade of it: x, - or +
+light_mark:
     push rbx
+    push r8
+    push r9
     push r12
     push r13
-    mov rbx, rdi
-    cmp qword [rbx + WN_SF + SF_PTR], 0
-    je .out
-    call win_client
-    mov r12, rdi                        ; where the client starts
+    mov r12, rdi
     mov r13, rsi
-    call gfx_clip
-    jz .out
-    mov rax, rsi                        ; source: row, column in the client
-    sub rax, r13
-    imul rax, [rbx + WN_SF + SF_PITCH]
-    mov r8, rdi
-    sub r8, r12
-    lea r8, [rax + r8 * 4]
-    add r8, [rbx + WN_SF + SF_PTR]
-    mov rax, rsi                        ; destination
-    imul rax, [scr_pitch]
-    lea r9, [rax + rdi * 4]
-    add r9, [bb_ptr]
-    mov r10, rcx                        ; rows
-.row:
-    mov rsi, r8
-    mov rdi, r9
-    mov rcx, rdx
-    rep movsd
-    add r8, [rbx + WN_SF + SF_PITCH]
-    add r9, [scr_pitch]
-    dec r10
-    jnz .row
+    mov rbx, [m_light]
+    lea rax, [light_marks]
+    mov r8d, [rax + r14 * 4]
+    test r14, r14
+    jz .x
+    mov rdx, rbx                        ; a bar across: half the box long,
+    shr rdx, 1                          ; an eighth thick
+    mov rcx, rbx
+    shr rcx, 3
+    jnz .thick
+    inc ecx
+.thick:
+    mov rax, rbx
+    sub rax, rdx
+    shr rax, 1
+    lea rdi, [r12 + rax]
+    mov rax, rbx
+    sub rax, rcx
+    shr rax, 1
+    lea rsi, [r13 + rax]
+    mov r9d, 220
+    call gfx_fill_a
+    cmp r14, 2                          ; and one down, for +
+    jne .out
+    xchg rdx, rcx
+    mov rax, rbx
+    sub rax, rdx
+    shr rax, 1
+    lea rdi, [r12 + rax]
+    mov rax, rbx
+    sub rax, rcx
+    shr rax, 1
+    lea rsi, [r13 + rax]
+    call gfx_fill_a
+    jmp .out
+.x:
+    shl r12, 8                          ; in 1/256 pixels
+    shl r13, 8
+    mov rax, rbx
+    shl rax, 8
+    imul rcx, rax, 3                    ; the arms: from 0.3 to 0.7 of the box
+    xor edx, edx
+    push rax
+    mov rax, rcx
+    mov ecx, 10
+    div rcx
+    mov r9, rax                         ; 0.3
+    pop rax
+    mov r10, rax
+    sub r10, r9                         ; 0.7
+    xor edx, edx
+    mov ecx, 24
+    div rcx
+    mov r11, rax                        ; half its thickness, about
+    lea rdi, [light_pts]
+    ; \: (a, a) to (b, b)
+    lea rax, [r12 + r9]
+    add rax, r11
+    mov [rdi], eax
+    lea rax, [r13 + r9]
+    sub rax, r11
+    mov [rdi + 4], eax
+    lea rax, [r12 + r10]
+    add rax, r11
+    mov [rdi + 8], eax
+    lea rax, [r13 + r10]
+    sub rax, r11
+    mov [rdi + 12], eax
+    lea rax, [r12 + r10]
+    sub rax, r11
+    mov [rdi + 16], eax
+    lea rax, [r13 + r10]
+    add rax, r11
+    mov [rdi + 20], eax
+    lea rax, [r12 + r9]
+    sub rax, r11
+    mov [rdi + 24], eax
+    lea rax, [r13 + r9]
+    add rax, r11
+    mov [rdi + 28], eax
+    ; /: (b, a) to (a, b)
+    lea rax, [r12 + r10]
+    sub rax, r11
+    mov [rdi + 32], eax
+    lea rax, [r13 + r9]
+    sub rax, r11
+    mov [rdi + 36], eax
+    lea rax, [r12 + r10]
+    add rax, r11
+    mov [rdi + 40], eax
+    lea rax, [r13 + r9]
+    add rax, r11
+    mov [rdi + 44], eax
+    lea rax, [r12 + r9]
+    add rax, r11
+    mov [rdi + 48], eax
+    lea rax, [r13 + r10]
+    add rax, r11
+    mov [rdi + 52], eax
+    lea rax, [r12 + r9]
+    sub rax, r11
+    mov [rdi + 56], eax
+    lea rax, [r13 + r10]
+    sub rax, r11
+    mov [rdi + 60], eax
+    mov esi, 4
+    mov edx, r8d
+    mov ecx, 220
+    call gfx_poly
+    lea rdi, [light_pts + 32]
+    call gfx_poly
 .out:
-    mov rdi, rbx
     pop r13
     pop r12
+    pop r9
+    pop r8
+    pop rbx
+    ret
+
+; frame_title (RBX = window, R12, R13 = its top left, R14 = width): the
+; title, in the middle of the bar, clear of the buttons
+frame_title:
+    push r15
+    mov r15, [m_light_step]             ; the room: past the buttons, and as
+    imul r15, r15, 3                    ; much at the right
+    add r15, [m_light_x]
+    mov r9, r14
+    sub r9, r15
+    sub r9, r15
+    jle .out                            ; the most it may be wide
+    lea rdi, [rbx + WN_TITLE]
+    mov esi, [f_title]
+    call uf_width
+    cmp rax, r9
+    jbe .fits
+    mov rax, r9
+.fits:
+    mov rdi, r14                        ; centred
+    sub rdi, rax
+    sar rdi, 1
+    add rdi, r12
+    push rdi
+    mov edi, [f_title]                  ; the baseline: the middle, and half
+    call uf_metrics                     ; a capital below it
+    mov esi, [rax + UFT_CAP]
+    pop rdi
+    mov rax, [fr_t]
+    add rax, rsi
+    shr rax, 1
+    lea rsi, [r13 + rax]
+    lea rdx, [rbx + WN_TITLE]
+    mov ecx, [th_c + TC_TEXT3]
+    cmp rbx, [desk_focus]
+    jne .color
+    mov ecx, [th_c + TC_TEXT]
+.color:
+    mov r8d, [f_title]
+    call uf_text_max
+.out:
+    pop r15
+    ret
+
+; span_copy: rr_walk's span: the pixels of span_sf, whose top left is at
+; span_x, span_y
+span_copy:
+    push rbx
+    push r8
+    push r9
+    push r14
+    mov rax, r13
+    sub rax, [span_y]
+    mov rbx, [span_sf]
+    imul rax, [rbx + SF_PITCH]
+    mov r8, r12
+    sub r8, [span_x]
+    lea rax, [rax + r8 * 4]
+    add rax, [rbx + SF_PTR]
+    mov rbx, rax
+    test rsi, rsi
+    jnz .masked
+    push rsi
+    mov rsi, rbx
+    rep movsd
+    pop rsi
+    jmp .out
+.masked:
+    mov r8d, [rbx]
+    add rbx, 4
+    movzx eax, byte [rsi]
+    add rsi, rdx
+    test eax, eax
+    jz .next
+    cmp eax, 255
+    je .all
+    mov r9d, eax
+    shr r9d, 7
+    add r9d, eax
+    mov r14d, 256
+    sub r14d, r9d
+    mov eax, [rdi]
+    MIX eax, r8d, r9d, r14d, r10d, r11d
+    mov [rdi], eax
+    jmp .next
+.all:
+    mov [rdi], r8d
+.next:
+    add rdi, 4
+    dec rcx
+    jnz .masked
+.out:
+    pop r14
+    pop r9
+    pop r8
     pop rbx
     ret
 
 ; -----------------------------------------------------------------------------
-;  The bar
+;  The menu bar
 ; -----------------------------------------------------------------------------
 
 ; desk_bar_damage: the bar changed. Preserves all.
@@ -1138,7 +2001,7 @@ desk_bar_damage:
     xor edi, edi
     xor esi, esi
     mov rdx, [scr_w]
-    mov rcx, [hdr_h]
+    mov rcx, [m_bar_h]
     call desk_damage
     pop rcx
     pop rdx
@@ -1146,7 +2009,7 @@ desk_bar_damage:
     pop rdi
     ret
 
-; desk_status(RSI = text): the right end of the bar. Preserves all.
+; desk_status(RSI = text): at the right of the bar. Preserves all.
 desk_status:
     push rax
     push rcx
@@ -1169,171 +2032,860 @@ desk_status:
     pop rax
     jmp desk_bar_damage
 
-; bar_layout: where each button is (bar_n of them: the new-shell button,
-; then a window's, in slot order). Preserves RBX, RBP, R12-R15.
-bar_layout:
+; bar_paint: the bar, within the clip
+bar_paint:
     push rbx
     push r12
     push r13
-    lea rdi, [bar_status]               ; the status takes the right end
-    call strlen
-    add rax, 2
-    imul rax, [font_cw]
-    mov r13, [scr_w]
-    sub r13, rax                        ; buttons stop there
-    lea rdi, [str_brand]
-    call strlen
-    add rax, 2
-    imul rax, [font_cw]
-    mov r12, rax                        ; x
-    xor ebx, ebx                        ; buttons so far
-    lea rax, [str_bar_shell]
-    xor ecx, ecx
-    call .button
-    xor ecx, ecx                        ; then one per window
-.slot:
-    lea rax, [desk_wins]
-    mov rax, [rax + rcx * 8]
-    test rax, rax
-    jz .next
-    test dword [rax + WN_FLAGS], WF_CLOSING
-    jnz .next
-    push rcx
-    mov rcx, rax
-    lea rax, [rax + WN_TITLE]
-    call .button
-    pop rcx
-    jc .done
-.next:
-    inc ecx
-    cmp ecx, DESK_MAX
-    jb .slot
-.done:
-    mov [bar_n], rbx
+    ; its glass
+    mov rdi, [tg_cx0]
+    mov rdx, [tg_cx1]
+    sub rdx, rdi
+    jle .out
+    mov rsi, [tg_cy0]
+    mov rcx, [m_bar_h]
+    cmp rcx, [tg_cy1]
+    jle .rows
+    mov rcx, [tg_cy1]
+.rows:
+    sub rcx, rsi
+    jle .out
+    cmp qword [bar_sf + SF_PTR], 0
+    je .text
+    lea r8, [bar_sf]
+    call sf_copy_rows
+.text:
+    mov edi, [f_body]                   ; the baseline: the middle, plus half
+    call uf_metrics                     ; a capital
+    mov eax, [rax + UFT_CAP]
+    add rax, [m_bar_h]
+    shr rax, 1
+    mov r13, rax
+    call bar_mark                       ; the mark
+    mov rdi, [m_bar_pad]                ; then the app in front, its name
+    lea rdi, [rdi * 2]
+    add rdi, [m_mark]
+    call bar_app_name
+    mov rdx, rax
+    mov rsi, r13
+    mov ecx, [th_c + TC_TEXT]
+    mov r8d, [f_title]
+    call uf_text
+    ; at the right: the time, then what the system is doing
+    call bar_clock
+    lea rdi, [bar_clock_text]
+    mov esi, [f_body]
+    call uf_width
+    mov rdi, [scr_w]
+    sub rdi, [m_bar_pad]
+    sub rdi, rax
+    mov r12, rdi
+    mov rsi, r13
+    lea rdx, [bar_clock_text]
+    mov ecx, [th_c + TC_TEXT]
+    mov r8d, [f_body]
+    call uf_text
+    lea rdi, [bar_status]
+    mov esi, [f_body]
+    call uf_width
+    mov rdi, r12
+    sub rdi, [m_bar_pad]
+    sub rdi, [m_bar_pad]
+    sub rdi, rax
+    mov rsi, r13
+    lea rdx, [bar_status]
+    mov ecx, [th_c + TC_TEXT2]
+    mov r8d, [f_body]
+    call uf_text
+.out:
     pop r13
     pop r12
     pop rbx
     ret
-; RAX = label, RCX = window (0: the new shell) -> CF if it does not fit
-.button:
-    push rcx
-    mov rdi, rax
-    call strlen
-    cmp rax, 16
-    jbe .short
-    mov eax, 16
-.short:
-    add rax, 2
-    imul rax, [font_cw]
-    add rax, r12
-    cmp rax, r13
-    ja .full
-    lea rdx, [bar_x0]
-    mov [rdx + rbx * 8], r12
-    lea rdx, [bar_x1]
-    mov [rdx + rbx * 8], rax
-    lea rdx, [bar_lab]
-    mov [rdx + rbx * 8], rdi
-    pop rcx
-    lea rdx, [bar_win]
-    mov [rdx + rbx * 8], rcx
-    inc rbx
-    mov r12, rax
-    add r12, [ui_line]
-    add r12, [ui_line]
-    clc
+
+; bar_app_name -> RAX = the name of the app in front: its dock name, or
+; its own. Preserves RDI.
+bar_app_name:
+    lea rax, [str_finder]
+    mov rsi, [desk_focus]
+    test rsi, rsi
+    jz .out
+    push rdi
+    mov rdi, rsi
+    call win_app
+    pop rdi
+    test eax, eax
+    js .own
+    imul eax, eax, DA_SIZE
+    lea rsi, [dock_apps]
+    mov rax, [rsi + rax + DA_LABEL]
     ret
-.full:
-    pop rcx
-    stc
+.own:
+    mov rsi, [desk_focus]
+    lea rax, [rsi + WN_APP]
+.out:
     ret
 
-; desk_bar_paint: the bar, within the clip
-desk_bar_paint:
+; bar_mark: Axiom's mark at the left of the bar: a triangle, open inside
+bar_mark:
     push rbx
     push r12
-    xor edi, edi
-    xor esi, esi
-    mov rdx, [scr_w]
-    mov rcx, [hdr_h]
-    mov r8d, COL_PANEL
-    call gfx_fill
-    xor edi, edi
-    mov rsi, [hdr_h]
-    sub rsi, [ui_line]
-    mov rdx, [scr_w]
-    mov rcx, [ui_line]
-    mov r8d, COL_LINE
-    call gfx_fill
-    mov rdi, [font_cw]
-    mov rsi, [font_ch]
-    shr rsi, 1
-    lea rdx, [str_brand]
-    mov ecx, COL_ACCENT
-    mov r8d, COL_PANEL
-    call ui_text
-    call bar_layout
-    xor ebx, ebx
-.button:
-    cmp rbx, [bar_n]
-    jae .status
-    lea rax, [bar_win]
-    mov r12, [rax + rbx * 8]            ; its window, or 0
-    mov r8d, COL_PANEL                  ; the button
-    test r12, r12
-    jz .box
-    cmp r12, [desk_focus]
-    jne .box
-    mov r8d, COL_PANEL2
-.box:
-    push r8
-    lea rax, [bar_x0]
-    mov rdi, [rax + rbx * 8]
-    lea rax, [bar_x1]
-    mov rdx, [rax + rbx * 8]
-    sub rdx, rdi
-    mov rsi, [font_ch]
-    shr rsi, 2
-    mov rcx, [hdr_h]
-    sub rcx, [ui_line]
-    sub rcx, rsi
-    sub rcx, rsi
-    call gfx_fill
-    pop r8
-    mov ecx, COL_ACCENT                 ; and its label
-    test r12, r12
-    jz .label
-    mov ecx, COL_DIM
-    test dword [r12 + WN_FLAGS], WF_SHOWN
-    jnz .shown
-    mov ecx, COL_FAINT
-.shown:
-    cmp r12, [desk_focus]
-    jne .label
-    mov ecx, COL_TEXT
-.label:
-    lea rax, [bar_x0]
-    mov rdi, [rax + rbx * 8]
-    add rdi, [font_cw]
-    mov rsi, [font_ch]
-    shr rsi, 1
-    lea rax, [bar_lab]
-    mov rdx, [rax + rbx * 8]
-    mov r9d, 16
-    call ui_text_max
-    inc rbx
-    jmp .button
-.status:
-    mov rdi, [scr_w]
-    sub rdi, [font_cw]
-    mov rsi, [font_ch]
-    shr rsi, 1
-    lea rdx, [bar_status]
-    mov ecx, COL_TEXT
-    mov r8d, COL_PANEL
-    call ui_text_right
+    push r13
+    mov rbx, [m_mark]                   ; its side
+    mov r12, [m_bar_pad]                ; its left
+    mov r13, [m_bar_h]                  ; its top
+    sub r13, rbx
+    sar r13, 1
+    shl rbx, 8
+    shl r12, 8
+    shl r13, 8
+    lea rdi, [light_pts]
+    ; outside: apex, bottom right, bottom left; then in, the other way, and
+    ; back out (the two sides of the cut cancel)
+    mov rax, rbx
+    shr rax, 1
+    add rax, r12
+    mov [rdi], eax                      ; apex
+    mov [rdi + 4], r13d
+    lea rax, [r12 + rbx]
+    mov [rdi + 8], eax                  ; bottom right
+    lea rax, [r13 + rbx]
+    mov [rdi + 12], eax
+    mov [rdi + 16], r12d                ; bottom left
+    mov [rdi + 20], eax
+    mov rax, rbx                        ; back to the apex, then in
+    shr rax, 1
+    add rax, r12
+    mov [rdi + 24], eax
+    mov [rdi + 28], r13d
+    mov rcx, rbx                        ; the inner triangle: a third of it
+    shr rcx, 2
+    mov [rdi + 32], eax                 ; inner apex
+    lea rdx, [r13 + rcx * 2]
+    mov [rdi + 36], edx
+    lea rdx, [r12 + rcx]                ; inner bottom left
+    mov [rdi + 40], edx
+    lea rdx, [r13 + rbx]
+    sub rdx, rcx
+    mov [rdi + 44], edx
+    lea rdx, [r12 + rbx]                ; inner bottom right
+    sub rdx, rcx
+    mov [rdi + 48], edx
+    lea rdx, [r13 + rbx]
+    sub rdx, rcx
+    mov [rdi + 52], edx
+    mov [rdi + 56], eax                 ; inner apex again
+    lea rdx, [r13 + rcx * 2]
+    mov [rdi + 60], edx
+    mov esi, 8
+    mov edx, [th_accent]
+    mov ecx, 256
+    call gfx_poly
+    pop r13
     pop r12
     pop rbx
+    ret
+
+; bar_clock: bar_clock_text = the day and the time, as "Sat 18 Oct  14:05"
+bar_clock:
+    push rax
+    push rcx
+    push rdx
+    push rdi
+    push r8
+    push r9
+    call rtc_read
+    mov rax, [rtc_year]                 ; the weekday, by Sakamoto's method
+    mov rcx, [rtc_mon]
+    cmp rcx, 3
+    jae .y
+    dec rax
+.y:
+    mov r8, rax
+    mov r9, rax
+    shr r9, 2
+    add r8, r9
+    mov r9, rax
+    xor edx, edx
+    push rax
+    mov rax, r9
+    mov r9d, 100
+    div r9
+    sub r8, rax
+    pop rax
+    xor edx, edx
+    mov r9d, 400
+    div r9
+    add r8, rax
+    lea rax, [dow_t]
+    movzx eax, byte [rax + rcx - 1]
+    add r8, rax
+    add r8, [rtc_day]
+    mov rax, r8
+    xor edx, edx
+    mov r9d, 7
+    div r9
+    lea rax, [day_names]
+    lea r8, [rax + rdx * 4]
+    mov rcx, [rtc_mon]
+    dec rcx
+    lea rax, [month_names]
+    lea r9, [rax + rcx * 4]
+    lea rdi, [bar_clock_text]
+    SPRINTF rdi, "%s %u %s  %u:%02u", r8, qword [rtc_day], r9, qword [rtc_hour], qword [rtc_min]
+    pop r9
+    pop r8
+    pop rdi
+    pop rdx
+    pop rcx
+    pop rax
+    ret
+
+; desk_tick: twice a second (ui_refresh): the clock, when its minute turns
+desk_tick:
+    push rax
+    call rtc_read
+    mov rax, [rtc_min]
+    cmp rax, [bar_minute]
+    je .out
+    mov [bar_minute], rax
+    call desk_bar_damage
+.out:
+    pop rax
+    ret
+
+; -----------------------------------------------------------------------------
+;  The dock
+; -----------------------------------------------------------------------------
+
+; win_app(RDI = window) -> EAX = its app in the dock, -1 if none. Preserves
+; others.
+win_app:
+    push rcx
+    push rsi
+    push rdi
+    lea rax, [term_ops]
+    cmp [rdi + WN_OPS], rax
+    je .terminal
+    cmp rdi, [sys_win]
+    je .system
+    cmp rdi, [cpu_win]
+    je .system
+    xor ecx, ecx
+.each:
+    cmp ecx, DOCK_APPS
+    jae .none
+    imul rax, rcx, DA_SIZE
+    lea rsi, [dock_apps]
+    mov rsi, [rsi + rax + DA_PROG]
+    test rsi, rsi
+    jz .next
+    push rdi
+    lea rdi, [rdi + WN_APP]
+    call str_same_case
+    pop rdi
+    jz .found
+.next:
+    inc ecx
+    jmp .each
+.found:
+    mov eax, ecx
+    jmp .out
+.terminal:
+    mov eax, APP_TERMINAL
+    jmp .out
+.system:
+    mov eax, APP_SYSTEM
+    jmp .out
+.none:
+    mov eax, -1
+.out:
+    pop rdi
+    pop rsi
+    pop rcx
+    ret
+
+; str_same_case(RDI, RSI = text) -> ZF set if they are the same, but for
+; case. Preserves all.
+str_same_case:
+    push rax
+    push rcx
+    push rsi
+    push rdi
+.each:
+    mov al, [rdi]
+    mov cl, [rsi]
+    or al, 0x20
+    or cl, 0x20
+    cmp al, cl
+    jne .out
+    cmp byte [rdi], 0
+    je .same
+    cmp byte [rsi], 0
+    je .out
+    inc rdi
+    inc rsi
+    jmp .each
+.same:
+    cmp byte [rsi], 0
+.out:
+    pop rdi
+    pop rsi
+    pop rcx
+    pop rax
+    ret
+
+; dock_layout: the dock's items and where each is, again; what changed,
+; damaged
+dock_layout:
+    push rbx
+    push r12
+    push r13
+    push r14
+    mov byte [dock_dirty], 0
+    call dock_damage                    ; where it was
+    xor r12d, r12d                      ; items
+    lea r13, [dock_items]
+    xor ebx, ebx                        ; the apps
+.app:
+    cmp ebx, DOCK_APPS
+    jae .extras
+    mov dword [r13 + DI_KIND], DK_APP
+    mov [r13 + DI_APP], ebx
+    mov qword [r13 + DI_WIN], 0
+    imul rax, rbx, SF_SIZE
+    lea rcx, [app_icons]
+    add rax, rcx
+    mov [r13 + DI_ICON], rax
+    imul rax, rbx, DA_SIZE
+    lea rcx, [dock_apps]
+    mov rax, [rcx + rax + DA_LABEL]
+    mov [r13 + DI_LABEL], rax
+    mov edi, ebx
+    call dock_running
+    mov [r13 + DI_RUN], rax
+    add r13, DI_SIZE
+    inc r12
+    inc ebx
+    jmp .app
+.extras:
+    xor ebx, ebx                        ; windows of other programs: one each
+.extra:
+    cmp ebx, DESK_MAX
+    jae .minimised
+    lea rax, [desk_wins]
+    mov rdi, [rax + rbx * 8]
+    test rdi, rdi
+    jz .extra_next
+    test dword [rdi + WN_FLAGS], WF_CLOSING
+    jnz .extra_next
+    call win_app
+    test eax, eax
+    jns .extra_next
+    lea rcx, [dock_items]               ; one of its app already?
+    imul rax, r12, DI_SIZE
+    add rax, rcx
+.seen:
+    cmp rcx, rax
+    jae .new_extra
+    cmp dword [rcx + DI_KIND], DK_EXTRA
+    jne .seen_next
+    mov rsi, [rcx + DI_WIN]
+    lea rsi, [rsi + WN_APP]
+    push rdi
+    lea rdi, [rdi + WN_APP]
+    call str_same_case
+    pop rdi
+    je .extra_next
+.seen_next:
+    add rcx, DI_SIZE
+    jmp .seen
+.new_extra:
+    cmp qword [rdi + WN_ICON + SF_PTR], 0
+    jne .has_icon
+    call icon_for
+.has_icon:
+    mov dword [r13 + DI_KIND], DK_EXTRA
+    mov dword [r13 + DI_APP], -1
+    mov [r13 + DI_WIN], rdi
+    lea rax, [rdi + WN_ICON]
+    mov [r13 + DI_ICON], rax
+    lea rax, [rdi + WN_APP]
+    mov [r13 + DI_LABEL], rax
+    mov qword [r13 + DI_RUN], 1
+    add r13, DI_SIZE
+    inc r12
+.extra_next:
+    inc ebx
+    jmp .extra
+.minimised:
+    mov [dock_sep], r12                 ; the line, before these
+    xor ebx, ebx
+.min:
+    cmp ebx, DESK_MAX
+    jae .place
+    lea rax, [desk_wins]
+    mov rdi, [rax + rbx * 8]
+    test rdi, rdi
+    jz .min_next
+    test dword [rdi + WN_FLAGS], WF_SHOWN | WF_CLOSING
+    jnz .min_next
+    cmp qword [rdi + WN_THUMB + SF_PTR], 0
+    jne .has_thumb
+    call win_thumb
+.has_thumb:
+    mov dword [r13 + DI_KIND], DK_MIN
+    mov dword [r13 + DI_APP], -1
+    mov [r13 + DI_WIN], rdi
+    lea rax, [rdi + WN_THUMB]
+    mov [r13 + DI_ICON], rax
+    lea rax, [rdi + WN_TITLE]
+    mov [r13 + DI_LABEL], rax
+    mov qword [r13 + DI_RUN], 0
+    add r13, DI_SIZE
+    inc r12
+.min_next:
+    inc ebx
+    jmp .min
+.place:
+    mov [dock_n], r12
+    ; the width: the icons, the space between, the line if there is one
+    mov rax, [m_icon]
+    add rax, [m_dock_space]
+    imul rax, r12
+    sub rax, [m_dock_space]
+    add rax, [m_dock_pad]
+    add rax, [m_dock_pad]
+    cmp [dock_sep], r12
+    jae .no_sep
+    add rax, [m_dock_space]
+    add rax, [m_dock_space]
+    inc rax
+.no_sep:
+    mov [dock_w], rax
+    mov rcx, [scr_w]
+    sub rcx, rax
+    sar rcx, 1
+    mov [dock_x], rcx
+    add rcx, [m_dock_pad]               ; each item's x
+    lea r13, [dock_items]
+    xor ebx, ebx
+.x:
+    cmp rbx, r12
+    jae .placed
+    cmp rbx, [dock_sep]
+    jne .at
+    test rbx, rbx
+    jz .at
+    add rcx, [m_dock_space]
+    add rcx, [m_dock_space]
+    inc rcx
+.at:
+    mov [r13 + DI_X], rcx
+    add rcx, [m_icon]
+    add rcx, [m_dock_space]
+    add r13, DI_SIZE
+    inc rbx
+    jmp .x
+.placed:
+    call dock_damage                    ; and where it is now
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+; dock_running(EDI = an app) -> RAX = 1 if it has a window. Preserves others.
+dock_running:
+    push rcx
+    push rdx
+    push rdi
+    mov edx, edi
+    xor ecx, ecx
+.each:
+    lea rax, [desk_wins]
+    mov rdi, [rax + rcx * 8]
+    test rdi, rdi
+    jz .next
+    test dword [rdi + WN_FLAGS], WF_CLOSING
+    jnz .next
+    call win_app
+    cmp eax, edx
+    je .yes
+.next:
+    inc ecx
+    cmp ecx, DESK_MAX
+    jb .each
+    xor eax, eax
+    jmp .out
+.yes:
+    mov eax, 1
+.out:
+    pop rdi
+    pop rdx
+    pop rcx
+    ret
+
+; dock_damage: the dock and the name over it. Preserves all.
+dock_damage:
+    push rdi
+    push rsi
+    push rdx
+    push rcx
+    cmp qword [dock_w], 0
+    je .out
+    xor edi, edi                        ; the width of the screen: a name
+    mov rsi, [m_dock_y]                 ; may stand past the dock's ends
+    sub rsi, [m_tip_h]
+    sub rsi, [m_tip_gap]
+    sub rsi, [m_tip_gap]
+    mov rdx, [scr_w]
+    mov rcx, [scr_h]
+    sub rcx, rsi
+    call desk_damage
+.out:
+    pop rcx
+    pop rdx
+    pop rsi
+    pop rdi
+    ret
+
+; dock_paint: the dock, within the clip
+dock_paint:
+    push rbx
+    push r12
+    push r13
+    cmp qword [dock_w], 0
+    je .out
+    mov rdi, [dock_x]                   ; glass: blurred, tinted, outlined
+    mov rsi, [m_dock_y]
+    mov rdx, [dock_w]
+    mov rcx, [m_dock_h]
+    mov r8, [m_dock_r]
+    mov r9, [m_blur]
+    call gfx_frost
+    mov r8d, [th_c + TC_DOCK]
+    mov r9d, [th_c + TC_DOCK_A]
+    mov r10, [m_dock_r]
+    mov r11d, RC_ALL
+    call gfx_rrect
+    mov r8d, [th_c + TC_DOCK_EDGE]
+    mov r9d, [th_c + TC_DOCK_EDGE_A]
+    call gfx_rring
+    lea r12, [dock_items]
+    xor ebx, ebx
+.item:
+    cmp rbx, [dock_n]
+    jae .out
+    cmp rbx, [dock_sep]                 ; the line before the minimised
+    jne .icon
+    test rbx, rbx
+    jz .icon
+    mov rdi, [r12 + DI_X]
+    sub rdi, [m_dock_space]
+    dec rdi
+    mov rsi, [m_dock_y]
+    add rsi, [m_dock_pad]
+    add rsi, [m_dock_pad]
+    mov edx, 1
+    mov rcx, [m_icon]
+    sub rcx, [m_dock_pad]
+    sub rcx, [m_dock_pad]
+    mov r8d, [th_c + TC_DOCK_EDGE]
+    mov r9d, 90
+    call gfx_fill_a
+.icon:
+    mov rdx, [r12 + DI_ICON]
+    cmp qword [rdx + SF_PTR], 0
+    je .dot
+    mov rdi, [r12 + DI_X]               ; centred in its place
+    mov rax, [m_icon]
+    sub rax, [rdx + SF_W]
+    sar rax, 1
+    add rdi, rax
+    mov rsi, [m_dock_y]
+    add rsi, [m_dock_pad]
+    mov rax, [m_icon]
+    sub rax, [rdx + SF_H]
+    sar rax, 1
+    add rsi, rax
+    mov r8d, 256
+    cmp rbx, [dock_press]               ; held down: darker
+    jne .draw
+    mov r8d, 170
+.draw:
+    call gfx_image
+.dot:
+    cmp qword [r12 + DI_RUN], 0
+    je .next
+    mov rdi, [r12 + DI_X]
+    mov rax, [m_icon]
+    sub rax, [m_dot]
+    sar rax, 1
+    add rdi, rax
+    mov rsi, [m_dock_y]
+    add rsi, [m_dock_h]
+    mov rax, [m_dock_pad]
+    add rax, [m_dot]
+    sar rax, 1
+    sub rsi, rax
+    mov rdx, [m_dot]
+    mov r8d, [th_c + TC_TEXT]
+    mov r9d, 200
+    call gfx_circle
+.next:
+    add r12, DI_SIZE
+    inc rbx
+    jmp .item
+.out:
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+; tip_paint: the name of the item under the pointer, over it
+tip_paint:
+    push rbx
+    push r12
+    push r13
+    mov rbx, [dock_hover]
+    cmp rbx, [dock_n]
+    jae .out
+    imul rbx, rbx, DI_SIZE
+    lea rax, [dock_items]
+    add rbx, rax
+    mov rdi, [rbx + DI_LABEL]
+    mov esi, [f_body]
+    call uf_width
+    mov r12, rax                        ; the text's width
+    lea rdx, [rax + 0]
+    add rdx, [m_tip_pad]
+    add rdx, [m_tip_pad]                ; the pill's
+    mov rdi, [rbx + DI_X]
+    mov rax, [m_icon]
+    sub rax, rdx
+    sar rax, 1
+    add rdi, rax
+    test rdi, rdi
+    jns .left
+    xor edi, edi
+.left:
+    mov r13, rdi
+    mov rsi, [m_dock_y]
+    sub rsi, [m_tip_gap]
+    sub rsi, [m_tip_h]
+    mov rcx, [m_tip_h]
+    mov r8d, [th_c + TC_TIP]
+    mov r9d, [th_c + TC_TIP_A]
+    mov r10, rcx
+    shr r10, 1
+    mov r11d, RC_ALL
+    call gfx_rrect
+    mov r8d, [th_c + TC_DOCK_EDGE]
+    mov r9d, [th_c + TC_DOCK_EDGE_A]
+    call gfx_rring
+    push rsi
+    mov edi, [f_body]
+    call uf_metrics
+    pop rsi
+    mov eax, [rax + UFT_CAP]
+    add rax, [m_tip_h]
+    shr rax, 1
+    add rsi, rax
+    mov rdi, r13
+    add rdi, [m_tip_pad]
+    mov rdx, [rbx + DI_LABEL]
+    mov ecx, [th_c + TC_TIP_TEXT]
+    mov r8d, [f_body]
+    call uf_text
+.out:
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+; dock_at(RDI x, RSI y) -> RAX = the item there, CF if none. Preserves others.
+dock_at:
+    push rcx
+    push rdx
+    cmp rsi, [m_dock_y]
+    jl .none
+    xor ecx, ecx
+    lea rdx, [dock_items]
+.each:
+    cmp rcx, [dock_n]
+    jae .none
+    mov rax, [rdx + DI_X]
+    cmp rdi, rax
+    jl .next
+    add rax, [m_icon]
+    cmp rdi, rax
+    jl .found
+.next:
+    add rdx, DI_SIZE
+    inc rcx
+    jmp .each
+.found:
+    mov rax, rcx
+    clc
+    jmp .out
+.none:
+    stc
+.out:
+    pop rdx
+    pop rcx
+    ret
+
+; dock_click(RAX = an item): what it is for
+dock_click:
+    push rbx
+    imul rbx, rax, DI_SIZE
+    lea rax, [dock_items]
+    add rbx, rax
+    mov eax, [rbx + DI_KIND]
+    cmp eax, DK_APP
+    je .app
+    mov rdi, [rbx + DI_WIN]             ; a window: forward
+    test rdi, rdi
+    jz .out
+    cmp eax, DK_MIN
+    je .focus
+    call win_app_front                  ; a program's: its topmost
+.focus:
+    call win_focus
+    jmp .out
+.app:
+    mov edi, [rbx + DI_APP]
+    call app_front                      ; its windows, if it has any
+    jnc .out
+    mov edi, [rbx + DI_APP]
+    cmp edi, APP_TERMINAL
+    je .terminal
+    cmp edi, APP_SYSTEM
+    je .out
+    imul rax, rdi, DA_SIZE
+    lea rcx, [dock_apps]
+    mov rdi, [rcx + rax + DA_PROG]
+    lea rsi, [str_empty]
+    xor edx, edx
+    mov ecx, 1                          ; not tied to a prompt
+    call user_start
+    jmp .out
+.terminal:
+    call term_new
+.out:
+    pop rbx
+    ret
+
+; app_front(EDI = an app) -> CF if it has no window; else its topmost is
+; focused - or, when it is in front already and it is the terminal, a new
+; terminal opens. Preserves RBX, RBP, R12-R15.
+app_front:
+    push rbx
+    push r12
+    mov r12d, edi
+    mov rdi, [desk_focus]               ; in front already
+    test rdi, rdi
+    jz .find
+    call win_app
+    cmp eax, r12d
+    jne .find
+    cmp r12d, APP_TERMINAL
+    jne .done
+    call term_new
+    jmp .done
+.find:
+    mov rbx, [desk_zn]                  ; its topmost shown, else any
+.down:
+    test rbx, rbx
+    jz .any
+    dec rbx
+    lea rax, [desk_z]
+    mov rdi, [rax + rbx * 8]
+    test dword [rdi + WN_FLAGS], WF_SHOWN
+    jz .down
+    test dword [rdi + WN_FLAGS], WF_CLOSING
+    jnz .down
+    call win_app
+    cmp eax, r12d
+    jne .down
+    call win_focus
+    cmp r12d, APP_SYSTEM                ; System is two windows
+    jne .done
+    call system_front
+    jmp .done
+.any:
+    xor ebx, ebx
+.slot:
+    cmp ebx, DESK_MAX
+    jae .none
+    lea rax, [desk_wins]
+    mov rdi, [rax + rbx * 8]
+    inc ebx
+    test rdi, rdi
+    jz .slot
+    test dword [rdi + WN_FLAGS], WF_CLOSING
+    jnz .slot
+    call win_app
+    cmp eax, r12d
+    jne .slot
+    call win_focus
+    cmp r12d, APP_SYSTEM
+    jne .done
+    call system_front
+.done:
+    clc
+    jmp .out
+.none:
+    stc
+.out:
+    pop r12
+    pop rbx
+    ret
+
+; system_front: both of System's windows forward
+system_front:
+    mov rdi, [cpu_win]
+    test rdi, rdi
+    jz .sys
+    call win_focus
+.sys:
+    mov rdi, [sys_win]
+    test rdi, rdi
+    jz .out
+    call win_focus
+.out:
+    ret
+
+; win_app_front(RDI = window) -> RDI = the topmost shown window of its app
+; (by its app name), itself if none. Preserves others.
+win_app_front:
+    push rax
+    push rcx
+    push rsi
+    mov rsi, rdi
+    mov rcx, [desk_zn]
+.down:
+    test rcx, rcx
+    jz .out
+    dec rcx
+    lea rax, [desk_z]
+    mov rax, [rax + rcx * 8]
+    test dword [rax + WN_FLAGS], WF_SHOWN
+    jz .down
+    push rdi
+    push rsi
+    lea rdi, [rax + WN_APP]
+    lea rsi, [rsi + WN_APP]
+    call str_same_case
+    pop rsi
+    pop rdi
+    jne .down
+    mov rdi, rax
+.out:
+    pop rsi
+    pop rcx
+    pop rax
     ret
 
 ; -----------------------------------------------------------------------------
@@ -1341,17 +2893,26 @@ desk_bar_paint:
 ; -----------------------------------------------------------------------------
 
 ; desk_hit(RDI x, RSI y) -> RAX = the window there (0: none), EDX = P_*,
-; R8, R9 = the point in its client. Preserves RBX, RBP, R12-R15.
+; R8, R9 = the point in its client, ECX = the edges (P_GRIP) or the dock's
+; item (P_DOCK). Preserves RBX, RBP, R12-R15.
 desk_hit:
     push rbx
     push r12
     push r13
+    push r14
     mov r12, rdi
     mov r13, rsi
-    cmp r13, [hdr_h]
-    jge .windows
+    cmp r13, [m_bar_h]
+    jge .dock
     xor eax, eax
     mov edx, P_BAR
+    jmp .out
+.dock:
+    call dock_at
+    jc .windows
+    mov rcx, rax
+    xor eax, eax
+    mov edx, P_DOCK
     jmp .out
 .windows:
     mov rbx, [desk_zn]
@@ -1360,91 +2921,111 @@ desk_hit:
     jz .nothing
     dec rbx
     lea rax, [desk_z]
-    mov rdi, [rax + rbx * 8]
-    test dword [rdi + WN_FLAGS], WF_SHOWN
+    mov r14, [rax + rbx * 8]
+    test dword [r14 + WN_FLAGS], WF_SHOWN
     jz .down
-    push rdi
+    mov rdi, r14
     call win_outer
-    mov rax, r12
-    sub rax, rdi
-    jl .miss
-    cmp rax, rdx
-    jge .miss
-    mov rax, r13
-    sub rax, rsi
-    jl .miss
-    cmp rax, rcx
-    jge .miss
-    pop rax                             ; this one
-    mov rdi, rax
-    push rax
-    call win_client
-    mov r8, r12
+    mov r8, r12                         ; the point, from the window's corner
     sub r8, rdi
     mov r9, r13
     sub r9, rsi
-    pop rax
-    cmp r9, 0                           ; above the client: the title bar
-    jl .title
-    cmp r8, 0
-    jl .frame
-    cmp r8, rdx
-    jge .frame
-    cmp r9, rcx
-    jge .frame
-    test dword [rax + WN_FLAGS], WF_RESIZE
-    jz .client
-    mov r10, rdx                        ; the corner grip
-    sub r10, r8
-    cmp r10, [fr_grip]
-    jg .client
-    mov r10, rcx
-    sub r10, r9
-    cmp r10, [fr_grip]
-    jg .client
+    ; within the edges' reach, outside it?
+    mov rax, [m_grab]
+    xor ecx, ecx
+    test dword [r14 + WN_FLAGS], WF_RESIZE
+    jz .inside
+    mov r10, rax
+    neg r10                             ; -grab
+    cmp r8, r10
+    jl .down
+    cmp r9, r10
+    jl .down
+    lea r11, [rdx + rax]
+    cmp r8, r11
+    jge .down
+    lea r11, [rcx + 0]
+    mov r11, [r14 + WN_H]
+    add r11, [fr_t]
+    add r11, rax
+    cmp r9, r11
+    jge .down
+    cmp r8, rax                         ; which edges
+    jge .not_l
+    or ecx, EDGE_L
+.not_l:
+    mov r11, rdx
+    sub r11, rax
+    cmp r8, r11
+    jl .not_r
+    or ecx, EDGE_R
+.not_r:
+    test r9, r9
+    jns .not_t
+    or ecx, EDGE_T
+.not_t:
+    mov r11, [r14 + WN_H]
+    add r11, [fr_t]
+    sub r11, rax
+    cmp r9, r11
+    jl .not_b
+    or ecx, EDGE_B
+.not_b:
+    test ecx, ecx
+    jz .inside_ok
+    mov rax, r14
     mov edx, P_GRIP
     jmp .out
-.client:
+.inside:
+    test r8, r8                         ; a window of one size: inside only
+    js .down
+    test r9, r9
+    js .down
+    cmp r8, rdx
+    jge .down
+    mov rax, [r14 + WN_H]
+    add rax, [fr_t]
+    cmp r9, rax
+    jge .down
+.inside_ok:
+    mov rax, r14
+    cmp r9, [fr_t]                      ; the title bar
+    jl .title
+    sub r9, [fr_t]                      ; the client
     mov edx, P_CLIENT
     jmp .out
-.frame:
-    mov edx, P_FRAME
-    test dword [rax + WN_FLAGS], WF_RESIZE
-    jz .out
-    cmp r8, rdx                         ; the frame's own corner resizes too
-    jl .out
-    cmp r9, rcx
-    jl .out
-    mov edx, P_GRIP
-    jmp .out
 .title:
-    mov r10, rdi                        ; from the client's right edge
-    add r10, rdx
-    sub r10, r12
-    jl .title_bar
-    test dword [rax + WN_FLAGS], WF_CLOSE
-    jz .min_only
-    cmp r10, [fr_btn]
-    jge .past_close
-    mov edx, P_CLOSE
-    jmp .out
-.past_close:
-    sub r10, [fr_btn]
-.min_only:
-    cmp r10, [fr_btn]
-    jge .title_bar
-    mov edx, P_MIN
-    jmp .out
+    mov rcx, r8                         ; a button? each a step wide
+    sub rcx, [m_light_x]
+    js .title_bar
+    sub rcx, [m_light_step]
+    js .b_close
+    sub rcx, [m_light_step]
+    js .b_min
+    mov rdx, [m_light_step]
+    shr rdx, 1
+    sub rcx, rdx
+    js .b_zoom
 .title_bar:
     mov edx, P_TITLE
     jmp .out
-.miss:
-    pop rdi
-    jmp .down
+.b_close:
+    mov edx, P_CLOSE
+    test dword [rax + WN_FLAGS], WF_CLOSE
+    jnz .out
+    mov edx, P_TITLE
+    jmp .out
+.b_min:
+    mov edx, P_MIN
+    jmp .out
+.b_zoom:
+    mov edx, P_ZOOM
+    jmp .out
 .nothing:
     xor eax, eax
     mov edx, P_NONE
 .out:
+    pop r14
     pop r13
     pop r12
     pop rbx
@@ -1456,13 +3037,17 @@ desk_press:
     je .out
     push rbx
     push r12
+    push r13
     mov r12d, edx
     mov rdi, [ptr_x]
     mov rsi, [ptr_y]
     call desk_hit
     mov rbx, rax
+    mov r13d, ecx
     cmp edx, P_BAR
-    je .bar
+    je .done
+    cmp edx, P_DOCK
+    je .dock
     test rbx, rbx
     jz .done
     mov rdi, rbx
@@ -1472,11 +3057,13 @@ desk_press:
     cmp r12d, 1                         ; the frame's parts: the left button
     jne .done
     cmp edx, P_TITLE
-    je .move
+    je .title
     cmp edx, P_GRIP
     je .size
     cmp edx, P_CLOSE
     je .close
+    cmp edx, P_ZOOM
+    je .zoom
     cmp edx, P_MIN
     jne .done
     mov rdi, rbx
@@ -1485,6 +3072,26 @@ desk_press:
 .close:
     mov rdi, rbx
     call win_ask
+    jmp .done
+.zoom:
+    mov rdi, rbx
+    call win_zoom
+    jmp .done
+.title:
+    RDTSC64                             ; twice, quickly: zoom
+    mov rcx, rax
+    sub rax, [click_at]
+    mov [click_at], rcx
+    cmp rbx, [click_win]
+    mov [click_win], rbx
+    jne .move
+    mov rcx, [tsc_per_ms]
+    imul rcx, rcx, DOUBLE_MS
+    cmp rax, rcx
+    jae .move
+    mov qword [click_win], 0
+    mov rdi, rbx
+    call win_zoom
     jmp .done
 .move:
     mov byte [drag_mode], DRAG_MOVE
@@ -1499,12 +3106,20 @@ desk_press:
 .size:
     mov byte [drag_mode], DRAG_SIZE
     mov [drag_win], rbx
+    mov [drag_edges], r13d
     mov rax, [ptr_x]
-    sub rax, [rbx + WN_W]
     mov [drag_dx], rax
     mov rax, [ptr_y]
-    sub rax, [rbx + WN_H]
     mov [drag_dy], rax
+    mov rax, [rbx + WN_X]
+    mov [drag_x0], rax
+    mov rax, [rbx + WN_Y]
+    mov [drag_y0], rax
+    mov rax, [rbx + WN_W]
+    mov [drag_w0], rax
+    mov rax, [rbx + WN_H]
+    mov [drag_h0], rax
+    and dword [rbx + WN_FLAGS], ~WF_ZOOMED
     jmp .done
 .client:
     mov [press_win], rbx
@@ -1518,41 +3133,13 @@ desk_press:
     jz .done
     call rax
     jmp .done
-.bar:
+.dock:
     cmp r12d, 1
     jne .done
-    call bar_layout
-    mov rax, [ptr_x]
-    xor ecx, ecx
-.button:
-    cmp rcx, [bar_n]
-    jae .done
-    lea rdx, [bar_x0]
-    cmp rax, [rdx + rcx * 8]
-    jl .next
-    lea rdx, [bar_x1]
-    cmp rax, [rdx + rcx * 8]
-    jl .hit
-.next:
-    inc rcx
-    jmp .button
-.hit:
-    lea rdx, [bar_win]
-    mov rdi, [rdx + rcx * 8]
-    test rdi, rdi
-    jz .new_shell
-    test dword [rdi + WN_FLAGS], WF_SHOWN
-    jz .restore
-    cmp rdi, [desk_focus]               ; the focused one minimises
-    jne .restore
-    call win_minimise
-    jmp .done
-.restore:
-    call win_focus
-    jmp .done
-.new_shell:
-    call term_new
+    mov [dock_press], r13
+    call dock_damage
 .done:
+    pop r13
     pop r12
     pop rbx
 .out:
@@ -1564,6 +3151,25 @@ desk_release:
     jne .press
     mov byte [drag_mode], DRAG_NONE
     mov qword [drag_win], 0
+    mov rax, [dock_press]               ; a dock item let go of over itself
+    cmp rax, -1
+    je .press
+    mov qword [dock_press], -1
+    call dock_damage
+    push rax
+    push rdx
+    mov rdi, [ptr_x]
+    mov rsi, [ptr_y]
+    call dock_at
+    mov rcx, rax
+    pop rdx
+    pop rax
+    jc .press
+    cmp rcx, rax
+    jne .press
+    push rdx
+    call dock_click
+    pop rdx
 .press:
     mov rax, [press_win]
     test rax, rax
@@ -1601,12 +3207,13 @@ desk_motion:
     je .move
     cmp eax, DRAG_SIZE
     je .size
+    push rbx
+    call desk_hover                     ; what is under it now
     mov rax, [press_win]                ; a button held in a client
     test rax, rax
     jnz .client
     mov rdi, [ptr_x]                    ; or the client under the pointer
     mov rsi, [ptr_y]
-    push rbx
     call desk_hit
     cmp edx, P_CLIENT
     jne .none
@@ -1616,7 +3223,6 @@ desk_motion:
     pop rbx
     ret
 .client:
-    push rbx
     mov rbx, rax
     mov rdi, rbx
     call win_client
@@ -1646,20 +3252,106 @@ desk_motion:
     cmp rdx, [rdi + WN_Y]
     je .out
 .moved:
+    and dword [rdi + WN_FLAGS], ~WF_ZOOMED
     jmp win_move
 .size:
+    ; from where it was: each edge held follows the pointer
+    mov rsi, [drag_x0]
+    mov rdx, [drag_y0]
+    mov rcx, [drag_w0]
+    mov r8, [drag_h0]
+    mov rax, [ptr_x]
+    sub rax, [drag_dx]                  ; how far it went
+    mov r9, [ptr_y]
+    sub r9, [drag_dy]
+    test dword [drag_edges], EDGE_R
+    jz .not_r
+    add rcx, rax
+.not_r:
+    test dword [drag_edges], EDGE_B
+    jz .not_b
+    add r8, r9
+.not_b:
     mov rdi, [drag_win]
-    mov rsi, [ptr_x]
-    sub rsi, [drag_dx]
-    mov rdx, [ptr_y]
-    sub rdx, [drag_dy]
-    cmp rsi, [rdi + WN_W]
+    test dword [drag_edges], EDGE_L
+    jz .not_l
+    mov r10, rcx                        ; no smaller than it may be: the
+    sub r10, rax                        ; left edge stops
+    cmp r10, [rdi + WN_MIN_W]
+    jge .l_ok
+    mov rax, rcx
+    sub rax, [rdi + WN_MIN_W]
+.l_ok:
+    add rsi, rax
+    sub rcx, rax
+.not_l:
+    test dword [drag_edges], EDGE_T
+    jz .not_t
+    mov r10, r8
+    sub r10, r9
+    cmp r10, [rdi + WN_MIN_H]
+    jge .t_ok
+    mov r9, r8
+    sub r9, [rdi + WN_MIN_H]
+.t_ok:
+    add rdx, r9
+    sub r8, r9
+.not_t:
+    cmp rsi, [rdi + WN_X]
     jne .resized
-    cmp rdx, [rdi + WN_H]
+    cmp rdx, [rdi + WN_Y]
+    jne .resized
+    cmp rcx, [rdi + WN_W]
+    jne .resized
+    cmp r8, [rdi + WN_H]
     je .out
 .resized:
-    jmp win_resize
+    jmp win_set_rect
 .out:
+    ret
+
+; desk_hover: what is under the pointer, for the buttons that light and
+; the dock's names
+desk_hover:
+    push rbx
+    mov rdi, [ptr_x]
+    mov rsi, [ptr_y]
+    call desk_hit
+    mov rbx, -1                         ; the dock's item
+    cmp edx, P_DOCK
+    jne .tip
+    mov rbx, rcx
+.tip:
+    cmp rbx, [dock_hover]
+    je .buttons
+    mov [dock_hover], rbx
+    call dock_damage
+.buttons:
+    xor ecx, ecx                        ; the window whose buttons it is over
+    cmp edx, P_CLOSE
+    je .over
+    cmp edx, P_MIN
+    je .over
+    cmp edx, P_ZOOM
+    jne .set
+.over:
+    mov rcx, rax
+.set:
+    mov rax, [hover_win]
+    cmp rcx, rax
+    je .out
+    mov [hover_win], rcx
+    test rax, rax
+    jz .new
+    mov rdi, rax
+    call win_damage_frame
+.new:
+    test rcx, rcx
+    jz .out
+    mov rdi, rcx
+    call win_damage_frame
+.out:
+    pop rbx
     ret
 
 ; desk_wheel(EDX = notches, up positive) at the pointer
@@ -1745,6 +3437,11 @@ cmd_win:
     test eax, eax
     jnz .min
     mov rdi, r12
+    lea rsi, [str_win_zoom]
+    call streq
+    test eax, eax
+    jnz .zoom
+    mov rdi, r12
     lea rsi, [str_win_close]
     call streq
     test eax, eax
@@ -1771,6 +3468,12 @@ cmd_win:
 .min:
     mov rdi, rbx
     call win_minimise
+    jmp .said
+.zoom:
+    test dword [rbx + WN_FLAGS], WF_RESIZE
+    jz .fixed
+    mov rdi, rbx
+    call win_zoom
     jmp .said
 .close:
     test dword [rbx + WN_FLAGS], WF_CLOSE
@@ -1813,7 +3516,7 @@ cmd_win:
     KLOG "desk: no window %u ('win' lists them)", rbx
     jmp .out
 .usage:
-    KLOG "usage: win [move <n> <x> <y> | size <n> <w> <h> | raise <n> | min <n> | close <n>]"
+    KLOG "usage: win [move <n> <x> <y> | size <n> <w> <h> | raise <n> | min <n> | zoom <n> | close <n>]"
 .out:
     pop r13
     pop r12
@@ -1871,46 +3574,128 @@ win_say:
     ret
 
 section .rodata
-str_btn_close:  db 'x', 0
-str_btn_min:    db '_', 0
-str_bar_shell:  db '+ shell', 0
 str_win_move:   db 'move', 0
 str_win_size:   db 'size', 0
 str_win_raise:  db 'raise', 0
 str_win_min:    db 'min', 0
+str_win_zoom:   db 'zoom', 0
 str_win_close:  db 'close', 0
 str_win_shown:  db 'shown', 0
 str_win_hidden: db 'minimised', 0
 str_win_focused: db 'focused', 0
+str_finder:     db 'Axiom', 0
+str_empty:      db 0
+align 4
+light_colors:   dd 0xFF5F57, 0xFEBC2E, 0x28C840 ; close, minimise, zoom
+light_marks:    dd 0x8C1A10, 0x985712, 0x0A6517 ; what each does, on it
+dow_t:          db 0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4
+day_names:      db 'Sun', 0, 'Mon', 0, 'Tue', 0, 'Wed', 0, 'Thu', 0, 'Fri', 0, 'Sat', 0
+month_names:    db 'Jan', 0, 'Feb', 0, 'Mar', 0, 'Apr', 0, 'May', 0, 'Jun', 0
+                db 'Jul', 0, 'Aug', 0, 'Sep', 0, 'Oct', 0, 'Nov', 0, 'Dec', 0
+
+; the dock's apps: the name it shows, the program it runs (0: built in),
+; how its icon is drawn (icons.asm)
+DA_LABEL        equ 0
+DA_PROG         equ 8
+DA_ICON         equ 16
+DA_SIZE         equ 24
+align 8
+dock_apps:
+    dq str_app_terminal, 0, icon_terminal
+    dq str_app_files, str_prog_files, icon_files
+    dq str_app_notes, str_prog_notes, icon_notes
+    dq str_app_browse, str_prog_browse, icon_browse
+    dq str_app_paint, str_prog_paint, icon_paint
+    dq str_app_settings, str_prog_settings, icon_settings
+    dq str_app_system, 0, icon_system
+str_app_terminal: db 'Terminal', 0
+str_app_files:  db 'Files', 0
+str_app_notes:  db 'Notes', 0
+str_app_browse: db 'Browse', 0
+str_app_paint:  db 'Paint', 0
+str_app_settings: db 'Settings', 0
+str_app_system: db 'System', 0
+str_prog_files: db 'files', 0
+str_prog_notes: db 'notes', 0
+str_prog_browse: db 'browse', 0
+str_prog_paint: db 'paint', 0
+str_prog_settings: db 'settings', 0
 
 section .data
 desk_ready:     db 0
 desk_reap:      db 0
 drag_mode:      db DRAG_NONE
+dock_dirty:     db 0
+align 8
+dock_hover:     dq -1                   ; the dock's item under the pointer
+dock_press:     dq -1                   ; and the one held down
 
 section .bss
 alignb 8
-fr_b:           resq 1                  ; the frame: its border,
-fr_t:           resq 1                  ; title bar,
-fr_btn:         resq 1                  ; a button in it,
-fr_grip:        resq 1                  ; the corner that resizes
-frame_ty:       resq 1
-desk_wins:      resq DESK_MAX           ; by slot: the bar's order
+fr_b:           resq 1                  ; a window: its border (none),
+fr_t:           resq 1                  ; its title bar
+fr_sh:          resq 1                  ; how far its shadow reaches
+m_bar_h:        resq 1                  ; the menu bar's height
+m_r:            resq 1                  ; a window's corners
+m_light:        resq 1                  ; its buttons: across,
+m_light_x:      resq 1                  ; the first's left,
+m_light_step:   resq 1                  ; one to the next
+m_grab:         resq 1                  ; how near an edge resizes
+m_icon:         resq 1                  ; the dock: an icon,
+m_dock_pad:     resq 1                  ; around them,
+m_dock_space:   resq 1                  ; between them,
+m_dock_gap:     resq 1                  ; under the dock,
+m_dock_r:       resq 1                  ; its corners,
+m_dock_h:       resq 1
+m_dock_y:       resq 1                  ; its top
+m_dot:          resq 1                  ; an app that runs
+m_work_y1:      resq 1                  ; where windows that fill stop
+m_blur:         resq 1                  ; the glass's blur
+m_tip_h:        resq 1                  ; a name over the dock
+m_tip_pad:      resq 1
+m_tip_gap:      resq 1
+m_bar_pad:      resq 1
+m_gap:          resq 1                  ; between windows placed
+m_mark:         resq 1                  ; Axiom's mark in the bar
+f_body:         resd 1                  ; fonts: text,
+f_title:        resd 1                  ; titles,
+f_small:        resd 1                  ; small
+alignb 8
+sh_focus:       resb SH_SIZE            ; the shadow of the window with the keys
+sh_other:       resb SH_SIZE            ; of the others
+bar_sf:         resb SF_SIZE            ; the menu bar's glass
+desk_wins:      resq DESK_MAX           ; by slot
 desk_z:         resq DESK_MAX           ; bottom to top
 desk_zn:        resq 1
 desk_focus:     resq 1                  ; the window with the keys
 desk_next_id:   resq 1
+hover_win:      resq 1                  ; the window whose buttons the pointer is on
 drag_win:       resq 1
 drag_dx:        resq 1
 drag_dy:        resq 1
+drag_x0:        resq 1                  ; where a window resized began
+drag_y0:        resq 1
+drag_w0:        resq 1
+drag_h0:        resq 1
+drag_edges:     resd 1
+alignb 8
 press_win:      resq 1                  ; a client a button was pressed in
+click_at:       resq 1                  ; the last press on a title bar: when,
+click_win:      resq 1                  ; and on which window
+span_sf:        resq 1                  ; span_copy's source
+span_x:         resq 1
+span_y:         resq 1
 dmg_lock:       resd 1
 alignb 8
 dmg_n:          resq 1
 dmg_rects:      resq DMG_MAX * 4        ; left, top, right, bottom
-bar_n:          resq 1
-bar_x0:         resq DESK_MAX + 1
-bar_x1:         resq DESK_MAX + 1
-bar_win:        resq DESK_MAX + 1
-bar_lab:        resq DESK_MAX + 1
+dock_n:         resq 1
+dock_sep:       resq 1                  ; the first item past the line
+dock_x:         resq 1
+dock_w:         resq 1
+dock_items:     resb DOCK_MAX * DI_SIZE
+app_icons:      resb DOCK_APPS * SF_SIZE
+bar_minute:     resq 1
 bar_status:     resb 160
+bar_clock_text: resb 64
+light_pts:      resd 32

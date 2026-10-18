@@ -59,7 +59,7 @@ loader reads: magic `AXIOMKRN`, entry point, file size, memory size.
 | 2 | `serial.asm`, `lib.asm`, `log.asm` | COM1 log, TSC time base, `sprintf`, `KLOG`; the clock and the boot volume into the log |
 | 3 | `cpu.asm` | CPUID features and brand, hybrid core types, PAT, NX, SSE/AVX through XSETBV, HWP, telemetry MSRs |
 | 4 | `pmm.asm`, `vmm.asm`, `heap.asm` | Bitmap page allocator from the UEFI memory map; the kernel's own page tables (no identity map, W^X), the vm region, the heap |
-| 5 | `gfx.asm`, `desk.asm`, `term.asm`, `window.asm`, `ui.asm` | Framebuffer, surfaces, alpha-blended glyphs; the desktop and the first shell's window (the others once the machine is up) |
+| 5 | `gfx.asm`, `theme.asm`, `draw.asm`, `icons.asm`, `desk.asm`, `term.asm`, `window.asm`, `ui.asm` | Framebuffer, surfaces, alpha-blended glyphs; the look, round shapes, shadows, blur and the desktop's font; the desktop and the first shell's window (the others once the machine is up) |
 | 6 | TSS, IST | Guarded stacks: the BSP moves onto its own, the loader's goes back; #DF, NMI and #MC each get one too |
 | 7 | `acpi.asm`, `smbios.asm` | MADT (CPUs, I/O APICs, overrides), MCFG, FADT, `_S5_`; board, BIOS and memory strings; OEM strings (`axiom.demo=off`: no zoom at boot) |
 | 8 | `pmm.asm` | Reclaim boot-services memory |
@@ -804,7 +804,7 @@ off. `log` shows the state; `log save`, `log on`, `log off`.
   meanwhile is forgotten. If it closes just as it is used, before anything
   comes back, the request goes again, once, on a new connection.
   `http_hangup` lets a client close as soon as it has what it wants.
-  `http <host[:port][/path]> [file]` is its own client: a GET. Up to 1 MiB
+  `http <host[:port][/path]> [file]` is its own client: a GET. Up to 4 MiB
   of the answer is kept; then the status line, `Content-Type`, `Location`
   and `Transfer-Encoding`, and the first 20 lines of the body, or the body
   goes to a file on the current volume. `https://` goes over `tls.asm`
@@ -1096,34 +1096,66 @@ text rows.
 
 ## The desktop: `desk.asm`
 
+- **The look** (`theme.asm`): light or dark, an accent, and a scale
+  (`ui_s4`, quarters of a pixel a point: 2560×1600 is two pixels a point).
+  `th_c` holds the colours by role (`TC_WINDOW`, `TC_TEXT`, `TC_PANEL`,
+  ...); `theme_color` maps the terminal's palette into them. `theme_apply`
+  loads one and `desk_restyle` remakes what was drawn from it: the
+  wallpaper, the bar, the shadows, the icons, the cursor, every window. The
+  `theme` thing in the shell shows and changes it.
+- **Drawing** (`draw.asm`): rounded rectangles walked as spans with an
+  anti-aliased edge (`rr_walk`), soft shadows made once per radius and
+  margin (`shadow_build`, `gfx_shadow`: corners, edges fading inside and
+  out, the inside where the window leaves it showing), box blur for the
+  frosted glass, and the desktop's font (`uf_text`, Noto Sans regular and
+  semibold, from `gen/uifont.*`). Images are premultiplied ARGB.
+- **Icons** (`icons.asm`): each app's icon is a small program of shapes
+  (gradients, round rectangles, circles, polygons, a letter) in thousandths
+  of its size, drawn at the scale and given a shadow; a program's window
+  without one gets a letter on a colour from its name. The cursor is drawn
+  the same way.
 - **Windows** (`WN_*`): where the frame is, the client's size, its surface,
-  flags (`WF_SHOWN`, `WF_CLOSE`, `WF_RESIZE`, `WF_CLOSING`, `WF_PROGRAM`), an
-  id, a title, and an ops table: paint, key, click (press and release, at a
-  point in the client), wheel, close, move. `win_new` makes one, cascaded
-  unless told where; `win_move`, `win_resize` (`win_fit`: at least its
-  minimum, at most the screen, repainted), `win_focus` (raised, with the
-  keys), `win_minimise`, `win_close` (destroyed by the main loop, after its
-  own close op).
-- **Stacking:** `desk_z` bottom to top, `desk_wins` by slot (the bar's
-  order), `desk_focus` the window with the keys. A title bar always stays
-  on the screen, under the bar.
+  flags (`WF_SHOWN`, `WF_CLOSE`, `WF_RESIZE`, `WF_CLOSING`, `WF_PROGRAM`,
+  `WF_ZOOMED`), an id, a title, the app it belongs to, and an ops table:
+  paint, key, click (press and release, at a point in the client), wheel,
+  close, move. `win_new` makes one, cascaded unless told where; `win_move`,
+  `win_resize` (`win_fit`: at least its minimum, at most the screen,
+  repainted), `win_focus` (raised, with the keys), `win_minimise` (a
+  picture of it kept for the dock), `win_zoom` (to fill the space between
+  the bar and the dock, and back), `win_close` (destroyed by the main loop,
+  after its own close op).
+- **Stacking:** `desk_z` bottom to top, `desk_wins` by slot,
+  `desk_focus` the window with the keys. A title bar always stays on the
+  screen, under the bar.
 - **Damage:** `win_damage` (any thread) adds a rectangle of the screen to a
   list of 16 under a lock (once it is full, one rectangle around them
   all).
   `desk_update`, on the main thread, composes each one into the back buffer
-  (the background, the windows bottom to top, each frame then its client
-  copied in, the bar last) and copies it to the screen.
-- **The frame:** a border, a title bar with a minimise button (and a close
-  button if the window can close), and a grip in the client's corner if it
-  resizes. **The bar** across the top: AXIOM, `+ shell`, a button per window
-  (a click shows, raises or minimises it), the status at the right end.
+  (the wallpaper, the windows bottom to top, each its shadow, its frame
+  then its client copied in, the bar and the dock last, the dock's glass
+  blurred from what is under it) and copies it to the screen.
+- **The frame:** round corners, a shadow (deeper for the window with the
+  keys), and three buttons at the left of the title bar: close (if the
+  window can close), minimise and zoom, coloured while the window has the
+  keys or the pointer is over them. A window that resizes does so from any
+  edge.
+- **The menu bar** across the top: the mark, the name of the app in front,
+  and at the right the status and the time (`desk_tick` redraws it each
+  minute).
+- **The dock** at the bottom, frosted glass: the apps (Terminal, Files,
+  Notes, Browse, Paint, Settings, System) with a dot under each running
+  one, then programs' windows that are none of them, then past a line the
+  minimised windows' pictures. A click on an app brings its windows forward
+  or starts it; on Terminal, while a shell has the keys, it opens another;
+  on a picture, it shows the window again. Its name shows over it.
 - **The pointer** (`desk_press`, `desk_release`, `desk_motion`,
   `desk_wheel`): a press raises and focuses what is under it; on a title
-  bar it drags, on the grip it resizes, on a button it waits for the release
-  over the same button; in a client it goes to the window's click op, and so
-  does the release. The wheel goes to the client under the pointer.
+  bar it drags (a double click zooms), on an edge it resizes, on a button
+  or the dock it waits for the release over the same one; in a client it
+  goes to the window's click op, and so does the release. The wheel goes
+  to the client under the pointer.
 - `win` lists the windows (a shell's with its lines and how far it is
-  scrolled back); `win move|size|raise|min|close <n>` acts on one.
+  scrolled back); `win move|size|raise|min|zoom|close <n>` acts on one.
 
 ## Program windows: `window.asm`
 
@@ -1359,7 +1391,7 @@ text rows.
   (a glyph, its attributes, a foreground and a background colour of 24
   bits each), the cursor, the scroll-back, its own input line and history
   (`TW_SH_*`, `shell.asm`), and whether a command is still running in it.
-  `+ shell` or `shell` opens one; its close button closes it. `screen`
+  Terminal in the dock or `shell` opens one; its close button closes it. `screen`
   writes what the window shows to the serial log, as text (for tests).
 - **xterm** (`vt.asm`): what a Linux program writes is read as xterm
   would: UTF-8 (wide characters take two cells, combining ones none, a

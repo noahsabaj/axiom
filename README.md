@@ -17,14 +17,19 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   sensor) and package power (RAPL).
 - A Mandelbrot zoom in AVX2 + FMA running on all cores at once, with a
   one-core-versus-all benchmark.
-- **A desktop of windows**: System, Processors, the Mandelbrot and each
-  shell are overlapping windows, dragged by their title bars, resized from
-  the corner, raised and given the keys by a click, minimised and closed by
-  their buttons; a bar across the top lists them. `+ shell` on the bar (or
-  `shell`) opens another shell, each with its own output, scroll-back (the
-  wheel), history and commands running; what a command prints later goes to
-  the shell it was typed in. `win` lists the windows and moves, sizes,
-  raises, minimises or closes one. **Programs open windows of their own**,
+- **A desktop of windows**, light or dark (`theme`), with an accent colour
+  and a scale: a menu bar with the app in front, the time and what the
+  machine is doing; a frosted dock of apps, their running dots, and
+  pictures of minimised windows; windows with round corners and soft
+  shadows, in Noto Sans. System, Processors, the Mandelbrot and each shell
+  are windows, dragged by their title bars, resized from any edge, raised
+  and given the keys by a click, closed, minimised into the dock and zoomed
+  by their three buttons (or a double click on the title bar). Terminal in
+  the dock (or `shell`) opens another shell, each with its own output,
+  scroll-back (the wheel), history and commands running; what a command
+  prints later goes to the shell it was typed in. `win` lists the windows
+  and moves, sizes, raises, minimises, zooms or closes one. **Programs open
+  windows of their own**,
   by capability: pixels they draw into, keys, clicks, drags and the wheel
   as messages over a channel, and a title; `paint` is one to draw in.
 - **A web browser**, `browse [url]`: HTML and plain text over HTTP and
@@ -411,6 +416,7 @@ tools/test/             host-side tests for self-contained modules (tls: the
                         runs them
                         all at once, and qemu.py boots side by side
 tools/mkfont.py         rasterize the console font into src/kernel/gen/
+tools/mkuifont.py       rasterize the desktop's font into src/kernel/gen/
 docs/                   vision and architecture
 ```
 
@@ -420,6 +426,11 @@ The console font is rasterized from **Cascadia Mono**, © Microsoft Corporation,
 licensed under the [SIL Open Font License 1.1](https://openfontlicense.org).
 The bitmaps in `src/kernel/gen/` are a derivative of it and carry the same
 license. `tools/mkfont.py` regenerates them from any TrueType font you prefer.
+
+The desktop's font (`uifont.*` in `src/kernel/gen/`) is rasterized from
+**Noto Sans**, © Google LLC, under the [SIL Open Font License 1.1](https://openfontlicense.org),
+with a few symbols from **DejaVu Sans** (Bitstream Vera license, and public
+domain changes). `tools/mkuifont.py` regenerates it.
 
 The trusted roots in `src/kernel/gen/roots.asm` are the public keys and names
 of the certificate authorities in Mozilla's root store, taken from

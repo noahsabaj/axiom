@@ -166,6 +166,7 @@ main_loop:
     add rax, [refresh_ticks]
     mov [next_refresh], rax
     call ui_refresh
+    call desk_tick                      ; the bar's clock, each new minute
 .demo:
     call ui_demo_shown                  ; minimised: nothing to draw
     jz .sleep

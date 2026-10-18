@@ -208,19 +208,20 @@ pointer_clamp:
 
 ; cursor_move: show the cursor where the pointer is now
 cursor_move:
+    push rax
     push rdi
     push rsi
     push rdx
     push rcx
-    mov rdi, [cur_x]                    ; where it was
-    mov rsi, [cur_y]
+    call cursor_rect                    ; where it was
     mov rax, [ptr_x]
     mov [cur_x], rax
     mov rax, [ptr_y]
     mov [cur_y], rax
     cmp byte [cursor_shown], 0
     je .first
-    call cursor_size
+    call gfx_clip_screen_signed
+    jz .first
     call gfx_blit_raw                   ; uncover the old spot
 .first:
     mov byte [cursor_shown], 1
@@ -229,7 +230,25 @@ cursor_move:
     pop rdx
     pop rsi
     pop rdi
+    pop rax
     ret
+
+; cursor_rect -> RDI x, RSI y, RDX w, RCX h of the cursor drawn (it may
+; start off the screen). Preserves others but RAX.
+cursor_rect:
+    cmp qword [cursor_sf + SF_PTR], 0
+    je .art
+    mov rdi, [cur_x]
+    sub rdi, [cursor_hot_x]
+    mov rsi, [cur_y]
+    sub rsi, [cursor_hot_y]
+    mov rdx, [cursor_sf + SF_W]
+    mov rcx, [cursor_sf + SF_H]
+    ret
+.art:
+    mov rdi, [cur_x]
+    mov rsi, [cur_y]
+    jmp cursor_size
 
 ; cursor_size -> RDX = width, RCX = height in pixels
 cursor_size:
@@ -253,33 +272,133 @@ cursor_overlay:
     cmp byte [cursor_shown], 0
     je .out
     push rax
+    push rdi
+    push rsi
     push rdx
     push rcx
-    lea rax, [rdi + rdx]                ; rect right > cursor left?
-    cmp rax, [cur_x]
-    jbe .no
-    lea rax, [rsi + rcx]
-    cmp rax, [cur_y]
-    jbe .no
-    call cursor_size
-    mov rax, [cur_x]
-    add rax, rdx
-    cmp rdi, rax                        ; rect left < cursor right?
-    jae .no
-    mov rax, [cur_y]
-    add rax, rcx
-    cmp rsi, rax
-    jae .no
+    push r8
+    push r9
+    lea r8, [rdi + rdx]                 ; its right and bottom
+    lea r9, [rsi + rcx]
+    push rdi
+    push rsi
+    call cursor_rect
+    pop rax                             ; its top
+    cmp rsi, r9                         ; cursor top < its bottom,
+    jge .no_left
+    lea rsi, [rsi + rcx]
+    cmp rsi, rax                        ; cursor bottom > its top,
+    jle .no_left
+    pop rax                             ; its left
+    cmp rdi, r8                         ; cursor left < its right,
+    jge .no
+    add rdi, rdx
+    cmp rdi, rax                        ; cursor right > its left
+    jle .no
     call cursor_paint
+    jmp .no
+.no_left:
+    pop rax
 .no:
+    pop r9
+    pop r8
     pop rcx
     pop rdx
+    pop rsi
+    pop rdi
     pop rax
 .out:
     ret
 
+; cursor_blend: the cursor's picture over what the back buffer has there,
+; onto the framebuffer. Preserves all.
+cursor_blend:
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    call cursor_rect
+    mov r12, rdi                        ; the picture's top left on the screen
+    mov r13, rsi
+    call gfx_clip_screen_signed
+    jz .out
+    mov rax, rsi                        ; the picture's first pixel
+    sub rax, r13
+    imul rax, [cursor_sf + SF_PITCH]
+    mov r8, rdi
+    sub r8, r12
+    lea r8, [rax + r8 * 4]
+    add r8, [cursor_sf + SF_PTR]
+    mov rax, rsi                        ; the screen's
+    imul rax, [scr_pitch]
+    lea r9, [rax + rdi * 4]
+    mov r10, rcx                        ; rows
+.row:
+    mov rsi, r8
+    mov rbx, r9
+    mov rcx, rdx
+.px:
+    lodsd
+    test eax, eax
+    jz .next
+    mov r11, [bb_ptr]
+    mov r11d, [r11 + rbx]
+    mov r12d, eax                       ; what is left of what is under it
+    shr r12d, 24
+    mov r13d, r12d
+    shr r13d, 7
+    add r12d, r13d
+    neg r12d
+    add r12d, 256
+    SCALE r11d, r12d, r13d
+    add eax, r11d
+    and eax, 0x00FFFFFF
+    cmp byte [fb_swap], 0
+    je .put
+    mov r11d, eax                       ; 00RRGGBB -> 00BBGGRR
+    bswap eax
+    shr eax, 8
+    and r11d, 0x0000FF00
+    and eax, 0x00FF00FF
+    or eax, r11d
+.put:
+    mov r11, [fb_ptr]
+    mov [r11 + rbx], eax
+.next:
+    add rbx, 4
+    dec rcx
+    jnz .px
+    add r8, [cursor_sf + SF_PITCH]
+    add r9, [scr_pitch]
+    dec r10
+    jnz .row
+.out:
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+    ret
+
 ; cursor_paint: draw the arrow straight onto the framebuffer. Preserves all.
 cursor_paint:
+    cmp qword [cursor_sf + SF_PTR], 0   ; the desktop's picture, once made
+    jne cursor_blend
     push rax
     push rbx
     push rcx

@@ -1974,7 +1974,8 @@ commands:
     VERB    'set',      cmd_set,      'set [name [value...]]: every variable ($name), one removed, or one set'
     COMMAND 'shell',    cmd_shell,    'a new shell, in a window of its own'
     COMMAND 'screen',   cmd_screen,   "what this shell's window shows, as text, to the serial log"
-    COMMAND 'win',      cmd_win,      'win [move <n> <x> <y> | size <n> <w> <h> | raise <n> | min <n> | close <n>]: the windows'
+    COMMAND 'win',      cmd_win,      'win [move <n> <x> <y> | size <n> <w> <h> | raise <n> | min <n> | zoom <n> | close <n>]: the windows'
+    THING   'theme',    themes_actions, 'how the desktop looks: light or dark, its accent, its scale'
     COMMAND 'info',     cmd_info,     'what this machine is'
     VERB    'cpus',     cmd_cpus,     'each logical CPU: kind, core, clock, heat, work'
     THING   'mem',      mem_actions,  'memory: what uses it, by firmware type, what an address is; a self-test'

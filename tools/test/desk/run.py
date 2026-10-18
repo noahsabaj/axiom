@@ -1,27 +1,31 @@
 #!/usr/bin/env python3
-"""Axiom's desktop in QEMU: windows, the bar, shells, by keyboard and mouse.
+"""Axiom's desktop in QEMU: windows, the menu bar, the dock, shells, by keyboard
+and mouse.
 
     python tools/test/desk/run.py
 
 Boots build/esp from a USB stick, with a USB tablet (an absolute pointer) and checks, from the
 serial log ('win' lists the windows) and from screenshots:
   - at the start: four windows (shell 1 with the keys, System, Processors,
-    the Mandelbrot), the bar across the top;
+    the Mandelbrot), the menu bar across the top, the dock at the bottom;
   - 'win move' and its clamps (a title bar stays on the screen, under the
-    bar), 'win size', 'win raise', 'win min';
+    bar), 'win size', 'win raise', 'win min', 'win zoom' and back;
   - a window dragged by its title bar, resized from its corner;
-  - '+ shell' on the bar: shell 2 opens with the keys and what is typed goes
-    there; a click on shell 1 gives them back; shell 2 closed by its close
-    button; the 'shell' command opens another, 'win close' closes it;
-  - System minimised by its title bar button, shown again from the bar, and
-    not closed by 'win close';
+  - Terminal in the dock, while a shell has the keys: shell 2 opens with
+    them and what is typed goes there; a click on shell 1 gives them back;
+    shell 2 closed by its close button; the 'shell' command opens another,
+    'win close' closes it;
+  - System minimised by its title bar button into the dock, shown again from
+    there, and not closed by 'win close';
   - the wheel over a shell scrolls it back, a key there brings it home;
   - the Mandelbrot held by a right click (its frame count stays);
   - on the screen: the bar, and the desktop where System was;
   - a program's window: 'run paint' opens one with the keys; strokes drawn
     with the mouse land in its pixels, a key changes the colour and its
     title, its close button ends the program and the window goes; ctrl+C
-    in its shell kills it, and the window goes too.
+    in its shell kills it, and the window goes too;
+  - 'theme light': the shells' background white; 'theme' says so; then
+    'theme accent pink'.
 Outputs go to build/test/desk/.
 """
 import pathlib
@@ -36,31 +40,43 @@ from qemu import boot_all  # noqa: E402
 OUT = ROOT / "build" / "test" / "desk"
 FAILS = 0
 SCR_W, SCR_H = 2560, 1600                       # QEMU's screen, as Axiom sets it
-BAR = 60                                        # the bar's height
-TITLE = 45                                      # a title bar (1.5 cells)
-BORDER = 1
-BTN = 45                                        # a title bar button (3 cells)
-TABLET = "-device qemu-xhci,id=ux -device usb-tablet,bus=ux.0"
-COL_BG = (0x0A, 0x0D, 0x13)                     # the desktop
-COL_PANEL = (0x10, 0x15, 0x1F)                  # the bar, a window's client
+PT = 2                                          # pixels a point there
+BAR = 24 * PT                                   # the menu bar's height
+TITLE = 28 * PT                                 # a title bar
+CLOSE, MIN, ZOOM = ((8 + 6 + 20 * i) * PT for i in range(3))   # its buttons'
+TABLET = "-device qemu-xhci,id=ux -device usb-tablet,bus=ux.0"  # middles, from its left
+WINDOW = (0x1E, 0x1E, 0x20)                     # a window's background, dark
+WINDOW_LIGHT = (0xFF, 0xFF, 0xFF)               # and light
+TERMINAL_ICON = (0x23, 0x23, 0x26)              # Terminal's icon, under its prompt
 # System, once moved, sized, dragged and resized: its frame's corner, its
 # client's size
 SX, SY = 100 + 400, 200 + 600
 SW, SH = 600 + 100, 300 + 50
-# the bar: AXIOM, then '+ shell', then a button per window (2 cells more than
-# its title, 16 at most), 2 pixels apart
-PLUS = (105 + 240) // 2
-SYSTEM_BTN = 379 + 120 // 2
 SHELL1 = (400, 1300)                            # a point in shell 1, once moved
 SHELL4 = (1000, 800)                            # in the shell opened for paint
-PX, PY = 1300, 200                              # paint's frame, once moved
+PX, PY = 1400, 200                              # paint's frame, once moved
 PW, PH = 600, 400
 INK, RED, PAPER = (0x1B, 0x1F, 0x27), (0xD9, 0x48, 0x3B), (0xF4, 0xF1, 0xE8)
 
 
 def client(x, y):
     """A point in paint's window, on the screen."""
-    return PX + BORDER + x, PY + BORDER + TITLE + y
+    return PX + x, PY + TITLE + y
+
+
+def button(x, y, which):
+    """The middle of a title bar's button, the window's top left at x, y."""
+    return x + which, y + TITLE // 2
+
+
+def dock(i, items, minimised=0):
+    """The middle of the dock's item i, of items, the last minimised ones past
+    a line."""
+    icon, pad, space = 48 * PT, 5 * PT, 4 * PT
+    line = 2 * space + 1 if minimised else 0
+    w = items * (icon + space) - space + 2 * pad + line
+    x = (SCR_W - w) // 2 + pad + i * (icon + space) + (line if i >= items - minimised else 0)
+    return x + icon // 2, SCR_H - 5 * PT - pad - icon // 2
 
 
 def at(x, y):
@@ -104,8 +120,8 @@ def win(mark):
 
 
 def script():
-    tx, ty = 100 + 300, 200 + BORDER + TITLE // 2       # on System's title bar
-    gx, gy = 100 + 400 + BORDER + 600 - 3, 200 + 600 + BORDER + TITLE + 300 - 3   # its grip
+    tx, ty = 100 + 300, 200 + TITLE // 2                # on System's title bar
+    gx, gy = 100 + 400 + 600 - 3, 200 + 600 + TITLE + 300 - 3   # its bottom right corner
     return [
         "until log: kept in", "wait 1.5",
         *win("start"),
@@ -114,14 +130,16 @@ def script():
         "type win move 2 9000 9000\\n", "wait 0.3", *win("clamp high"),
         "type win move 2 100 200\\n", "wait 0.3",
         "type win size 2 600 300\\n", "wait 0.3", *win("moved"),
+        "type win zoom 2\\n", "wait 0.3", *win("zoomed"),
+        "type win zoom 2\\n", "wait 0.3", *win("unzoomed"),
         # (a press on System gives it the keys: a click on shell 1 takes
         # them back)
         f"drag {at(tx, ty)} {at(tx + 400, ty + 600)}", "wait 0.5",
         f"abs {at(*SHELL1)} left", "wait 0.3", *win("dragged"),
         f"drag {at(gx, gy)} {at(gx + 100, gy + 50)}", "wait 0.5",
         f"abs {at(*SHELL1)} left", "wait 0.3", *win("resized"),
-        # a new shell, from the bar
-        f"abs {at(PLUS, BAR // 2)} left", "until desk: shell 2 opens", "wait 0.5",
+        # a new shell: Terminal in the dock (the apps, and the Mandelbrot's)
+        f"abs {at(*dock(0, 8))} left", "until desk: shell 2 opens", "wait 0.5",
         "type echo typed in two\\n", "wait 0.5", *win("two"),
         "type win move 5 300 300\\n", "wait 0.3",
         "type win size 5 1260 720\\n", "wait 0.3",
@@ -130,16 +148,16 @@ def script():
         # shell 1, where nothing covers it: the keys back
         f"abs {at(*SHELL1)} left", "wait 0.5",
         "type echo typed in one\\n", "wait 0.5", *win("one"),
-        # shell 2's close button, at the right of its title bar
+        # shell 2's close button
         "type win raise 5\\n", "wait 0.3",
-        f"abs {at(300 + BORDER + 1260 - BTN // 2, 300 + BORDER + TITLE // 2)} left",
+        f"abs {at(*button(300, 300, CLOSE))} left",
         "until desk: shell 2 closes", "wait 0.5", *win("closed"),
-        # System's minimise button (it has no close button), then its button
-        # on the bar
-        f"abs {at(SX + BORDER + SW - BTN // 2, SY + BORDER + TITLE // 2)} left", "wait 0.5",
+        # System's minimise button (it has no close button), then its
+        # picture in the dock, past the line
+        f"abs {at(*button(SX, SY, MIN))} left", "wait 0.5",
         *win("minimised"),
         "shot build/test/desk/minimised.png",
-        f"abs {at(SYSTEM_BTN, BAR // 2)} left", "wait 0.5",
+        f"abs {at(*dock(8, 9, 1))} left", "wait 0.5",
         f"abs {at(*SHELL1)} left", "wait 0.3", *win("restored"),
         "type win close 2\\n", "wait 0.5",
         # the Mandelbrot held by a right click: its frame count stays
@@ -156,21 +174,27 @@ def script():
         "type win close 6\\n", "until desk: shell 3 closes", "wait 0.3",
         # a program's window: paint, then a shell to work from
         "type run paint 600 400\\n", "until paint: a window", "wait 0.5",
-        f"abs {at(PLUS, BAR // 2)} left", "until desk: shell 4 opens", "wait 0.5",
+        # (Terminal in the dock: the first click brings shell 1 forward, the
+        # second opens a shell)
+        f"abs {at(*dock(0, 8))} left", "wait 0.5",
+        f"abs {at(*dock(0, 8))} left", "until desk: shell 4 opens", "wait 0.5",
         "type win move 8 100 100\\n", "wait 0.3",
-        "type win move 7 1300 200\\n", "wait 0.3", *win("paint"),
+        "type win move 7 1400 200\\n", "wait 0.3", *win("paint"),
         f"drag {at(*client(100, 100))} {at(*client(400, 300))}", "wait 0.5",
         "type 2", "wait 0.3",
         f"drag {at(*client(100, 350))} {at(*client(400, 350))}", "wait 0.5",
         f"abs {at(*SHELL4)} left", "wait 0.3", *win("painted"),
         "shot build/test/desk/paint.png",
-        f"abs {at(PX + BORDER + PW - BTN // 2, PY + BORDER + TITLE // 2)} left",
+        f"abs {at(*button(PX, PY, CLOSE))} left",
         "until run: PAINT exited", "wait 0.5", *win("paint closed"),
         # again, killed by ctrl+C in its shell
         "type run paint\\n", "until paint: a window", "wait 0.5",
         f"abs {at(*SHELL4)} left", "wait 0.3", "sendkey ctrl-c", "until run: PAINT", "wait 0.5",
         f"abs {at(*SHELL1)} left", "wait 0.3", *win("paint killed"),
         "type objects\\n", "wait 0.5",
+        "type theme light\\n", "wait 1.5",
+        "shot build/test/desk/light.png",
+        "type theme accent pink\\n", "wait 1",
         "type poweroff\\n", "ended",
     ]
 
@@ -203,11 +227,18 @@ def check(log, err):
     result((w.get("x"), w.get("y")) == (0, BAR), f"win move 2 0 0: at {w.get('x')},{w.get('y')}"
                                                    " (under the bar)")
     w = listing(log, "clamp high").get("System", {})
-    result((w.get("x"), w.get("y")) == (SCR_W - 90, SCR_H - TITLE - BORDER),
+    result((w.get("x"), w.get("y")) == (SCR_W - 3 * 16 * PT, SCR_H - TITLE),
            f"win move 2 9000 9000: at {w.get('x')},{w.get('y')} (its title bar on the screen)")
     w = listing(log, "moved").get("System", {})
     result((w.get("x"), w.get("y"), w.get("w"), w.get("h")) == (100, 200, 600, 300),
            f"win move, win size: {w.get('x')},{w.get('y')}, {w.get('w')}x{w.get('h')}")
+    z = listing(log, "zoomed").get("System", {})
+    work = SCR_H - 5 * PT - (48 + 10) * PT - 6 * PT - BAR - TITLE   # down to the dock
+    result((z.get("x"), z.get("y"), z.get("w"), z.get("h")) == (0, BAR, SCR_W, work),
+           f"win zoom: {z.get('x')},{z.get('y')}, {z.get('w')}x{z.get('h')}")
+    z = listing(log, "unzoomed").get("System", {})
+    result((z.get("x"), z.get("y"), z.get("w"), z.get("h")) == (100, 200, 600, 300),
+           f"and back: {z.get('x')},{z.get('y')}, {z.get('w')}x{z.get('h')}")
     w = listing(log, "dragged").get("System", {})
     result(w and near(w["x"], SX) and near(w["y"], SY) and w["w"] == 600,
            f"dragged by its title bar to {w.get('x')},{w.get('y')}")
@@ -217,7 +248,7 @@ def check(log, err):
 
     two = listing(log, "two")
     result("desk: shell 2 opens" in log and two.get("shell 2", {}).get("state") == "focused",
-           "'+ shell' opened shell 2, with the keys")
+           "Terminal in the dock opened shell 2, with the keys")
     result(re.search(r"^typed in two$", log, re.M) is not None, "shell 2 ran what was typed")
     # three commands in shell 2, the last saying how many lines shell 1 has
     a = two.get("shell 1", {}).get("lines")
@@ -236,7 +267,7 @@ def check(log, err):
     result(m.get("state") == "minimised", "System's minimise button: " + str(m.get("state")))
     m = listing(log, "restored").get("System", {})
     result(m.get("state") in ("focused", "shown") and near(m.get("x", 0), SX),
-           "its button on the bar showed it again, where it was")
+           "its picture in the dock showed it again, where it was")
     result("desk: 'System' can be minimised, not closed" in log, "win close 2: not closed")
 
     f1 = re.search(r"frame (\d+)", listing(log, "held").get("Mandelbrot", {}).get("title", ""))
@@ -277,11 +308,17 @@ def check(log, err):
            and "run: PAINT stopped" in log, "ctrl+C: killed, its window gone")
     result(re.search(r"^\s+desktop\s+\d+", log, re.M) is not None, "'objects': the desktop")
 
-    p = pixel("start.png", 1500, 3)
-    result(p == COL_PANEL, f"the bar on the screen ({p})")
-    p, q = pixel("two.png", 915, 1100), pixel("minimised.png", 915, 1100)
-    result(p is not None and p != COL_BG and q == COL_BG,
+    x, y = dock(0, 8)
+    p = pixel("start.png", x + 15 * PT, y + 10 * PT)
+    result(p is not None and all(near(a, b, 8) for a, b in zip(p, TERMINAL_ICON)),
+           f"Terminal's icon in the dock ({p})")
+    p, q = pixel("two.png", SX + 4, SY + TITLE + 4), pixel("minimised.png", SX + 4, SY + TITLE + 4)
+    result(p == WINDOW and q is not None and q != WINDOW,
            f"System on the screen ({p}), then the desktop where it was ({q})")
+    result(re.search(r"^\s+look\s+light$", log, re.M) is not None, "theme light: so it says")
+    p = pixel("light.png", 200, 1000 + TITLE + 2)
+    result(p == WINDOW_LIGHT, f"and shell 1 is white ({p})")
+    result(re.search(r"^\s+accent\s+pink$", log, re.M) is not None, "theme accent pink")
     result("AXIOM PANIC" not in log, "no panic")
     result("QEMU ended by itself" in err, "powered off")
 

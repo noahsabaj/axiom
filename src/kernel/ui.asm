@@ -8,6 +8,16 @@
 SYS_LINES       equ 13
 INFO_LEN        equ 160
 
+; measures, in points
+UI_PAD          equ 12                  ; a window's content from its edges
+CARD_IN         equ 10                  ; text from a card's edges
+CARD_R          equ 8                   ; a card's corners
+SYS_ROW         equ 19                  ; a row of System's card
+LABEL_W         equ 84                  ; its labels' column
+TILE_W          equ 150                 ; a processor's tile
+TILE_H          equ 46
+TILE_GAP        equ 8
+
 section .text
 
 ; -----------------------------------------------------------------------------
@@ -135,33 +145,25 @@ ui_init:
     inc eax
 .line_ok:
     mov [ui_line], rax
-    mov rax, [font_ch]
-    lea rcx, [rax + rax]
-    mov [hdr_h], rcx
-    mov rdx, rax
-    shr rdx, 1
-    add rdx, rax
-    mov [title_h], rdx                  ; 1.5 rows
-    shr rax, 1
-    add rcx, rax
-    mov [body_y], rcx
-    mov rcx, [scr_h]
-    sub rcx, rax
-    mov [body_bottom], rcx
+    call theme_init                     ; the scale, the look
+    call desk_metrics                   ; the bar, the title bars, the dock
+    mov rax, [m_bar_h]                  ; the windows: between the bar and
+    add rax, [m_gap]                    ; the dock
+    mov [body_y], rax
+    mov rax, [m_work_y1]
+    sub rax, [m_gap]
+    mov [body_bottom], rax
 
-    mov rax, [scr_w]                    ; left column: 36% in whole cells
-    mov rcx, [font_cw]
+    mov rax, [scr_w]                    ; left column: 36%
+    mov rcx, [m_gap]
     imul rcx, rcx, 3
     sub rax, rcx
     imul rax, rax, 36
     xor edx, edx
     mov ecx, 100
     div rcx
-    xor edx, edx
-    div qword [font_cw]
-    imul rax, [font_cw]
     mov [left_w], rax
-    mov rcx, [font_cw]
+    mov rcx, [m_gap]
     mov [sys_x], rcx
     lea rdx, [rcx * 2 + rax]
     mov [right_x], rdx
@@ -172,15 +174,15 @@ ui_init:
 
     mov rax, [body_y]
     mov [sys_y], rax
-    mov rax, [font_ch]
+    call ui_measures
+    mov rax, [ui_row]                   ; System: its card, padded
     imul rax, rax, SYS_LINES
+    mov rcx, [ui_pad]
+    lea rax, [rax + rcx * 2]
     add rax, [title_h]
-    mov rcx, [font_ch]
-    shr rcx, 1
-    add rax, rcx
     mov [sys_h], rax
     add rax, [sys_y]
-    add rax, rcx
+    add rax, [m_gap]
     mov [conp_y], rax
     mov rdx, [body_bottom]
     sub rdx, rax
@@ -217,25 +219,10 @@ ui_client:
 ui_ready:
     push rbx
     push r12
-    mov rax, [font_cw]                  ; tile geometry
-    imul rcx, rax, 22
-    mov [tile_w], rcx
-    shr rax, 1
-    mov [tile_gap_x], rax
-    mov rax, [font_ch]
-    lea rcx, [rax * 2]
-    mov rdx, rax
-    shr rdx, 1
-    add rcx, rdx
-    mov [tile_h], rcx
-    xor edx, edx
-    mov ecx, 3
-    div rcx
-    mov [tile_gap_y], rax
+    call ui_measures                    ; tile geometry
     mov rax, [right_w]                  ; columns that fit
-    mov rcx, [font_cw]
-    sub rax, rcx
-    sub rax, rcx
+    sub rax, [ui_pad]
+    sub rax, [ui_pad]
     add rax, [tile_gap_x]
     mov rcx, [tile_w]
     add rcx, [tile_gap_x]
@@ -255,16 +242,14 @@ ui_ready:
     mov rcx, [tile_h]
     add rcx, [tile_gap_y]
     imul rax, rcx
+    sub rax, [tile_gap_y]
+    mov rcx, [ui_pad]
+    lea rax, [rax + rcx * 2]
     add rax, [title_h]
-    mov rcx, [font_ch]
-    shr rcx, 2
-    add rax, rcx
     mov [cores_h], rax
     mov rcx, [body_y]
     add rcx, rax
-    mov rax, [font_ch]
-    shr rax, 1
-    add rcx, rax
+    add rcx, [m_gap]
     mov [demo_y], rcx
     mov rax, [body_bottom]
     sub rax, rcx
@@ -279,6 +264,7 @@ ui_ready:
     mov rcx, [sys_h]
     call ui_client
     mov r10d, WF_RESIZE
+    lea r11, [str_app_system]
     call win_new
     mov [sys_win], rax
     lea rdi, [cpu_ops]
@@ -289,6 +275,7 @@ ui_ready:
     mov rcx, [cores_h]
     call ui_client
     mov r10d, WF_RESIZE
+    lea r11, [str_app_system]
     call win_new
     mov [cpu_win], rax
     lea rdi, [demo_base]                ; the demo's title
@@ -308,6 +295,7 @@ ui_ready:
     mov rcx, [demo_h]
     call ui_client
     mov r10d, WF_RESIZE
+    lea r11, [str_app_mandel]
     call win_new
     mov [demo_win], rax
     pop r12
@@ -541,45 +529,134 @@ ui_system_info:
     pop rbx
     ret
 
-; sys_paint (the System window's OP_PAINT, RBX = window): the facts
-sys_paint:
-    push r12
-    push r13
+; ui_measures: the measures above, in pixels at this scale. Preserves all
+; but RAX.
+ui_measures:
+    push rdi
+    mov edi, UI_PAD
+    call pt
+    mov [ui_pad], rax
+    mov edi, CARD_IN
+    call pt
+    mov [ui_in], rax
+    mov edi, CARD_R
+    call pt
+    mov [ui_card_r], rax
+    mov edi, SYS_ROW
+    call pt
+    mov [ui_row], rax
+    mov edi, LABEL_W
+    call pt
+    mov [ui_label_w], rax
+    mov edi, TILE_W
+    call pt
+    mov [tile_w], rax
+    mov edi, TILE_H
+    call pt
+    mov [tile_h], rax
+    mov edi, TILE_GAP
+    call pt
+    mov [tile_gap_x], rax
+    mov [tile_gap_y], rax
+    pop rdi
+    ret
+
+; ui_back(RBX = window): its client, the window's color
+ui_back:
     lea rdi, [rbx + WN_SF]
     call gfx_target
     xor edi, edi
     xor esi, esi
     mov rdx, [rbx + WN_W]
     mov rcx, [rbx + WN_H]
-    mov r8d, COL_PANEL
-    call gfx_fill
+    mov r8d, [th_c + TC_WINDOW]
+    jmp gfx_fill
+
+; sys_paint (the System window's OP_PAINT, RBX = window): the facts, a row
+; each on a card: its name at the left, what it is at the right
+sys_paint:
+    push r12
+    push r13
+    push r14
+    push r15
+    call ui_measures
+    call ui_back
+    mov rdi, [ui_pad]                   ; the card
+    mov rsi, rdi
+    mov rdx, [rbx + WN_W]
+    sub rdx, rdi
+    sub rdx, rdi
+    jle .done
+    mov rcx, [ui_row]
+    imul rcx, rcx, SYS_LINES
+    mov r8d, [th_c + TC_PANEL]
+    mov r9d, 256
+    mov r10, [ui_card_r]
+    mov r11d, RC_ALL
+    call gfx_rrect
+    mov r14, rdx                        ; its width
     xor r12d, r12d
 .line:
-    mov r13, [font_ch]
+    mov r13, [ui_row]                   ; the row's top
     imul r13, r12
-    mov rax, [font_ch]
-    shr rax, 2
-    add r13, rax                        ; y
-    mov rdi, [font_cw]
+    add r13, [ui_pad]
+    test r12, r12                       ; a line between rows
+    jz .text
+    mov rdi, [ui_pad]
+    add rdi, [ui_in]
     mov rsi, r13
+    mov rdx, r14
+    sub rdx, [ui_in]
+    mov ecx, 1
+    mov r8d, [th_c + TC_LINE]
+    mov r9d, 256
+    call gfx_fill_a
+.text:
+    mov edi, [f_body]                   ; the baseline: the middle, and half
+    call uf_metrics                     ; a capital below it
+    mov eax, [rax + UFT_CAP]
+    add rax, [ui_row]
+    shr rax, 1
+    lea r15, [r13 + rax]
+    mov rdi, [ui_pad]
+    add rdi, [ui_in]
+    mov rsi, r15
     lea rdx, [info_labels]
     mov rdx, [rdx + r12 * 8]
-    mov ecx, COL_DIM
-    mov r8d, COL_PANEL
-    call ui_text
-    mov rdi, [font_cw]                  ; values start at column 11
-    imul rdi, rdi, 11
-    mov rsi, r13
+    mov ecx, [th_c + TC_TEXT]
+    mov r8d, [f_body]
+    call uf_text
+    mov r9, r14                         ; the value: right of the labels
+    sub r9, [ui_in]
+    sub r9, [ui_in]
+    sub r9, [ui_label_w]
+    jle .next
     imul rdx, r12, INFO_LEN
     lea rax, [info_lines]
     add rdx, rax
-    mov ecx, COL_TEXT
-    mov r8d, COL_PANEL
-    call ui_text
+    mov rdi, rdx
+    mov esi, [f_body]
+    call uf_width
+    cmp rax, r9
+    jbe .fits
+    mov rax, r9
+.fits:
+    mov rdi, [ui_pad]
+    add rdi, r14
+    sub rdi, [ui_in]
+    sub rdi, rax
+    mov rsi, r15
+    mov ecx, [th_c + TC_TEXT2]
+    mov r8d, [f_body]
+    call uf_text_max
+.next:
     inc r12
     cmp r12, SYS_LINES
     jb .line
+.done:
     call gfx_target_back
+    pop r15
+    pop r14
     pop r13
     pop r12
     ret
@@ -587,18 +664,11 @@ sys_paint:
 ; cpu_paint (the Processors window's OP_PAINT, RBX = window): the tiles,
 ; as many to a row as fit
 cpu_paint:
-    lea rdi, [rbx + WN_SF]
-    call gfx_target
-    xor edi, edi
-    xor esi, esi
-    mov rdx, [rbx + WN_W]
-    mov rcx, [rbx + WN_H]
-    mov r8d, COL_PANEL
-    call gfx_fill
+    call ui_measures
+    call ui_back
     mov rax, [rbx + WN_W]               ; columns that fit
-    mov rcx, [font_cw]
-    sub rax, rcx
-    sub rax, rcx
+    sub rax, [ui_pad]
+    sub rax, [ui_pad]
     add rax, [tile_gap_x]
     jg .room
     xor eax, eax
@@ -642,6 +712,7 @@ ui_draw_tiles:
     push r13
     push r14
     push r15
+    push rbp
     xor r12d, r12d                      ; the busiest CPU sets the bar scale
     mov qword [tile_max_items], 1
 .scan:
@@ -669,54 +740,51 @@ ui_draw_tiles:
     mov rcx, [tile_h]
     add rcx, [tile_gap_y]
     imul rax, rcx
-    mov rcx, [font_ch]
-    shr rcx, 2
-    add rax, rcx
+    add rax, [ui_pad]
     mov r14, rax                        ; tile y, in the window
     mov rax, [tile_w]
     add rax, [tile_gap_x]
     imul rax, rdx
-    add rax, [font_cw]
+    add rax, [ui_pad]
     mov r13, rax                        ; tile x
 
-    mov r15d, COL_BLUE                  ; kind color
-    mov rax, [rbx + PC_KIND]
-    cmp rax, CPU_KIND_P
+    mov eax, COL_BLUE                   ; kind color
+    mov rcx, [rbx + PC_KIND]
+    cmp rcx, CPU_KIND_P
     jne .not_p
-    mov r15d, COL_PCORE
+    mov eax, COL_PCORE
 .not_p:
-    cmp rax, CPU_KIND_E
+    cmp rcx, CPU_KIND_E
     jne .colored
-    mov r15d, COL_ECORE
+    mov eax, COL_ECORE
 .colored:
     cmp qword [rbx + PC_ONLINE], 0
     jne .lit
-    mov r15d, COL_FAINT
+    mov eax, COL_FAINT
 .lit:
-    mov rdi, r13
+    call theme_color
+    mov r15d, eax
+    mov rdi, r13                        ; the card
     mov rsi, r14
     mov rdx, [tile_w]
     mov rcx, [tile_h]
-    mov r8d, COL_PANEL2
-    call gfx_fill
-    mov rdi, r13
-    mov rsi, r14
-    mov rdx, [ui_line]
-    imul rdx, rdx, 3
-    mov rcx, [tile_h]
-    mov r8d, r15d
-    call gfx_fill
+    mov r8d, [th_c + TC_PANEL]
+    mov r9d, 256
+    mov r10, [ui_card_r]
+    mov r11d, RC_ALL
+    call gfx_rrect
 
-    call ui_tile_label                  ; line 1: name and clock
+    mov edi, 18                         ; line 1: its name, its clock
+    call pt
+    lea rbp, [r14 + rax]                ; the baseline
+    call ui_tile_label
     mov rdi, r13
-    add rdi, [font_cw]
-    mov rsi, [font_ch]
-    shr rsi, 3
-    add rsi, r14
+    add rdi, [ui_in]
+    mov rsi, rbp
     lea rdx, [ui_buf]
     mov ecx, r15d
-    mov r8d, COL_PANEL2
-    call ui_text
+    mov r8d, [f_title]
+    call uf_text
     lea rdi, [ui_buf]
     mov rax, [rbx + PC_MHZ]
     test rax, rax
@@ -726,22 +794,15 @@ ui_draw_tiles:
 .no_mhz:
     SPRINTF rdi, "-- MHz"
 .mhz_text:
-    mov rdi, r13
-    add rdi, [tile_w]
-    sub rdi, [tile_gap_x]
-    mov rsi, [font_ch]
-    shr rsi, 3
-    add rsi, r14
-    lea rdx, [ui_buf]
-    mov ecx, COL_TEXT
+    mov ecx, [th_c + TC_TEXT]
     cmp qword [rbx + PC_MHZ], 0
     jne .mhz_color
-    mov ecx, COL_FAINT
+    mov ecx, [th_c + TC_TEXT3]
 .mhz_color:
-    mov r8d, COL_PANEL2
-    call ui_text_right
+    mov r8d, [f_body]
+    call .right
 
-    lea rdi, [ui_buf]                   ; line 2: temperature, right
+    lea rdi, [ui_buf]                   ; line 2: its heat, at the right
     mov rax, [rbx + PC_TEMP]
     test rax, rax
     jz .no_temp
@@ -750,64 +811,90 @@ ui_draw_tiles:
 .no_temp:
     SPRINTF rdi, {"--", G_DEGREE, "C"}
 .temp_text:
-    mov rdi, r13
-    add rdi, [tile_w]
-    sub rdi, [tile_gap_x]
-    mov rsi, [font_ch]
-    mov rax, rsi
-    shr rax, 3
-    add rsi, rax
-    add rsi, r14
-    lea rdx, [ui_buf]
-    mov ecx, COL_FAINT
-    mov rax, [rbx + PC_TEMP]
-    test rax, rax
+    mov edi, 36
+    call pt
+    lea rbp, [r14 + rax]
+    mov eax, COL_FAINT
+    mov rcx, [rbx + PC_TEMP]
+    test rcx, rcx
     jz .temp_color
-    mov ecx, COL_GOOD
-    cmp rax, 70
+    mov eax, COL_GOOD
+    cmp rcx, 70
     jb .temp_color
-    mov ecx, COL_WARN
-    cmp rax, 90
+    mov eax, COL_WARN
+    cmp rcx, 90
     jb .temp_color
-    mov ecx, COL_BAD
+    mov eax, COL_BAD
 .temp_color:
-    mov r8d, COL_PANEL2
-    call ui_text_right
+    call theme_color
+    mov ecx, eax
+    mov r8d, [f_small]
+    call .right
     mov [tile_bar_end], rax
 
-    mov rdi, r13                        ; line 2: share of the last job
-    add rdi, [font_cw]
-    mov rsi, [font_ch]
-    mov rax, rsi
-    shr rax, 1
-    add rsi, rax
-    add rsi, r14
+    mov rdi, r13                        ; and its share of the last job
+    add rdi, [ui_in]
     mov rdx, [tile_bar_end]
     sub rdx, rdi
-    sub rdx, [font_cw]
+    mov edi, 8
+    call pt
+    sub rdx, rax
     jle .next_tile
-    mov rcx, [font_ch]
-    shr rcx, 2
-    mov r8d, COL_LINE
-    call gfx_fill
+    mov edi, 5
+    call pt
+    mov rcx, rax                        ; the bar: a capsule
+    mov r10, rax
+    shr r10, 1
+    mov edi, 31
+    call pt
+    lea rsi, [r14 + rax]
+    mov rdi, r13
+    add rdi, [ui_in]
+    mov r8d, [th_c + TC_LINE]
+    mov r9d, 256
+    mov r11d, RC_ALL
+    call gfx_rrect
     mov rax, [rbx + PC_JOB_ITEMS]
     imul rax, rdx
     xor edx, edx
     div qword [tile_max_items]
-    mov rdx, rax
-    test rdx, rdx
+    test rax, rax
     jz .next_tile
+    cmp rax, rcx                        ; no shorter than it is high
+    jae .long
+    mov rax, rcx
+.long:
+    mov rdx, rax
     mov r8d, r15d
-    call gfx_fill
+    call gfx_rrect
 .next_tile:
     inc r12d
     jmp .tile
 .done:
+    pop rbp
     pop r15
     pop r14
     pop r13
     pop r12
     pop rbx
+    ret
+; ui_buf at the right of the tile, on RBP, ECX = color, R8D = font -> RAX =
+; where it starts
+.right:
+    push rcx
+    lea rdi, [ui_buf]
+    mov esi, r8d
+    call uf_width
+    mov rdi, r13
+    add rdi, [tile_w]
+    sub rdi, [ui_in]
+    sub rdi, rax
+    pop rcx
+    push rdi
+    mov rsi, rbp
+    lea rdx, [ui_buf]
+    call uf_text
+    pop rax
     ret
 
 ; ui_tile_label(RBX = per-CPU block) -> ui_buf = "P3", "P3.1", "E7", "C2"
@@ -1067,6 +1154,7 @@ section .rodata
 str_brand:          db 'AXIOM', 0
 str_t_system:       db 'System', 0
 str_t_processors:   db 'Processors', 0
+str_app_mandel:     db 'Mandelbrot', 0
 str_off:            db 'off', 0
 str_hwp_on:         db 'on, EPP 0 (performance)', 0
 str_x2apic:         db 'x2APIC', 0
@@ -1074,19 +1162,19 @@ str_xapic:          db 'xAPIC', 0
 str_none:           db 'none found', 0
 str_panic_title:    db 'AXIOM STOPPED', 0
 str_panic_footer:   db 'Every CPU is halted. The same report went to the serial port. Power-cycle to restart.', 0
-str_l_machine:      db 'machine', 0
-str_l_firmware:     db 'firmware', 0
-str_l_cpu:          db 'processor', 0
-str_l_cores:        db 'cores', 0
-str_l_clocks:       db 'clocks', 0
-str_l_memory:       db 'memory', 0
-str_l_display:      db 'display', 0
-str_l_acpi:         db 'acpi', 0
-str_l_pci:          db 'pci', 0
-str_l_storage:      db 'storage', 0
-str_l_network:      db 'network', 0
-str_l_isa:          db 'isa', 0
-str_l_boot:         db 'boot', 0
+str_l_machine:      db 'Machine', 0
+str_l_firmware:     db 'Firmware', 0
+str_l_cpu:          db 'Processor', 0
+str_l_cores:        db 'Cores', 0
+str_l_clocks:       db 'Clocks', 0
+str_l_memory:       db 'Memory', 0
+str_l_display:      db 'Display', 0
+str_l_acpi:         db 'ACPI', 0
+str_l_pci:          db 'PCI', 0
+str_l_storage:      db 'Storage', 0
+str_l_network:      db 'Network', 0
+str_l_isa:          db 'ISA', 0
+str_l_boot:         db 'Boot', 0
 align 8
 sys_ops:        dq sys_paint, 0, 0, 0, 0, 0, 0
 cpu_ops:        dq cpu_paint, 0, 0, 0, 0, 0, 0
@@ -1121,6 +1209,11 @@ tile_gap_y:     resq 1
 tile_cols:      resq 1
 tile_max_items: resq 1
 tile_bar_end:   resq 1
+ui_pad:         resq 1
+ui_in:          resq 1
+ui_card_r:      resq 1
+ui_row:         resq 1
+ui_label_w:     resq 1
 sys_win:        resq 1
 cpu_win:        resq 1
 demo_win:       resq 1

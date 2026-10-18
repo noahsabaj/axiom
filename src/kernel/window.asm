@@ -30,7 +30,9 @@ WO_W            equ 96                  ; dword: its size
 WO_H            equ 100                 ; dword
 WO_FLAGS        equ 104                 ; dword WOF_*: for the main loop to do
 WO_TITLE        equ 112
-WO_SIZE         equ WO_TITLE + WN_TITLE_MAX
+WO_PROG         equ WO_TITLE + WN_TITLE_MAX ; the program's name (the dock's)
+WO_PROG_MAX     equ 32
+WO_SIZE         equ WO_PROG + WO_PROG_MAX
 
 WOF_OPEN        equ 1                   ; its window is to be opened
 WOF_TITLE       equ 2                   ; retitled
@@ -149,6 +151,18 @@ sys_window_new:
     dec ecx
     jnz .name
 .named:
+    mov byte [rdi], 0
+    lea rsi, [rbx + WO_TITLE]           ; and so is whose it is
+    lea rdi, [rbx + WO_PROG]
+    mov ecx, WO_PROG_MAX - 1
+.prog:
+    lodsb
+    test al, al
+    jz .progged
+    stosb
+    dec ecx
+    jnz .prog
+.progged:
     mov byte [rdi], 0
     mov dword [rbx + WO_FLAGS], WOF_OPEN
     mov rdi, [rbx + WO_MEM]             ; the program's handles: its pixels,
@@ -449,6 +463,7 @@ wo_open:
     mov r8, -1
     xor r9d, r9d
     mov r10d, WF_CLOSE | WF_PROGRAM
+    lea r11, [rbx + WO_PROG]
     call win_new
     test rax, rax
     jz .full
