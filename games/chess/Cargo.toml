@@ -23,3 +23,18 @@ opt-level = 1
 [profile.dev.package."*"]
 opt-level = 3
 debug = "line-tables-only"
+
+# Releases: one unit, linked whole.
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+
+# Builds for Axiom (`--profile axiom`): an .AXE holds 16 MiB at most, so the engine is optimized
+# for size, and the game, whose computer player wants speed, for speed.
+[profile.axiom]
+inherits = "release"
+opt-level = "s"
+
+[profile.axiom.package.chess]
+opt-level = 3

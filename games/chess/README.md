@@ -36,7 +36,7 @@ Chess for AxiomOS, made with Hearth.
 - The font is Mona Sans (SIL Open Font License, `assets/fonts/MonaSans-OFL.txt`), embedded.
 
 Arguments: `--fen <FEN>` starts from a position, `--two` with two players, `--dark` in the dark
-appearance, and `--no-threads` makes the computer think between frames, as on a system without
+appearance (on Axiom, the system's appearance is the default), and `--no-threads` makes the computer think between frames, as on a system without
 threads.
 
 ## Building
@@ -48,3 +48,19 @@ hearth run --detach --cargo-arg=--ignore-rust-version
 cargo test --ignore-rust-version
 cargo test --release --ignore-rust-version -- --ignored   # deeper perft counts
 ```
+
+### For Axiom
+
+The same code runs on Axiom through Hearth's `hearth_axiom`, which `2d_soft` brings in for
+Axiom's target (`x86_64-axiom.json`, from Axiom's `sdk/rust`). Build it with `std` from source,
+without the remote protocol (Axiom has no sockets for it yet), and in the `axiom` profile, which
+keeps the program under the 16 MiB an .AXE may be:
+
+```bash
+cargo +nightly build --profile axiom --ignore-rust-version --no-default-features -Zbuild-std=std,panic_abort -Zbuild-std-features=compiler-builtins-mem -Zjson-target-spec --target x86_64-axiom.json
+python <axiom>/tools/mkaxe.py target/x86_64-axiom/axiom/chess CHESS.AXE
+```
+
+Put `CHESS.AXE` in `EFI/AXIOM` on the boot stick and type `chess` in a shell. The game needs no
+files beside it: the font is embedded. On Axiom it starts in the system's appearance, opens a
+window that fits the screen, and the computer thinks between frames, as there are no threads.

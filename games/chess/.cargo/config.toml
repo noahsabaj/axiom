@@ -5,3 +5,8 @@ linker = "rust-lld.exe"
 
 [target.aarch64-pc-windows-msvc]
 linker = "rust-lld.exe"
+
+# Axiom (x86_64-axiom.json, from Axiom's sdk/rust). getrandom has no Axiom backend of its own, so
+# it takes the processor's RDRAND.
+[target.x86_64-axiom]
+rustflags = ["--cfg", 'getrandom_backend="rdrand"']

@@ -36,12 +36,14 @@ const SLICE_NODES: u64 = 30_000;
 
 static FONT: &[u8] = include_bytes!("../assets/fonts/MonaSans-VariableFont.ttf");
 
+// On Axiom, this makes `main` the program's entry.
+#[hearth_main]
 fn main() {
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
             title: "Chess".into(),
-            resolution: (1120, 780).into(),
+            resolution: window_size().into(),
             resize_constraints: WindowResizeConstraints { min_width: 760.0, min_height: 540.0, ..default() },
             ..default()
         }),
@@ -89,11 +91,35 @@ fn chess_from_args() -> Chess {
             Err(e) => error!("bad --fen: {e}"),
         }
     }
-    chess.dark = args.iter().any(|a| a == "--dark");
+    chess.dark = args.iter().any(|a| a == "--dark") || system_dark();
     if args.iter().any(|a| a == "--two") {
         chess.mode = Mode::TwoPlayers;
     }
     chess
+}
+
+/// The window's size in logical pixels: 1120 by 780, or on Axiom, less if the screen needs it,
+/// since Axiom opens a window at the size it asks for.
+fn window_size() -> (u32, u32) {
+    let (w, h) = (1120u32, 780u32);
+    #[cfg(target_os = "zkvm")]
+    if let Ok(look) = hearth::axiom::axiom::Look::get() {
+        let scale = look.scale4().max(1) as f32 / 4.0;
+        let (sw, sh) = look.screen();
+        // Room for the menu bar, the title bar and the dock.
+        let (fw, fh) = ((sw as f32 * 0.8 / scale) as u32, (sh as f32 * 0.8 / scale) as u32);
+        return (w.min(fw).max(760), h.min(fh).max(540));
+    }
+    (w, h)
+}
+
+/// Whether the system is in its dark appearance, which the game starts in. Only Axiom says.
+fn system_dark() -> bool {
+    #[cfg(target_os = "zkvm")]
+    if let Ok(look) = hearth::axiom::axiom::Look::get() {
+        return look.dark();
+    }
+    false
 }
 
 fn to_color(c: canvas::Rgba) -> hearth::prelude::Color {
@@ -340,7 +366,9 @@ fn keys(
             continue;
         }
         match (&e.logical_key, e.key_code) {
-            (_, KeyCode::Backspace) | (_, KeyCode::ArrowLeft) => {
+            // By the logical key as well as the key's code: on Axiom, a key can come as the key it
+            // types alone, with no code.
+            (Key::Backspace | Key::ArrowLeft, _) | (_, KeyCode::Backspace | KeyCode::ArrowLeft) => {
                 stop_thinking(&mut chess, &mut thinking);
                 chess.undo();
             }
@@ -360,7 +388,7 @@ fn keys(
                 chess.flipped = !chess.flipped;
                 chess.dirty = true;
             }
-            (_, KeyCode::Escape) => {
+            (Key::Escape, _) | (_, KeyCode::Escape) => {
                 chess.selected = None;
                 chess.promotion = None;
                 chess.dirty = true;
