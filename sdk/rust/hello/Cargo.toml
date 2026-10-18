@@ -3,6 +3,7 @@ name = "rhello"
 version = "0.1.0"
 edition = "2024"
 description = "A Rust program without std: the console, the heap, files, the clock"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 axiom = { path = "../axiom" }

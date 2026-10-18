@@ -3,6 +3,7 @@ name = "rdemo"
 version = "0.1.0"
 edition = "2024"
 description = "A Rust program with std: a window, drawn each frame, and what happens to it"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 axiom = { path = "../axiom" }

@@ -3,6 +3,7 @@ name = "rtone"
 version = "0.1.0"
 edition = "2024"
 description = "A Rust program without std: a sine through a stream of sound"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 axiom = { path = "../axiom" }
