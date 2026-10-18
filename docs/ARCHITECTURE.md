@@ -1185,7 +1185,7 @@ text rows.
   for the host, so a page can be laid out and drawn there; the QEMU suite,
   `tools/test/browse/run.py`, compares browse's window with that.
 
-## Linux programs: `linux.asm`, `lxmm.asm`, `lxfs.asm`, `lxsig.asm`, `lxtty.asm`
+## Linux programs: `linux.asm`, `lxmm.asm`, `lxfs.asm`, `lxsig.asm`, `lxtty.asm`, `lxproc.asm`, `lxpipe.asm`
 
 - `linux <program> [arguments]` runs an unchanged Linux x86-64 program
   from a root on the boot stick: `tools/mkroot.py` copies programs and
@@ -1194,10 +1194,11 @@ text rows.
   Axiom's own, and writes `META`, a line per path with what FAT cannot
   keep (kind, mode, size, a link's target); `mkstick.py --linux` puts both
   at `/LINUX` with 4 KiB clusters. A name without a slash is looked for on
-  the Linux PATH. One runs at a time in a shell, and has its window's
-  keys while it runs (ctrl+C is its terminal's: SIGINT); closing the
-  window kills it, and the shell says how it ended (`exited with N`,
-  `ended by signal N`, `stopped`).
+  the Linux PATH. One runs at a time in a shell, as its session's leader
+  (with whatever it forks), and has its window's keys while it runs
+  (ctrl+C is its terminal's: SIGINT to the foreground group); closing the
+  window kills it, its end takes the session with it, and the shell says
+  how it ended (`exited with N`, `ended by signal N`, `stopped`).
 - **A process** is a task (its own address space, as `run`'s) with a
   Linux process's state in `TK_LX` (`LP_*`): its pid, descriptors,
   directory, program and terminal. Its threads are user threads marked
@@ -1256,6 +1257,36 @@ text rows.
   `poll`, `ppoll`, `select` and `pselect6` are here too: a terminal is
   readable when a read would not wait, and writable always, as is every
   other file.
+- **Processes** (`lxproc.asm`): every process is on one list
+  (`lx_procs`, `LP_NEXT`, under a spinlock), which holds its task until
+  it is waited for. `fork`, `vfork` and `clone` without `CLONE_THREAD`
+  make a task of its own with a copy of the parent's descriptors (the open
+  files shared), signal actions, directory, group and session, and either
+  a copy of its memory (`lx_as_fork`: the areas, and each page of its own
+  copied there and then; the file cache's pages shared as they were) or,
+  with `CLONE_VM`, the same address space, the parent waiting
+  (`CLONE_VFORK`, no signal cutting it short) until the child execs or
+  ends. `execve` and `execveat` read the arguments and environment into
+  the kernel, follow `#!` (the interpreter, its one argument, the path, up
+  to four deep), map the program into a new address space and only then
+  commit: the old space released, `FD_CLOEXEC` descriptors closed,
+  handled signals back to `SIG_DFL`, registers, TLS and SIMD state clean.
+  A process that ends sends its exit signal (SIGCHLD) to its parent, is
+  kept for `wait4` and `waitid` (by pid, group or any, `WNOHANG`,
+  `WNOWAIT`; the status and `siginfo` as Linux has them) unless the
+  parent ignores SIGCHLD or has none, and leaves its children without one.
+  `setpgid`, `setsid`, `getpgid`, `getsid`; `kill` to a process, a group
+  (ctrl+C's way too), or the session's every other one; `tgkill` to any
+  thread. `execve` while other threads run says `EAGAIN` (not yet), and
+  stop signals are ignored (no job stopping yet).
+- **Pipes** (`lxpipe.asm`): `pipe` and `pipe2` make a ring of 64 KiB with
+  a reader's and a writer's open file. A read waits for bytes, says 0 once
+  no writer is left; a write of up to 4 KiB goes in whole (`PIPE_BUF`),
+  a longer one as room comes, and with no reader left the writer gets
+  SIGPIPE and `EPIPE`. `O_NONBLOCK`, `poll` and `select`, `FIONREAD`,
+  `F_GETPIPE_SZ`, `fstat` (a FIFO) and `ESPIPE` for offsets are as Linux
+  has them. Every wait for a process or a pipe is on the one queue `poll`
+  uses, kicked whenever something changes.
 - **Threads** (`lxsig.asm`): `clone` with `CLONE_VM | CLONE_THREAD |
   CLONE_SIGHAND` (what `pthread_create` asks for; `clone3` says `ENOSYS`,
   so glibc falls back to it) makes another `TF_LINUX` thread of the task,
@@ -1276,8 +1307,8 @@ text rows.
 - **Signals**: a process has its actions (`LP_SIGACTS`, `rt_sigaction`)
   and the signals sent to it (`LP_SIGPEND`); a thread has its mask, its
   own pending signals, its alternate stack (`sigaltstack`) and what a
-  fault said (`TH_LXINFO`). Sending one (`kill` to the process itself,
-  `tkill`, `tgkill`, ctrl+C) sets it pending, unless it would be ignored,
+  fault said (`TH_LXINFO`). Sending one (`kill`, `tkill`, `tgkill`,
+  ctrl+C) sets it pending, unless it would be ignored,
   and kicks the threads that may take it: unparked if parked, an IPI if
   running on another CPU. `user_leave` sends a Linux thread to
   `lx_leave`, which takes the lowest signal its mask lets through: the
@@ -1313,7 +1344,14 @@ text rows.
   select, SIGWINCH) and of keys typed (a line edited, arrows, ctrl+C raw
   and as SIGINT, ctrl+D); `/test/tty draw`, checked row by row through
   the shell's `screen`; and Ubuntu's `stty`, `tput`, `clear` and `less`
-  through libtinfo and the root's terminfo.
+  through libtinfo and the root's terminfo; `/test/procs` (`procs.c`)
+  with its checks of `fork`, `exec`, `vfork`, `posix_spawn`, pipes, waits,
+  SIGCHLD, groups, sessions, `#!` and `FD_CLOEXEC`; `bash -c` and `sh -c`
+  (dash) with pipelines, command substitution and loops through
+  coreutils, `grep`, `sort`, `tr`, `cut` and `xargs`; and bash typed at,
+  ctrl+C ending a command it runs in its own process group, and readline's
+  history. `build.py --define LX_TRACE` makes a kernel that says every
+  Linux system call with its arguments and result.
 
 ## Terminals: `term.asm`, `vt.asm`
 

@@ -4,6 +4,8 @@ the programs in src/user, each to EFI/AXIOM/<NAME>.AXE beside it.
 
     python tools/build.py              build into build/esp/EFI/BOOT/BOOTX64.EFI
     python tools/build.py --max 1920x1080   cap the display mode the loader picks
+    python tools/build.py --define LX_TRACE  the kernel with a NASM define (each
+                                             Linux system call said, with LX_TRACE)
     python tools/build.py --all        assemble everything, changed or not
     python tools/build.py --small      the kernel with NASM's jump sizing (-Ox):
                                        4% smaller, a minute instead of 2 s
@@ -65,6 +67,8 @@ def nasm(out, name, args, force):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--max", help="largest display mode, WxH")
+    ap.add_argument("--define", action="append", default=[], metavar="NAME",
+                    help="a NASM define for the kernel")
     ap.add_argument("--all", action="store_true", help="assemble everything, changed or not")
     ap.add_argument("--small", action="store_true", help="the kernel with -Ox: NASM sizes "
                     "every jump, in some 200 passes (a minute), for a kernel 4%% smaller")
@@ -86,7 +90,8 @@ def main():
 
     first = [(BUILD / "kernel.bin", "kernel",
               ["-f", "bin", "-Ox" if opts.small else "-O1", "-w-reloc-abs-qword", "-w-reloc-abs-dword", "-w-reloc-rel-dword",
-               "-I", "src/kernel/", "-I", "src/include/", "src/kernel/kernel.asm"])]
+               "-I", "src/kernel/", "-I", "src/include/", *("-D" + d for d in opts.define),
+               "src/kernel/kernel.asm"])]
     for src in sorted((ROOT / "src" / "user").glob("*.asm")):
         first.append((programs / f"{src.stem.upper()}.AXE", src.stem,
                       ["-f", "bin", "-I", "src/kernel/", "-I", "src/user/",

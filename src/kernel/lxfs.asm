@@ -41,6 +41,7 @@ LNK_FILE        equ 2
 LNK_LINK        equ 3
 LNK_DEV         equ 4                   ; a character device
 LNK_MAGIC       equ 5                   ; a link that is the process's own (/proc/self/exe)
+LNK_FIFO        equ 6                   ; a pipe (lxpipe.asm's one node)
 
 LNS_NONE        equ 0
 LNS_QUEUED      equ 1
@@ -60,12 +61,14 @@ LF_NODE         equ 8
 LF_POS          equ 16
 LF_FLAGS        equ 24                  ; dword: O_ACCMODE, O_APPEND, O_NONBLOCK
 LF_TTY          equ 32
+LF_PIPE         equ 40                  ; a pipe's (lxpipe.asm)
 LF_SIZE         equ 48
 
 LFK_FILE        equ 1
 LFK_DIR         equ 2
 LFK_DEV         equ 3
 LFK_TTY         equ 4
+LFK_PIPE        equ 5                   ; one end of a pipe
 
 LX_PATH         equ 4096                ; a path, at most (with its NUL)
 LX_NAME         equ 255                 ; a name in it
@@ -962,6 +965,11 @@ lf_put:
     push r9
     push r10
     push r11
+    cmp dword [rdi + LF_KIND], LFK_PIPE
+    jne .not_pipe
+    call lx_pipe_close
+    jmp .free
+.not_pipe:
     cmp dword [rdi + LF_KIND], LFK_TTY
     jne .free
     push rdi
@@ -1171,7 +1179,17 @@ lf_read:
     je .dev
     cmp eax, LFK_TTY
     je .tty
+    cmp eax, LFK_PIPE
+    je .pipe
     mov rax, -EISDIR
+    jmp .out
+.pipe:
+    mov rax, -ESPIPE
+    cmp r14, -1
+    jne .out
+    mov rsi, r12
+    mov rdx, r13
+    call lx_pipe_read
     jmp .out
 .file:
     mov rcx, r14
@@ -1250,10 +1268,17 @@ lf_write:
     mov eax, [rbx + LF_KIND]
     cmp eax, LFK_TTY
     je .tty
+    cmp eax, LFK_PIPE
+    je .pipe
     cmp eax, LFK_DEV
     mov rax, -EBADF
     jne .out
     mov rax, r13                        ; a device takes it all
+    jmp .out
+.pipe:
+    mov rsi, r12
+    mov rdx, r13
+    call lx_pipe_write
     jmp .out
 .tty:
     xor r14d, r14d
@@ -1672,7 +1697,12 @@ lx_mode:
     je .chr
     cmp ecx, LNK_FILE
     je .reg
+    cmp ecx, LNK_FIFO
+    je .fifo
     or eax, S_IFLNK | 0o777
+    ret
+.fifo:
+    or eax, S_IFIFO
     ret
 .dir:
     or eax, S_IFDIR
@@ -2150,6 +2180,10 @@ lx_sys_fcntl:
     je .getfl
     cmp esi, 4                          ; F_SETFL
     je .setfl
+    cmp esi, 1032                       ; F_GETPIPE_SZ
+    je .pipe_size
+    cmp esi, 1031                       ; F_SETPIPE_SZ: as it is
+    je .pipe_size
     push rdi                            ; locks and the rest: fine, if open
     call lx_fd_get
     pop rdi
@@ -2157,6 +2191,15 @@ lx_sys_fcntl:
     jae .out
     xor eax, eax
 .out:
+    ret
+.pipe_size:
+    call lx_fd_get
+    cmp rax, -4095
+    jae .out
+    cmp dword [rax + LF_KIND], LFK_PIPE
+    mov rax, -EBADF
+    jne .out
+    mov eax, PIPE_SIZE
     ret
 .dupfd:
     mov esi, edx
@@ -2279,11 +2322,12 @@ lx_sys_dup3:
 .room:
     cmp r12d, [r14 + LP_NFD]            ; the table holds it?
     jb .there
-    mov rdi, r14                        ; (grown by installing past its end)
+    mov rdi, rbx                        ; (grown by installing past its end,
+    call lf_get                         ; which takes a reference)
+    mov rdi, r14
     mov rsi, rbx
     mov edx, [r14 + LP_NFD]
     xor ecx, ecx
-    call lf_get
     call lx_fd_install
     cmp rax, -4095
     jae .drop
@@ -2326,17 +2370,36 @@ lx_sys_ioctl:
     cmp esi, 0x5421                     ; FIONBIO
     je .fionbio
     cmp esi, 0x5451                     ; FIOCLEX
-    je .done
+    je .cloexec
     cmp esi, 0x5450                     ; FIONCLEX
-    je .done
+    je .cloexec
     cmp dword [rax + LF_KIND], LFK_TTY
     jne .not_tty
     mov rdi, [rax + LF_TTY]
     jmp ly_ioctl
 .not_tty:
+    cmp dword [rax + LF_KIND], LFK_PIPE
+    jne .no
+    cmp esi, 0x541B                     ; FIONREAD
+    jne .no
+    mov rdi, rax
+    call lx_pipe_count
+    mov rdi, rdx
+    mov esi, eax
+    jmp lx_put32
+.no:
     mov rax, -ENOTTY
 .out:
     ret
+.cloexec:
+    call lx_cur_proc                    ; (the descriptor is open: lx_fd_get)
+    mov rcx, [rax + LP_FDS]
+    mov edi, edi
+    and qword [rcx + rdi * 8], -2
+    cmp esi, 0x5451
+    jne .done
+    or qword [rcx + rdi * 8], FD_CLOEXEC
+    jmp .done
 .fionbio:
     push rax
     sub rsp, 16
