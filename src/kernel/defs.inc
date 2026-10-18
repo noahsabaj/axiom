@@ -662,7 +662,8 @@ SB_ARGS         equ 64                  ; the arguments it was run with, NUL-end
 SB_ARGS_MAX     equ 4096 - SB_ARGS - 1
 
 ; system calls: SYSCALL with RAX = the number and the arguments in RDI, RSI,
-; RDX, R10; the result in RAX (and RDX), RCX and R11 lost, the rest kept
+; RDX, R10 (and R8, a fifth); the result in RAX (and RDX), RCX and R11 lost,
+; the rest kept (docs/ABI.md)
 SYS_EXIT        equ 0                   ; (code): this thread ends
 SYS_RING_ENTER  equ 1                   ; (ring, take, wait for, TSC deadline) -> taken
 SYS_RING_NEW    equ 2                   ; (entries) -> RAX = a ring, RDX = its memory
@@ -677,7 +678,8 @@ SYS_SPAWN       equ 9                   ; (memory, offset, bytes of "program arg
                                         ; -> RAX = the task, RDX = its first thread
 SYS_CHANNEL_NEW equ 10                  ; -> RAX, RDX = the two ends of a channel
 SYS_WINDOW_NEW  equ 11                  ; (desktop, width, height, a channel's end,
-                                        ; which the window takes, WNF_*) -> RAX =
+                                        ; the window's events come to its peer
+                                        ; while it is open, WNF_*) -> RAX =
                                         ; the window, RDX = its pixels: memory,
                                         ; B,G,R,x at width * 4 bytes a row (with
                                         ; WNF_RESIZE or WNF_FULL: the screen's

@@ -191,6 +191,10 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   layer, whose few system calls the crate supplies, so `println!`, `Vec`,
   `HashMap` and the rest work. `rhello` and `rdemo` come with it; `python
   tools/rust.py` builds them (rustup's nightly with rust-src, offline).
+- **Programs in MASM** (`sdk/masm`): ml64 and link.exe, with the kernel's
+  constants as `axiom.inc`; `python tools/masm.py` builds `mhello`. What
+  every native program sees (the .AXE, the start block, the system calls,
+  the ring and each operation, windows, limits) is `docs/ABI.md`.
 - ACPI (MADT, MCFG, FADT, the DSDT's `_S5_`), SMBIOS, PCI Express enumeration,
   x2APIC (falling back to xAPIC), I/O APIC, TSC-deadline timer, and a panic
   screen that stops every other CPU.
@@ -214,7 +218,8 @@ some 200 passes, a minute, for a kernel 4% smaller.
 The Rust programs (`sdk/rust`) are built apart, with rustup's nightly
 toolchain and its `rust-src`, nothing downloaded: `python tools/rust.py`
 writes `RHELLO.AXE` and `RDEMO.AXE` beside the others. See
-`sdk/rust/README.md`.
+`sdk/rust/README.md`. The MASM ones (`sdk/masm`) need Visual Studio's C++
+tools, found by vswhere: `python tools/masm.py`. See `docs/ABI.md`.
 
 ## Run in QEMU
 
@@ -413,6 +418,8 @@ src/user/               programs for ring 3 (axe.inc: their header and runtime)
 src/include/            structures shared by the two
 sdk/rust/               programs in Rust: the axiom crate, the target, two programs
 tools/rust.py           build them; tools/mkaxe.py turns each into an .AXE
+sdk/masm/               programs in MASM: axiom.inc (made from defs.inc), mhello
+tools/masm.py           build them with ml64 and link.exe, then tools/mkaxe.py
 tools/build.py          assemble everything
 tools/run.py            boot in QEMU; type keys, move the pointer, take screenshots
 tools/mkdisk.py         a GPT + FAT32 test disk (as an NVMe drive or a USB stick)
@@ -452,12 +459,12 @@ tools/test/             host-side tests for self-contained modules (tls: the
                         Ubuntu, and threads and signals in C, from a
                         stick with a root on it; rust: the Rust programs,
                         their heap, files, a window and its events, keys
-                        down and up from both keyboards); all.py
-                        runs them
+                        down and up from both keyboards; masm: mhello,
+                        from MASM); all.py runs them
                         all at once, and qemu.py boots side by side
 tools/mkfont.py         rasterize the console font into src/kernel/gen/
 tools/mkuifont.py       rasterize the desktop's font into src/kernel/gen/
-docs/                   vision and architecture
+docs/                   vision, architecture, and the ABI programs see (ABI.md)
 ```
 
 ## License notes

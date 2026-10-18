@@ -47,8 +47,9 @@
 ;  killed task with no thread left closes its handles at once.
 ;
 ;  Neither a system call nor an interrupt saves SIMD state: nothing they run
-;  uses SIMD (macros.inc), and the scheduler keeps each thread's. The FS and
-;  GS bases are not kept for each thread, so ring 3 cannot set them
+;  uses SIMD (macros.inc), and the scheduler keeps each thread's. It keeps
+;  each thread's FS and GS bases too, but only a Linux program can set them
+;  (arch_prctl): a native program's are 0, with no thread-local storage
 ;  (FSGSBASE is off).
 ;
 ;    <program> [arguments], or run <program> [arguments]: the prompt

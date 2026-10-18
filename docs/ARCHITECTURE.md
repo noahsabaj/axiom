@@ -370,15 +370,18 @@ or idles.
 - **System calls** (`SYS_*`) come in by `SYSCALL` at `syscall_entry`: SWAPGS,
   onto the thread's kernel stack, a frame laid out as an interrupt's
   (`FR_*`, vector `VEC_SYSCALL`), interrupts back on, and out by `SYSRET`.
-  Arguments in RDI, RSI, RDX and R10; RAX and RDX back; RCX and R11 lost;
+  Arguments in RDI, RSI, RDX and R10 (and R8 for the two that take five);
+  RAX and RDX back; RCX and R11 lost;
   everything else kept. They are only what a ring cannot do: enter it, make
   rings, memory, events, threads and channels, map and unmap memory, start
   a program, yield, exit. The rest is an
   entry on a ring: a program writes to the console with `RO_WRITE` (a
   handle to the console, `OT_CONSOLE`, with `RT_CON_WRITE`, and text in a
   block of memory). The kernel never touches a program's pages at their
-  user addresses, and SMAP would stop it if it did; FSGSBASE is off, since
-  the FS and GS bases are not kept for each thread.
+  user addresses, and SMAP would stop it if it did; FSGSBASE is off: the FS
+  and GS bases are each thread's, and change only through the kernel (a
+  Linux program's arch_prctl), so a native program's are 0. docs/ABI.md
+  says all of this for a program's author.
 - **A fault in ring 3 ends the task, not the machine.** `exception_dispatch`
   sends every exception from ring 3 (but NMI and machine check) to
   `user_fault`, which says what it was and where (for a page fault, what the

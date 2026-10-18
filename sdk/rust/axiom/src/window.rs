@@ -482,7 +482,7 @@ impl Window {
         self.show_rect(0, 0, 0, 0);
     }
 
-    /// What was drawn in a part of it (w or h 0: all of it).
+    /// What was drawn in a part of it (w and h both 0: all of it).
     pub fn show_rect(&self, x: u32, y: u32, w: u32, h: u32) {
         let mut e = Entry::new(RO_WIN_SHOW, self.win);
         e.a0 = x as u64;

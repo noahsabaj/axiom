@@ -113,7 +113,8 @@ pub struct Completion {
     pub data: u64,
     pub result: i64,
     pub value: u64,
-    pub op: u64,
+    pub op: u32,
+    _pad: u32,
 }
 
 /// A handle in this task's table: what it may reach, and how.

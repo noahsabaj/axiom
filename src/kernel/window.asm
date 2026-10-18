@@ -15,7 +15,8 @@
 ;    RO_WIN_TITLE (a window, handle2 + a0: a1 bytes of UTF-8): its title
 ;    RO_WIN_POINTER (a window, a0 = PTRM_*): the arrow over it, none, or
 ;      none and the pointer held (ptr_mode)
-;  Its size is the program's: it does not resize. The close button only asks
+;  Its size is the program's, unless it lets the user resize it (WNF_RESIZE,
+;  WNF_FULL: WE_RESIZED says how much shows). The close button only asks
 ;  (WE_CLOSE); the window goes when its last handle does, and so when the
 ;  program ends, is killed (ctrl+C), or the shell it was run in closes.
 ;
