@@ -13,16 +13,26 @@ use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
-use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
+use bevy::platform::time::Instant;
 use bevy::window::{PrimaryWindow, WindowResizeConstraints};
 use canvas::{Canvas, Fonts};
-use chess::ai::{self, Found, LEVELS};
+use chess::ai::{Found, LEVELS, Search};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use chess::rules::Color;
 use pieces::PieceSet;
 use ui::{Chess, Drag, Layout, Mode, Painter, Target};
 
 /// The least time the computer seems to think, in seconds, so its replies don't snap.
 const MIN_THINK: f32 = 0.4;
+
+/// How long the computer may think in one frame, in seconds. It thinks on the main thread, a
+/// slice a frame, as Axiom may give the game only one thread.
+const THINK_SLICE: f32 = 0.012;
+
+/// About how many positions one step of the search looks at before it pauses.
+const SLICE_NODES: u64 = 30_000;
 
 static FONT: &[u8] = include_bytes!("../assets/fonts/MonaSans-VariableFont.ttf");
 
@@ -104,11 +114,32 @@ struct Frame {
     sprite: Entity,
 }
 
-/// The computer's search, running off the main thread where there is more than one.
-#[derive(Resource, Default)]
+/// The computer's search, between frames.
+#[derive(Resource)]
 struct Thinking {
-    task: Option<Task<Option<Found>>>,
+    brain: Option<Brain>,
     since: f32,
+    /// Whether the system can start threads. Where it can't, the search runs on the main
+    /// thread a slice a frame.
+    threads: bool,
+}
+
+impl Default for Thinking {
+    fn default() -> Self {
+        // `--no-threads` tries on the desktop what a system without threads gets.
+        let threads = !std::env::args().any(|a| a == "--no-threads") && std::thread::Builder::new().spawn(|| {}).is_ok();
+        info!("the computer thinks {}", if threads { "on its own thread" } else { "between frames" });
+        Thinking { brain: None, since: 0.0, threads }
+    }
+}
+
+enum Brain {
+    /// Searching on a thread, which puts its answer in the slot.
+    Thread { answer: Arc<Mutex<Option<Option<Found>>>>, cancel: Arc<AtomicBool> },
+    /// Searching here, a slice a frame.
+    Steps(Search),
+    /// Found, and waiting to be shown.
+    Done(Option<Found>),
 }
 
 fn blank_image(w: u32, h: u32) -> Image {
@@ -289,8 +320,9 @@ fn try_move(chess: &mut Chess, from: u8, to: u8, t: f32, slide: bool) {
 }
 
 fn stop_thinking(chess: &mut Chess, thinking: &mut Thinking) {
-    // Dropping a task cancels it.
-    thinking.task = None;
+    if let Some(Brain::Thread { cancel, .. }) = thinking.brain.take() {
+        cancel.store(true, Ordering::Relaxed);
+    }
     chess.thinking = false;
 }
 
@@ -335,40 +367,66 @@ fn keys(
 /// Starts the computer thinking on its turn, and plays its move once found.
 fn computer(mut chess: ResMut<Chess>, mut thinking: ResMut<Thinking>, time: Res<Time>) {
     let t = now(&time);
+    let thinking = &mut *thinking;
     if !chess.computers_turn() {
-        stop_thinking(&mut chess, &mut thinking);
+        stop_thinking(&mut chess, thinking);
         return;
     }
-    if thinking.task.is_none() {
+    let Some(brain) = &mut thinking.brain else {
         let pos = chess.game.position;
         let keys = chess.game.keys();
-        let history = keys[..keys.len() - 1].to_vec();
-        let level = LEVELS[chess.level];
         let seed = (t.to_bits() as u64) << 20 ^ pos.hash ^ chess.game.history.len() as u64;
-        thinking.task = Some(AsyncComputeTaskPool::get().spawn(async move { ai::choose(&pos, &history, level, seed) }));
+        let mut search = Search::new(&pos, &keys[..keys.len() - 1], LEVELS[chess.level], seed);
+        thinking.brain = Some(if thinking.threads {
+            let answer = Arc::new(Mutex::new(None));
+            let slot = answer.clone();
+            let cancel = search.cancel_flag();
+            let spawned = std::thread::Builder::new().name("chess-computer".into()).spawn(move || {
+                while !search.step() {}
+                *slot.lock().unwrap() = Some(search.result());
+            });
+            if spawned.is_err() {
+                thinking.threads = false;
+                return;
+            }
+            Brain::Thread { answer, cancel }
+        } else {
+            Brain::Steps(search.sliced(SLICE_NODES))
+        });
         thinking.since = t;
         chess.thinking = true;
         chess.dirty = true;
         return;
-    }
+    };
+    let found = match brain {
+        Brain::Thread { answer, .. } => answer.lock().unwrap().take(),
+        Brain::Steps(search) => {
+            let start = Instant::now();
+            let mut done = false;
+            while !done && start.elapsed().as_secs_f32() < THINK_SLICE {
+                done = search.step();
+            }
+            done.then(|| search.result())
+        }
+        Brain::Done(found) => Some(*found),
+    };
+    let Some(found) = found else { return };
     if t - thinking.since < MIN_THINK || chess.slide.is_some() {
+        // Keep the answer until the move may show.
+        thinking.brain = Some(Brain::Done(found));
         return;
     }
-    let Some(task) = &mut thinking.task else { return };
-    if let Some(found) = block_on(poll_once(task)) {
-        thinking.task = None;
-        chess.thinking = false;
-        if let Some(found) = found {
-            info!(
-                "{} plays {} (depth {}, {} nodes, score {})",
-                LEVELS[chess.level].name,
-                chess.game.position.san(found.mv),
-                found.depth,
-                found.nodes,
-                found.score
-            );
-            chess.play(found.mv, t, true);
-        }
+    stop_thinking(&mut chess, thinking);
+    if let Some(found) = found {
+        info!(
+            "{} plays {} (depth {}, {} nodes, score {})",
+            LEVELS[chess.level].name,
+            chess.game.position.san(found.mv),
+            found.depth,
+            found.nodes,
+            found.score
+        );
+        chess.play(found.mv, t, true);
     }
 }
 

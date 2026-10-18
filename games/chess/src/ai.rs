@@ -4,6 +4,8 @@
 //! and needs nothing from the system but memory.
 
 use crate::rules::{Color, Kind, Move, MoveKind, Piece, Position};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// How well the computer plays.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -20,8 +22,8 @@ pub struct Level {
 pub const LEVELS: [Level; 4] = [
     Level { name: "Easy", depth: 1, nodes: 20_000, noise: 150 },
     Level { name: "Casual", depth: 2, nodes: 60_000, noise: 45 },
-    Level { name: "Strong", depth: 4, nodes: 400_000, noise: 0 },
-    Level { name: "Master", depth: 32, nodes: 2_000_000, noise: 0 },
+    Level { name: "Strong", depth: 5, nodes: 250_000, noise: 0 },
+    Level { name: "Master", depth: 32, nodes: 3_000_000, noise: 0 },
 ];
 
 const INF: i32 = 1_000_000;
@@ -182,10 +184,10 @@ struct Entry {
     bound: Bound,
 }
 
-const TT_SIZE: usize = 1 << 17;
+const TT_SIZE: usize = 1 << 19;
 
-/// A search, with the tables it keeps between iterations.
-pub struct Searcher {
+/// The search's tables, kept between iterations.
+struct Searcher {
     tt: Vec<Option<Entry>>,
     killers: [[Option<Move>; 2]; MAX_PLY],
     history: [[i32; 64]; 64],
@@ -193,7 +195,13 @@ pub struct Searcher {
     path: Vec<u64>,
     nodes: u64,
     limit: u64,
+    /// Where this step's slice of nodes ends.
+    slice_end: u64,
     stopped: bool,
+    /// Set from outside to end the search early.
+    cancel: Arc<AtomicBool>,
+    /// Whether the search stopped for the slice rather than the limit.
+    paused: bool,
     rng: u64,
 }
 
@@ -209,11 +217,147 @@ pub struct Found {
 /// The move the computer plays at `level`. `history` holds the hashes of the positions before
 /// this one, to steer clear of or towards repeats; `seed` varies the weaker levels' choices.
 pub fn choose(pos: &Position, history: &[u64], level: Level, seed: u64) -> Option<Found> {
-    Searcher::new(history, seed).run(pos, level)
+    let mut search = Search::new(pos, history, level, seed);
+    while !search.step() {}
+    search.result()
+}
+
+/// A search that runs a piece at a time: each [`Search::step`] searches one first move. Where
+/// there is only one thread, the game steps it between frames, so the window stays responsive.
+pub struct Search {
+    searcher: Searcher,
+    pos: Position,
+    level: Level,
+    moves: Vec<Move>,
+    noise: Vec<i32>,
+    /// The first moves in the order to search them: the last iteration's best first.
+    order: Vec<usize>,
+    depth: i32,
+    /// Where this iteration is in `order`.
+    next: usize,
+    alpha: i32,
+    /// The best first move of this iteration so far, and its score.
+    found: Option<(usize, i32)>,
+    best: Option<Found>,
+    done: bool,
+    /// The most nodes a step may search before it pauses, if steps are sliced.
+    slice: Option<u64>,
+    /// The slice for the next step: it doubles each time a step pauses, so every step ends.
+    this_slice: u64,
+}
+
+impl Search {
+    pub fn new(pos: &Position, history: &[u64], level: Level, seed: u64) -> Search {
+        let mut searcher = Searcher::new(history, seed);
+        searcher.limit = level.nodes;
+        searcher.path.push(pos.hash);
+        let moves = pos.legal_moves();
+        let noise = moves
+            .iter()
+            .map(|_| {
+                if level.noise == 0 {
+                    0
+                } else {
+                    (searcher.random() % (2 * level.noise as u64 + 1)) as i32 - level.noise
+                }
+            })
+            .collect();
+        Search {
+            order: (0..moves.len()).collect(),
+            done: moves.is_empty(),
+            searcher,
+            pos: *pos,
+            level,
+            moves,
+            noise,
+            depth: 1,
+            next: 0,
+            alpha: -INF,
+            found: None,
+            best: None,
+            slice: None,
+            this_slice: 0,
+        }
+    }
+
+    /// Makes each step stop after about `nodes` positions and pick up again on the next, so no
+    /// step stalls the caller for long. A paused step searches again from its first move, but
+    /// the transposition table remembers most of what it found.
+    pub fn sliced(mut self, nodes: u64) -> Search {
+        self.slice = Some(nodes);
+        self.this_slice = nodes;
+        self
+    }
+
+    /// A flag that ends the search at its next check when set, from any thread.
+    pub fn cancel_flag(&self) -> Arc<AtomicBool> {
+        self.searcher.cancel.clone()
+    }
+
+    /// Searches the next first move; true once the search is over.
+    pub fn step(&mut self) -> bool {
+        if self.done {
+            return true;
+        }
+        let i = self.order[self.next];
+        let next = self.pos.make(self.moves[i]);
+        let s = &mut self.searcher;
+        s.slice_end = self.slice.map_or(u64::MAX, |_| s.nodes + self.this_slice);
+        s.path.push(next.hash);
+        // With noise, every move needs its true score, so none is cut against the best.
+        let floor = if self.level.noise > 0 { -INF } else { self.alpha };
+        let score = -s.search(&next, self.depth - 1, 1, -INF, -floor) + self.noise[i];
+        s.path.pop();
+        if s.paused {
+            s.stopped = false;
+            s.paused = false;
+            self.this_slice += self.this_slice / 2;
+            return false;
+        }
+        if let Some(slice) = self.slice {
+            self.this_slice = slice;
+        }
+        if s.stopped {
+            // Out of nodes: keep the last whole iteration's answer, if there is one.
+            if self.best.is_none() {
+                self.finish_iteration();
+            }
+            self.done = true;
+            return true;
+        }
+        if self.found.is_none_or(|(_, best)| score > best) {
+            self.found = Some((i, score));
+            self.alpha = self.alpha.max(score);
+        }
+        self.next += 1;
+        if self.next == self.order.len() {
+            let mate = self.finish_iteration();
+            self.depth += 1;
+            self.next = 0;
+            self.alpha = -INF;
+            self.done = mate || self.depth > self.level.depth;
+        }
+        self.done
+    }
+
+    /// Takes the iteration's best move as the answer so far; true if it mates.
+    fn finish_iteration(&mut self) -> bool {
+        let Some((i, score)) = self.found.take() else { return false };
+        self.best = Some(Found { mv: self.moves[i], score, depth: self.depth, nodes: self.searcher.nodes });
+        // Search the best move first next time.
+        self.order.retain(|&j| j != i);
+        self.order.insert(0, i);
+        score.abs() >= MATE - MAX_PLY as i32
+    }
+
+    /// The move to play, once [`Search::step`] says the search is over.
+    pub fn result(&self) -> Option<Found> {
+        self.best.map(|b| Found { nodes: self.searcher.nodes, ..b })
+    }
 }
 
 impl Searcher {
-    pub fn new(history: &[u64], seed: u64) -> Searcher {
+    fn new(history: &[u64], seed: u64) -> Searcher {
         Searcher {
             tt: vec![None; TT_SIZE],
             killers: [[None; 2]; MAX_PLY],
@@ -221,7 +365,10 @@ impl Searcher {
             path: history.to_vec(),
             nodes: 0,
             limit: u64::MAX,
+            slice_end: u64::MAX,
             stopped: false,
+            cancel: Arc::new(AtomicBool::new(false)),
+            paused: false,
             rng: seed | 1,
         }
     }
@@ -234,66 +381,6 @@ impl Searcher {
         self.rng
     }
 
-    pub fn run(&mut self, pos: &Position, level: Level) -> Option<Found> {
-        let moves = pos.legal_moves();
-        if moves.is_empty() {
-            return None;
-        }
-        let noise: Vec<i32> = moves
-            .iter()
-            .map(|_| {
-                if level.noise == 0 {
-                    0
-                } else {
-                    (self.random() % (2 * level.noise as u64 + 1)) as i32 - level.noise
-                }
-            })
-            .collect();
-        self.limit = level.nodes;
-        self.path.push(pos.hash);
-        let mut best: Option<Found> = None;
-        let mut order: Vec<usize> = (0..moves.len()).collect();
-        for depth in 1..=level.depth {
-            let mut alpha = -INF;
-            let mut found: Option<(usize, i32)> = None;
-            for &i in &order {
-                let m = moves[i];
-                let next = pos.make(m);
-                self.path.push(next.hash);
-                // With noise, every move needs its true score, so none is cut against the best.
-                let floor = if level.noise > 0 { -INF } else { alpha };
-                let score = -self.search(&next, depth - 1, 1, -INF, -floor) + noise[i];
-                self.path.pop();
-                if self.stopped {
-                    break;
-                }
-                if found.is_none_or(|(_, s)| score > s) {
-                    found = Some((i, score));
-                    alpha = alpha.max(score);
-                }
-            }
-            if self.stopped && best.is_some() {
-                break;
-            }
-            if let Some((i, score)) = found {
-                best = Some(Found { mv: moves[i], score, depth, nodes: self.nodes });
-                // Search the best move first next time.
-                order.retain(|&j| j != i);
-                order.insert(0, i);
-                if score.abs() >= MATE - MAX_PLY as i32 {
-                    break;
-                }
-            }
-            if self.stopped {
-                break;
-            }
-        }
-        if let Some(b) = &mut best {
-            b.nodes = self.nodes;
-        }
-        best
-    }
-
     fn repeated(&self, pos: &Position) -> bool {
         // Only positions since the last capture or pawn move can repeat; the newest is this one.
         let n = self.path.len();
@@ -303,8 +390,11 @@ impl Searcher {
 
     fn search(&mut self, pos: &Position, depth: i32, ply: usize, mut alpha: i32, beta: i32) -> i32 {
         self.nodes += 1;
-        if self.nodes >= self.limit {
+        if self.nodes >= self.limit || (self.nodes & 1023 == 0 && self.cancel.load(Ordering::Relaxed)) {
             self.stopped = true;
+        } else if self.nodes >= self.slice_end {
+            self.stopped = true;
+            self.paused = true;
         }
         if self.stopped {
             return 0;
