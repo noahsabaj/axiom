@@ -12,7 +12,7 @@ use hearth::asset::RenderAssetUsages;
 use hearth::input::keyboard::{Key, KeyboardInput};
 use hearth::input::mouse::{MouseScrollUnit, MouseWheel};
 use hearth::prelude::*;
-use hearth::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use hearth::image::{Extent3d, TextureDimension, TextureFormat};
 use hearth::platform::time::Instant;
 use hearth::window::{PrimaryWindow, WindowResizeConstraints};
 use canvas::{Canvas, Fonts};
