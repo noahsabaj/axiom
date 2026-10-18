@@ -18,6 +18,7 @@ pub const SYS_UNMAP: u64 = 8;
 pub const SYS_SPAWN: u64 = 9;
 pub const SYS_CHANNEL_NEW: u64 = 10;
 pub const SYS_WINDOW_NEW: u64 = 11;
+pub const SYS_SOUND_NEW: u64 = 12;
 
 // what a ring entry asks for (RO_*)
 pub const RO_NOP: u8 = 0;
@@ -71,6 +72,7 @@ pub const SB_NET: usize = 40;
 pub const SB_DESK: usize = 44;
 pub const SB_FILES: usize = 52;
 pub const SB_GIFT2: usize = 56;
+pub const SB_SOUND: usize = 60;
 pub const SB_ARGS: usize = 64;
 
 // the ring's memory (RA_*)

@@ -20,6 +20,7 @@ disagree, the code is right, and the page needs fixing.
 - [Operations on the ring](#operations-on-the-ring)
 - [Memory, buffers and threads](#memory-buffers-and-threads)
 - [Windows and their events](#windows-and-their-events)
+- [Sound](#sound)
 - [Files](#files)
 - [Time](#time)
 - [What a program may not do](#what-a-program-may-not-do)
@@ -73,6 +74,7 @@ start block:
 | `AW_DESK` | 4 | the desktop, to open windows on |
 | (8) | | reserved for the settings, on their branch |
 | `AW_FILES` | 16 | every FAT volume |
+| `AW_SOUND` | 32 | the speakers, to open streams of sound on |
 
 The shell gives a program what it wants and no more. The user can grant
 more for one run: `+net hello`, `+files notes`. A program started by
@@ -113,11 +115,12 @@ the program wasn't given one.
 | 48 | | dword | reserved for the settings, on their branch |
 | 52 | `SB_FILES` | dword | `AW_FILES` |
 | 56 | `SB_GIFT2` | dword | a second gift |
+| 60 | `SB_SOUND` | dword | `AW_SOUND` |
 | 64 | `SB_ARGS` | bytes | the arguments, NUL-ended, without the program's name: `mhello one two` gives `one two` |
 
 `SB_ARGS` holds at most `SB_ARGS_MAX`, 4031 bytes.
 
-A gift that is a desktop, files, the network or the store is also put in
+A gift that is a desktop, files, the speakers, the network or the store is also put in
 its own slot above, if that slot is empty. So a program handed a desktop
 by the Files app finds it in `SB_DESK`, as it would if it had been run
 with `+desk`.
@@ -157,6 +160,7 @@ on a ring.
 | 9 | `SYS_SPAWN` | RDI = memory, RSI = offset, RDX = bytes of `"program args"`, R10 = a handle to give or 0, R8 = a second or 0 | RAX = the task, RDX = its first thread |
 | 10 | `SYS_CHANNEL_NEW` | | RAX, RDX = the two ends |
 | 11 | `SYS_WINDOW_NEW` | RDI = desktop, RSI = width, RDX = height, R10 = a channel's end, R8 = `WNF_*` | RAX = the window, RDX = its pixels (memory) |
+| 12 | `SYS_SOUND_NEW` | RDI = the speakers, RSI = frames | RAX = a stream, playing; RDX = its memory (`SN_*`) |
 
 Notes:
 
@@ -197,11 +201,12 @@ Each object type has its own `OT_*`:
 | `OT_RING` | 5 | `OT_WINDOW` | 12 |
 | `OT_CONSOLE` | 6 | (13: the settings) | |
 | `OT_CHANNEL` | 7 | `OT_FILES` | 14 |
+| `OT_SOUND` | 15 | `OT_STREAM` | 16 |
 
 **Rights** (`RT_*`): three for any object, `RT_DUP` 1, `RT_GIVE` 2 and
 `RT_INFO` 4. The rest are by type, from bit 8: `RT_MEM_READ` and
 `RT_MEM_WRITE`, `RT_CH_SEND` and `RT_CH_RECV`, `RT_WIN_DRAW`, `RT_FS_READ`
-and `RT_FS_WRITE`, and so on.
+and `RT_FS_WRITE`, `RT_SOUND_PLAY` and `RT_STREAM_PLAY`, and so on.
 
 - `RO_DUP` derives a handle with the same rights or fewer, and an expiry
   (a TSC value, 0 for none) no later than its own.
@@ -313,7 +318,7 @@ requests still waiting with that data.
 | 0 | `RO_NOP` | | 0 |
 | 1 | `RO_SIGNAL` | handle = an event | |
 | 2 | `RO_RESET` | handle = an event | |
-| 3 | `RO_WAIT` | handle, deadline: an event (until `RO_RESET`), a channel's end (a message, or the peer gone), a thread, a socket (a0 = 0: something to read; 1: open) | 0, or `E_TIMEOUT` |
+| 3 | `RO_WAIT` | handle, deadline: an event (until `RO_RESET`), a channel's end (a message, or the peer gone), a thread, a socket (a0 = 0: something to read; 1: open), a stream of sound (no more than `SN_LOW` frames queued) | 0, or `E_TIMEOUT` |
 | 4 | `RO_JOIN` | handle = a thread, deadline | 0, `CQ_VALUE` = its exit code |
 | 5 | `RO_TIMEOUT` | deadline | 0, once it comes |
 | 6 | `RO_COPY` | handle + a0 → handle2 + a1, a2 bytes | |
@@ -434,6 +439,43 @@ showing all that was drawn by then.
 - The window closes when its last handle does, and so when the program
   ends.
 
+## Sound
+
+With `AW_SOUND`:
+
+1. Open a stream: `SYS_SOUND_NEW(SB_SOUND, frames)`. The frames are its
+   ring's, made a power of two from 1024 to 65536.
+2. Map its memory (`SYS_MAP`): a 64-byte header, then the ring at
+   `SN_DATA`.
+3. Write frames, then add how many to `SN_WRITE`. `RO_WAIT` on the stream
+   for room.
+
+Every stream is 48 kHz (`SN_RATE`), 16-bit signed, stereo
+(`SN_CHANNELS`): a frame is 4 bytes, the left sample first. Frame `n` is at
+`SN_DATA + (n mod SN_FRAMES) * 4`.
+
+| Offset | Field | Who writes it | What |
+|---|---|---|---|
+| 0 | `SN_WRITE` | the program | frames written, in all (it wraps at 2^32) |
+| 4 | `SN_READ` | the kernel | frames taken to play, in all |
+| 8 | `SN_FRAMES` | the kernel | the ring's frames |
+| 12 | `SN_RATE` | the kernel | 48000 |
+| 16 | `SN_CHANNELS` | the kernel | 2 |
+| 20 | `SN_LOW` | the program | `RO_WAIT` completes once no more than this many are queued; half the ring to begin with |
+| 24 | `SN_GAIN` | the program | its volume, 65536 (as written) at most |
+| 28 | `SN_SHORT` | the kernel | frames it had none for, once it began |
+
+- Queued is `SN_WRITE - SN_READ`; room is `SN_FRAMES` less that. Write the
+  frames before `SN_WRITE` says they are there.
+- The mixer takes up to 5 ms of frames at a time, and keeps 40 ms ahead of
+  the speakers. A stream that runs dry plays silence and counts
+  `SN_SHORT`; it plays again from where `SN_WRITE` is once more come.
+- Every stream is summed, each by its gain, then all by the volume the
+  user set (`sound volume`), and saturated.
+- Closing the stream's handle ends it, played or not. Its waits complete.
+- With no sound device, a stream plays to nothing at the same pace, so a
+  program can't tell.
+
 ## Files
 
 With `AW_FILES`:
@@ -489,6 +531,7 @@ shell says `ended by a fault` and logs what it ran into.
 | Arguments | 4031 bytes |
 | Spawn text / depth | 255 bytes / 8 |
 | A window's side | 4096 |
+| A stream of sound | 65536 frames |
 | A path | 256 bytes; a read or write 16 MiB |
 | The first thread's stack | 64 KiB (make a larger one for anything deep) |
 
@@ -531,6 +574,9 @@ python tools/masm.py mhello        # one
 - **ml64 and link** are found through vswhere, from Visual Studio's C++
   tools. With none, `tools/masm.py` says so and exits 3, and the test
   passes as skipped.
+
+`src/user/tone.asm` (NASM) and `sdk/rust/tone` (Rust, `rtone`) play a
+sine through a stream of sound.
 
 `sdk/masm/mhello.asm` is the worked example. It covers the start block, an
 io block, the console, `RO_TIMEOUT`, a second thread joined, a window

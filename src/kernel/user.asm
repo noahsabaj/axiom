@@ -819,7 +819,7 @@ spawn_one:
 
 ; gift_slot(EAX = a handle the new task was given, RBP = its start block;
 ; that task the current one): where a handle of its kind goes as well
-; (SB_DESK, SB_FILES, SB_NET, SB_STORE), if that is empty. Preserves RAX.
+; (SB_DESK, SB_FILES, SB_NET, SB_STORE, SB_SOUND), if that is empty. Preserves RAX.
 gift_slot:
     push rax
     push rcx
@@ -1818,9 +1818,14 @@ user_load:
     mov [rbp + SB_DESK], eax
 .no_desk:
     test qword [rsp + 8 + 48], AW_FILES
-    jz .given
+    jz .no_files
     call files_program                  ; the files, on every volume
     mov [rbp + SB_FILES], eax
+.no_files:
+    test qword [rsp + 8 + 48], AW_SOUND
+    jz .given
+    call snd_program                    ; the speakers
+    mov [rbp + SB_SOUND], eax
 .given:
     xor eax, eax
     mov esi, [rsp + 8 + 40]             ; and what it is given
@@ -2661,6 +2666,7 @@ section .rodata
 str_ot_console: db 'console', 0
 align 4
 gift_slots:     dd OT_DESK, SB_DESK, OT_FILES, SB_FILES, OT_NET, SB_NET, OT_STORE, SB_STORE
+                dd OT_SOUND, SB_SOUND
                 dd 0, 0
 str_user_oom:   db 'Out of memory for the console', 0
 str_user_ring:  db 'ring', 0
@@ -2703,7 +2709,7 @@ ut_kill_list:   dq str_uts_4, E_KILLED, 0, 20000         ; spinning in ring 3
                 dq 0
 sys_table:      dq sys_exit, sys_ring_enter, sys_ring_new, sys_mem_new, sys_map
                 dq sys_event_new, sys_thread_new, sys_yield, sys_unmap
-                dq sys_spawn, sys_channel_new, sys_window_new
+                dq sys_spawn, sys_channel_new, sys_window_new, sys_sound_new
 
 section .bss
 alignb 8

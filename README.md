@@ -167,7 +167,7 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   killing one (ctrl+C, or a program killing its child) ends every program
   it started too. Several run at once (`&`, `tasks stop <program>`), and
   each gets only the capabilities it declares (the network, the store, the
-  desktop) or is granted for that run (`+net hello`). `hello`, `test`, `child`, `fault`, `spin`, `stash`, `paint`, `browse`, `notes`, `files` and `fstest` come with it
+  desktop) or is granted for that run (`+net hello`). `hello`, `test`, `child`, `fault`, `spin`, `stash`, `paint`, `browse`, `notes`, `files`, `fstest` and `tone` come with it
   (`src/user/`); `user test` runs them all, with a fault of every kind.
 - **Linux programs, unchanged**: `linux <program> [arguments]` runs an
   x86-64 Linux program from a root on the boot stick (`tools/mkroot.py`
@@ -189,12 +189,21 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   the clock, a heap), and a program built with it is an `.AXE` like any
   other, through no Linux layer. With std too: the target is std's zkvm
   layer, whose few system calls the crate supplies, so `println!`, `Vec`,
-  `HashMap` and the rest work. `rhello` and `rdemo` come with it; `python
+  `HashMap` and the rest work. `rhello`, `rdemo` and `rtone` come with it; `python
   tools/rust.py` builds them (rustup's nightly with rust-src, offline).
 - **Programs in MASM** (`sdk/masm`): ml64 and link.exe, with the kernel's
   constants as `axiom.inc`; `python tools/masm.py` builds `mhello`. What
   every native program sees (the .AXE, the start block, the system calls,
   the ring and each operation, windows, limits) is `docs/ABI.md`.
+- **Sound**: Intel HD Audio, the controller every PC has (`hda.asm`): the
+  codec's line out, speakers and headphones each found a way to a
+  converter, and one stream played to all of them at 48 kHz, 16-bit
+  stereo. A thread mixes every program's streams into it (`sound.asm`): a
+  program run with `AW_SOUND` (or `+sound`) opens a stream, writes frames
+  into memory it shares with the kernel, and waits on the stream for room.
+  `sound` shows the device; `sound volume 60`, `sound tone 440 500`,
+  `sound test`. `tone` (NASM) and `rtone` (Rust, `axiom::sound`) play a
+  sine. With no sound device, sound plays to nothing at the same pace.
 - ACPI (MADT, MCFG, FADT, the DSDT's `_S5_`), SMBIOS, PCI Express enumeration,
   x2APIC (falling back to xAPIC), I/O APIC, TSC-deadline timer, and a panic
   screen that stops every other CPU.
@@ -416,7 +425,7 @@ src/boot/uefi.asm       the loader: a hand-built PE32+ UEFI application
 src/kernel/*.asm        the kernel, one flat image at 0xFFFFFFFF80000000
 src/user/               programs for ring 3 (axe.inc: their header and runtime)
 src/include/            structures shared by the two
-sdk/rust/               programs in Rust: the axiom crate, the target, two programs
+sdk/rust/               programs in Rust: the axiom crate, the target, three programs
 tools/rust.py           build them; tools/mkaxe.py turns each into an .AXE
 sdk/masm/               programs in MASM: axiom.inc (made from defs.inc), mhello
 tools/masm.py           build them with ml64 and link.exe, then tools/mkaxe.py
@@ -460,7 +469,9 @@ tools/test/             host-side tests for self-contained modules (tls: the
                         stick with a root on it; rust: the Rust programs,
                         their heap, files, a window and its events, keys
                         down and up from both keyboards; masm: mhello,
-                        from MASM); all.py runs them
+                        from MASM; sound: HD Audio, the mixer and
+                        streams, judged from the WAV file QEMU's codec
+                        writes); all.py runs them
                         all at once, and qemu.py boots side by side
 tools/mkfont.py         rasterize the console font into src/kernel/gen/
 tools/mkuifont.py       rasterize the desktop's font into src/kernel/gen/

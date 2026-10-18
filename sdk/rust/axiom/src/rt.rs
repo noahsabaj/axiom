@@ -11,12 +11,13 @@ use crate::{console, mem, ring, time};
 static START: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
 
 /// What a program is given and wants (AXE_WANTS, the shell's +net +store
-/// +desk +files).
+/// +desk +files +sound).
 pub mod wants {
     pub const NET: u64 = 1;
     pub const STORE: u64 = 2;
     pub const DESK: u64 = 4;
     pub const FILES: u64 = 16;
+    pub const SOUND: u64 = 32;
 }
 
 fn sb_u32(off: usize) -> u32 {
@@ -82,6 +83,9 @@ pub fn net_handle() -> Handle {
 }
 pub fn store_handle() -> Handle {
     sb_u32(SB_STORE)
+}
+pub fn sound_handle() -> Handle {
+    sb_u32(SB_SOUND)
 }
 pub fn gift() -> Handle {
     sb_u32(SB_GIFT)

@@ -555,6 +555,8 @@ ring_arm:
     je .channel
     cmp rax, OT_SOCKET
     je .socket
+    cmp rax, OT_STREAM
+    je .stream
     mov esi, OT_EVENT
     mov edx, RT_EV_WAIT
     call handle_get
@@ -605,6 +607,18 @@ ring_arm:
     je .queue
     lea r14, [r13 + SK_WREADY]
     lea rax, [r13 + SK_WWQ]
+    jmp .queue
+.stream:                                ; until no more than SN_LOW frames wait
+    mov esi, OT_STREAM
+    mov edx, RT_STREAM_PLAY
+    call handle_get
+    cmp rax, E_ANY
+    jae .out
+    mov r13, rax
+    mov rdi, rax
+    call snd_ready
+    lea r14, [r13 + SS_READY]
+    lea rax, [r13 + SS_WQ]
 .queue:
     mov [rbx + RQ_WQ], rax
     jmp .arm

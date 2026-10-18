@@ -114,6 +114,7 @@ kernel_main:
     call disk_init
     call crypto_boot
     call net_init
+    call snd_boot                       ; the sound controller, and the mixer
     call mandel_init
     mov al, [mandel_ok]
     cmp byte [sm_no_demo], 0            ; the firmware says not to (tests)

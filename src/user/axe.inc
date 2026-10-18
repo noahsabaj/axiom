@@ -31,12 +31,14 @@
 ;  the store, under "name/", if there is a store), ax_net (the network, all
 ;  of it), ax_desk (the desktop, to open windows on), ax_files (the files on
 ;  every volume, FAT's; written only where 'vol <n> rw' was said): each 0 unless it was
-;  run from the shell and wanted it, or the shell granted it for that run.
+;  run from the shell and wanted it, or the shell granted it for that run;
+;  ax_sound (the speakers, to open streams of sound on) likewise.
 ;  Each preserves RBX, RBP, R12-R15, as the kernel's functions do.
 ;
 ;  A program says what it needs, once, anywhere in it:
-;    WANTS AW_DESK | AW_NET      (AW_NET, AW_STORE, AW_DESK, AW_FILES; or nothing)
-;  The shell gives it that and no more; '+net', '+store', '+desk', '+files' before
+;    WANTS AW_DESK | AW_NET      (AW_NET, AW_STORE, AW_DESK, AW_FILES, AW_SOUND;
+;                                 or nothing)
+;  The shell gives it that and no more; '+net', '+store', '+desk', '+files', '+sound' before
 ;  its name give more, for that run.
 ; =============================================================================
 
@@ -94,6 +96,8 @@ ax_start:
     mov [ax_desk], eax
     mov eax, [rdi + SB_FILES]
     mov [ax_files], eax
+    mov eax, [rdi + SB_SOUND]
+    mov [ax_sound], eax
     mov edi, 4096                       ; a page to write from
     mov eax, SYS_MEM_NEW
     syscall
@@ -465,6 +469,7 @@ ax_store:       resd 1
 ax_net:         resd 1
 ax_desk:        resd 1
 ax_files:       resd 1
+ax_sound:       resd 1
 ax_rx:          resd 1
 ax_len:         resd 1
 ax_digits:      resb 24

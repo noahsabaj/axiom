@@ -71,6 +71,7 @@ loader reads: magic `AXIOMKRN`, entry point, file size, memory size.
 | 14 | `kbd.asm`, `usb.asm` | PS/2 keyboard on IRQ 1; xHCI controllers and whatever is plugged in at boot (later devices arrive through hot-plug in the main loop) |
 | 15 | `nvme.asm`, `disk.asm`, `fat.asm` | NVMe controllers, their partitions (and those of USB sticks found in step 14), FAT32 mounted read-only |
 | 16 | `net.asm`, `rtl8168.asm` | Ethernet controllers; DHCP starts once the link is up |
+| 16a | `sound.asm`, `hda.asm` | The sound buffer, the first HD Audio controller with an analog output, and the thread `sound` that mixes into it |
 | 17 | `mandel.asm`, `shell.asm` | Palette, view, shell; interrupts on |
 | 18 | `store.asm` | The object store, from the first drive holding one (below) |
 
@@ -1239,6 +1240,52 @@ text rows.
   it, through kernel buffers the program's thread copies to and from.
 - `src/user/fstest.asm` checks it all, on a read-only volume and a
   writable one, in the user suite.
+
+## Sound: `hda.asm`, `sound.asm`
+
+- **HD Audio** (`hda.asm`): every PCI function of class 04/03 is tried in
+  turn (an NVIDIA card's HDMI audio is one too) until one plays to an
+  output Axiom drives. The controller is reset, its CORB and RIRB set up
+  on a page of their own and polled (RIRBCTL's status flag is on, since
+  QEMU's controller waits to see it cleared, but INTCTL keeps interrupts
+  off). Its DMA goes through a domain of its own, `sound`.
+- Each codec that answered (STATESTS) is walked: its audio function, each
+  widget's capabilities, then each pin that is an output (line out,
+  speakers, headphones; not digital, wired on the board by its
+  configuration default). From each, a depth-first search through
+  connection lists (mixers and selectors, six nodes at most) finds a
+  converter. On the way every node is powered, its output amplifier set
+  to 0 dB, the input taken selected (a pin or a selector) or heard alone (a
+  mixer's others muted); the pin is enabled (headphones with their
+  amplifier, EAPD on where it has one), and the converter put on stream 1
+  at 48 kHz, 16-bit, stereo. Every output found plays the same stream.
+- The first output stream descriptor plays `snd_buf`, 32 KiB (170 ms), in
+  two BDL entries, round and round; no interrupts: where the DMA is comes
+  from `SD_LPIB`.
+- **The mixer** (`sound.asm`), the thread `sound`, wakes every 5 ms and
+  keeps the buffer filled 40 ms ahead of the DMA: it sums every open
+  stream in 32 bits (each by its `SN_GAIN`), then the test tone, then
+  scales all by the volume (its square, from `sound volume`) and saturates
+  to 16 bits; 42 ms of silence follow what it wrote, should it be late.
+  If the DMA passed it, it starts again where the DMA is (`caught up` in
+  `sound`). With no controller it runs the same, its position from the
+  TSC: programs play to nothing at the same pace.
+- **Streams for programs**: a program run with `AW_SOUND` (or `+sound`)
+  gets a handle to the speakers (`OT_SOUND`, `SB_SOUND`). `SYS_SOUND_NEW`
+  makes a stream (`OT_STREAM`) and its memory: a header (`SN_*`) and a ring
+  of frames the program writes. The kernel's count of what it took
+  (`SS_READ`) is its own; the program's `SN_WRITE` is trusted only as far
+  as the ring holds, and every index is masked. `RO_WAIT` on a stream
+  waits until no more than `SN_LOW` frames are queued: `ring_arm` works out
+  `SS_READY` then, and the mixer sets it and wakes the stream's queue when
+  it gets there. Closing the last handle takes it off the mixer's list and
+  completes its waits.
+- `sound` in the shell: the device, its outputs, the volume, the streams
+  playing, time played, catch-ups; `sound volume <0..100>`, `sound tone [hz
+  [ms]]` (a sine by the magic circle, in integers, faded in and out),
+  `sound test` (frames played in 200 ms: 9600 at 48 kHz).
+- `src/user/tone.asm` and `sdk/rust/tone` (`rtone`) play a sine through a
+  stream; `tools/test/sound` judges what QEMU's codec wrote to a WAV file.
 
 ## Programs' controls: `src/user/kit.inc`
 

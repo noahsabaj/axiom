@@ -115,6 +115,8 @@ section .text
 %include "term.asm"
 %include "vt.asm"
 %include "window.asm"
+%include "hda.asm"
+%include "sound.asm"
 %include "power.asm"
 %include "lxmm.asm"
 %include "lxfs.asm"

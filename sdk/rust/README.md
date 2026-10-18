@@ -11,9 +11,10 @@ sdk/rust/
   axiom/axiom.ld      the layout of an .AXE (its header made by the linker)
   hello/              rhello: no std; the console, the heap, files, the clock
   demo/               rdemo: std; a window, drawn each frame, and its events
+  tone/               rtone: no std; a sine through a stream of sound
 tools/rust.py         builds them into build/esp/EFI/AXIOM/<NAME>.AXE
 tools/mkaxe.py        an ELF linked by axiom.ld -> an .AXE
-tools/test/rust/      runs both in QEMU
+tools/test/rust/      runs rhello and rdemo in QEMU (tools/test/sound: rtone)
 ```
 
 ## Building
@@ -83,7 +84,7 @@ fn main() -> axiom::Result<()> {
 (`entry!(main, wants = ..., stack = 16 << 20)` for another size), `main`
 run, and the program ended with what it returned (`()`, an integer, or a
 `Result`, whose error is said). `wants` is what the shell gives it, and no
-more (`wants::NET`, `STORE`, `DESK`, `FILES`; `+desk` and the like give more
+more (`wants::NET`, `STORE`, `DESK`, `FILES`, `SOUND`; `+desk` and the like give more
 for one run).
 
 ## The crate
@@ -131,6 +132,15 @@ for one run).
   `vol<n>:/a/b`. A read or a write is 16 MiB at most; a volume is written
   only after the user says `vol <n> rw` in the shell (`Error::READONLY`
   until then).
+- **`axiom::Stream`** (`axiom::sound`), with `wants::SOUND`: `open(frames)`
+  (a ring of that many, a power of two from 1024 to 65536), `room()`,
+  `write(&[Frame])` and `write_with(n, |i| frame)` (as many as fit, ->
+  how many), `wait(deadline)` (until no more than the low mark is queued:
+  half the ring, or `set_low`), `drain(deadline)`, `queued()`, `played()`,
+  `short()` (frames it ran dry for), `set_gain(g)` (`sound::UNITY` as
+  written). 48 kHz (`sound::RATE`), a `Frame` is `[left, right]`, `i16`s.
+  The mixer sums every stream, then the user's volume; what it takes
+  reaches the speakers about 40 ms later. Dropping the stream ends it.
 - **`axiom::time`**: `Instant` (the TSC), `micros()`, `nanos()`, `sleep()`,
   `sleep_until()`.
 - **`axiom::Heap`**: the global allocator. A program maps 128 blocks at
@@ -146,6 +156,6 @@ for one run).
 
 - One thread: the ring is held while a call waits.
 - No window without a frame: `Window::FULL` is a zoomed window.
-- No sound yet.
+- Sound is one format: 48 kHz, 16-bit, stereo; resample to it.
 - An .AXE is 16 MiB at most, its zeroes included.
 - `std::process::exit` aborts: return from `main`, or call `axiom::exit`.

@@ -1556,6 +1556,8 @@ ty_desk:        dq str_ot_desk, obj_free, 0, 0, 0, 0, rt_names_desk, 0
 ty_window:      dq str_ot_window, wo_destroy, 0, 0, 0, 0, rt_names_window, wo_orphan
                 dq str_ot_none, obj_free, 0, 0, 0, 0, rt_names_none, 0 ; (13: the settings')
 ty_files:       dq str_ot_files, obj_free, 0, 0, 0, 0, rt_names_files, 0
+ty_sound:       dq str_ot_sound, obj_free, 0, 0, 0, 0, rt_names_sound, 0
+ty_stream:      dq str_ot_stream, snd_destroy, 0, 0, 0, 0, rt_names_sound, snd_orphan
 
 thread_list     equ ty_thread + TY_LIST
 thread_count    equ ty_thread + TY_LIVE

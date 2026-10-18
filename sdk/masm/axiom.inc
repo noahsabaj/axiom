@@ -15,7 +15,9 @@ OT_SOCKET       EQU 10  ; a connection, or a port listened on (socket.asm)
 OT_DESK         EQU 11  ; the desktop: windows can be opened on it (window.asm)
 OT_WINDOW       EQU 12  ; a program's window (window.asm)
 OT_FILES        EQU 14  ; files on FAT volumes, or in a folder (fscap.asm)
-OT_TYPES        EQU 15  ; with 0, none
+OT_SOUND        EQU 15  ; the speakers: streams can be opened on them (sound.asm)
+OT_STREAM       EQU 16  ; a stream of sound, playing (sound.asm)
+OT_TYPES        EQU 17  ; with 0, none
 RT_DUP          EQU 1 SHL 0  ; derive more from it
 RT_GIVE         EQU 1 SHL 1  ; hand it to another task
 RT_INFO         EQU 1 SHL 2  ; see what the object is
@@ -47,6 +49,8 @@ RT_DESK_WINDOW  EQU 1 SHL 8  ; the desktop: open windows on it
 RT_WIN_DRAW     EQU 1 SHL 8  ; a window: show what was drawn, title it
 RT_FS_READ      EQU 1 SHL 8  ; files: list folders, read files
 RT_FS_WRITE     EQU 1 SHL 9  ; write, make, rename, remove
+RT_SOUND_PLAY   EQU 1 SHL 8  ; the speakers: open streams on them
+RT_STREAM_PLAY  EQU 1 SHL 8  ; a stream: play it, wait on it
 RT_ALL          EQU 0FFFFh
 E_BADH          EQU - 1  ; no such handle
 E_TYPE          EQU - 2  ; the wrong type of object
@@ -205,7 +209,8 @@ AW_NET          EQU 1  ; the network (SB_NET)
 AW_STORE        EQU 2  ; its own names in the store (SB_STORE)
 AW_DESK         EQU 4  ; the desktop, to open windows on (SB_DESK)
 AW_FILES        EQU 16  ; the files on every volume (SB_FILES)
-AW_ALL          EQU 7 OR AW_FILES
+AW_SOUND        EQU 32  ; the speakers (SB_SOUND)
+AW_ALL          EQU 7 OR AW_FILES OR AW_SOUND
 SB_RING         EQU 0  ; dword: a handle to the task's ring
 SB_RING_MEM     EQU 4  ; dword: to the ring's memory
 SB_CONSOLE      EQU 8  ; dword: to the console
@@ -218,6 +223,7 @@ SB_NET          EQU 40  ; dword: to the network, or 0
 SB_DESK         EQU 44  ; dword: to the desktop, or 0
 SB_FILES        EQU 52  ; dword: to the files, or 0
 SB_GIFT2        EQU 56  ; dword: a second thing it was given, or 0
+SB_SOUND        EQU 60  ; dword: to the speakers, or 0
 SB_ARGS         EQU 64  ; the arguments it was run with, NUL-ended
 SB_ARGS_MAX     EQU 4096 - SB_ARGS - 1
 SYS_EXIT        EQU 0  ; (code): this thread ends
@@ -232,7 +238,17 @@ SYS_UNMAP       EQU 8  ; (memory): its mapping goes
 SYS_SPAWN       EQU 9  ; (memory, offset, bytes of "program args",
 SYS_CHANNEL_NEW EQU 10  ; -> RAX, RDX = the two ends of a channel
 SYS_WINDOW_NEW  EQU 11  ; (desktop, width, height, a channel's end,
-SYS_COUNT       EQU 12
+SYS_SOUND_NEW   EQU 12  ; (the speakers, frames) -> RAX = a stream
+SYS_COUNT       EQU 13
+SN_WRITE        EQU 0  ; dword: frames written, in all (the program's)
+SN_READ         EQU 4  ; dword: frames taken to play, in all
+SN_FRAMES       EQU 8  ; dword: the ring's, a power of two
+SN_RATE         EQU 12  ; dword: 48000
+SN_CHANNELS     EQU 16  ; dword: 2
+SN_LOW          EQU 20  ; dword: half SN_FRAMES to begin with (the program's)
+SN_GAIN         EQU 24  ; dword: its volume, 65536 as written, at most (the program's)
+SN_SHORT        EQU 28  ; dword: frames it had none for, once begun
+SN_DATA         EQU 64
 WE_KIND         EQU 0  ; dword: WE_KEY ...
 WE_CODE         EQU 4  ; dword: the key (WE_X: WM_*); the button (1 left, 2
 WE_X            EQU 8  ; dword, signed: the pointer, in the window

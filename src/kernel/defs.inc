@@ -91,7 +91,9 @@ OT_DESK         equ 11                  ; the desktop: windows can be opened on 
 OT_WINDOW       equ 12                  ; a program's window (window.asm)
                                         ; (13: the settings, on its own branch)
 OT_FILES        equ 14                  ; files on FAT volumes, or in a folder (fscap.asm)
-OT_TYPES        equ 15                  ; with 0, none
+OT_SOUND        equ 15                  ; the speakers: streams can be opened on them (sound.asm)
+OT_STREAM       equ 16                  ; a stream of sound, playing (sound.asm)
+OT_TYPES        equ 17                  ; with 0, none
 
 ; what a capability allows (RT_*): three for any object, the rest by type
 RT_DUP          equ 1 << 0              ; derive more from it
@@ -125,6 +127,8 @@ RT_DESK_WINDOW  equ 1 << 8              ; the desktop: open windows on it
 RT_WIN_DRAW     equ 1 << 8              ; a window: show what was drawn, title it
 RT_FS_READ      equ 1 << 8              ; files: list folders, read files
 RT_FS_WRITE     equ 1 << 9              ; write, make, rename, remove
+RT_SOUND_PLAY   equ 1 << 8              ; the speakers: open streams on them
+RT_STREAM_PLAY  equ 1 << 8              ; a stream: play it, wait on it
 RT_ALL          equ 0xFFFF
 
 ; what handle operations return when they fail
@@ -640,7 +644,8 @@ AW_STORE        equ 2                   ; its own names in the store (SB_STORE)
 AW_DESK         equ 4                   ; the desktop, to open windows on (SB_DESK)
                                         ; (8: the settings, on their branch)
 AW_FILES        equ 16                  ; the files on every volume (SB_FILES)
-AW_ALL          equ 7 | AW_FILES
+AW_SOUND        equ 32                  ; the speakers (SB_SOUND)
+AW_ALL          equ 7 | AW_FILES | AW_SOUND
 
 ; the start block, at USER_START; the first thread starts with RDI = it
 SB_RING         equ 0                   ; dword: a handle to the task's ring
@@ -656,8 +661,9 @@ SB_DESK         equ 44                  ; dword: to the desktop, or 0
 SB_FILES        equ 52                  ; dword: to the files, or 0
 SB_GIFT2        equ 56                  ; dword: a second thing it was given, or 0
                                         ; (each given handle to a desktop, files,
-                                        ; the network or the store is in its slot
-                                        ; above too, if that was empty)
+                                        ; the speakers, the network or the store
+                                        ; is in its slot too, if that was empty)
+SB_SOUND        equ 60                  ; dword: to the speakers, or 0
 SB_ARGS         equ 64                  ; the arguments it was run with, NUL-ended
 SB_ARGS_MAX     equ 4096 - SB_ARGS - 1
 
@@ -684,7 +690,24 @@ SYS_WINDOW_NEW  equ 11                  ; (desktop, width, height, a channel's e
                                         ; B,G,R,x at width * 4 bytes a row (with
                                         ; WNF_RESIZE or WNF_FULL: the screen's
                                         ; width * 4 a row, its height of rows)
-SYS_COUNT       equ 12
+SYS_SOUND_NEW   equ 12                  ; (the speakers, frames) -> RAX = a stream
+                                        ; playing, RDX = its memory (SN_*)
+SYS_COUNT       equ 13
+
+; a stream's memory (SYS_SOUND_NEW): this header, then SN_FRAMES frames at
+; SN_DATA, each a left and a right sample, 16 bits signed, SN_RATE a second.
+; The program writes frames at SN_WRITE (mod SN_FRAMES) and adds to it; the
+; mixer takes them and adds to SN_READ. RO_WAIT on the stream completes once
+; no more than SN_LOW frames wait to be played.
+SN_WRITE        equ 0                   ; dword: frames written, in all (the program's)
+SN_READ         equ 4                   ; dword: frames taken to play, in all
+SN_FRAMES       equ 8                   ; dword: the ring's, a power of two
+SN_RATE         equ 12                  ; dword: 48000
+SN_CHANNELS     equ 16                  ; dword: 2
+SN_LOW          equ 20                  ; dword: half SN_FRAMES to begin with (the program's)
+SN_GAIN         equ 24                  ; dword: its volume, 65536 as written, at most (the program's)
+SN_SHORT        equ 28                  ; dword: frames it had none for, once begun
+SN_DATA         equ 64
 
 ; what a window says, from the channel end it was given: a message of WE_SIZE
 ; bytes to its peer for each

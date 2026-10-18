@@ -251,10 +251,10 @@ PROGRAMS_STEPS = [
      LINE),
     ("run hello via run", said("hello: arguments: via run"), "run <program>, as its name", LINE),
     ("+bogus hello", said("'+bogus' is not something a program can be given; there are +net, "
-                          "+store, +desk and +files"), "+bogus: not a capability"),
-    ("+net files", said("+net, +store, +desk and +files are for programs; 'files' is a "
+                          "+store, +desk, +files and +sound"), "+bogus: not a capability"),
+    ("+net files", said("+net, +store, +desk, +files and +sound are for programs; 'files' is a "
                         "command"), "+net before a command: no"),
-    ("+net", said("+net, +store, +desk and +files come before a program's name"),
+    ("+net", said("+net, +store, +desk, +files and +sound come before a program's name"),
      "+net alone: no"),
     ("files &", said("'&' is for programs; 'files' is a command"), "& after a command: no"),
     ("hello | count &", said("a program in the background has no | or > after it"),

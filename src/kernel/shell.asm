@@ -1135,7 +1135,7 @@ sh_head:
     mov r13, rsi
     mov r15d, edx
     mov dword [sh_grants], 0
-.grant:                                 ; +net, +store, +desk, +files: for a program
+.grant:                                 ; +net, +store, +desk, +files, +sound: for a program
     mov rsi, [r13]
     cmp byte [rsi], '+'
     jne .granted
@@ -1146,7 +1146,7 @@ sh_head:
     add r13, 8
     dec r12d
     jnz .grant
-    KLOG "+net, +store, +desk and +files come before a program's name"
+    KLOG "+net, +store, +desk, +files and +sound come before a program's name"
     stc
     jmp .out
 .granted:
@@ -1244,7 +1244,7 @@ sh_head:
     call user_start
     jmp .out
 .granted_command:
-    KLOG "+net, +store, +desk and +files are for programs; '%s' is a command", rax
+    KLOG "+net, +store, +desk, +files and +sound are for programs; '%s' is a command", rax
     stc
     jmp .out
 .background_command:
@@ -1287,7 +1287,7 @@ sh_grant:
     clc
     jmp .out
 .none:
-    KLOG "'+%s' is not something a program can be given; there are +net, +store, +desk and +files", rsi
+    KLOG "'+%s' is not something a program can be given; there are +net, +store, +desk, +files and +sound", rsi
     stc
 .out:
     pop rdi
@@ -1918,9 +1918,10 @@ str_sh_net:     db 'net', 0
 str_sh_store:   db 'store', 0
 str_sh_desk:    db 'desk', 0
 str_sh_files:   db 'files', 0
+str_sh_sound:   db 'sound', 0
 align 8
 sh_grants_names: dq str_sh_net, AW_NET, str_sh_store, AW_STORE, str_sh_desk, AW_DESK
-                dq str_sh_files, AW_FILES, 0, 0
+                dq str_sh_files, AW_FILES, str_sh_sound, AW_SOUND, 0, 0
 sh_escapable:   db ' "$|>;&\', 0x27, 0   ; what a \ takes as it is
 sh_tok_pipe:    db '|', 0
 sh_tok_gt:      db '>', 0
@@ -1997,6 +1998,7 @@ commands:
     COMMAND 'store',    cmd_store,    'store [put|get|rm|ls|diff|commit|abort|log|snap|rollback|undo|verify|format|test]: the object store'
     COMMAND 'vol',      cmd_vol,      'vol <n> [rw|ro]: pick a volume, allow writes'
     COMMAND 'date',     cmd_date,     'the clock'
+    THING   'sound',    snd_actions,  'the sound device and its volume; a test tone'
     COMMAND 'net',      cmd_net,      'network interfaces, link and address'
     COMMAND 'ip',       cmd_ip,       'ip <a.b.c.d/n> [gateway] [dns]: set the address by hand'
     COMMAND 'ip6',      cmd_ip6,      'ip6: IPv6 addresses and neighbours; ip6 <address>/64 [router] [dns], ip6 auto, ip6 prefer [off]'

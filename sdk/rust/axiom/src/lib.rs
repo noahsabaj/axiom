@@ -16,7 +16,8 @@
 //!   static HEAP: axiom::Heap = axiom::Heap::new();
 //!
 //! std's threads, its clock and its files are not there: they are
-//! axiom::time, axiom::files, and one thread for now.
+//! axiom::time, axiom::files, and one thread for now. Sound is
+//! axiom::sound.
 
 #![no_std]
 
@@ -29,6 +30,7 @@ pub mod heap;
 pub mod mem;
 pub mod ring;
 pub mod rt;
+pub mod sound;
 pub mod sync;
 pub mod sys;
 pub mod time;
@@ -39,6 +41,7 @@ pub mod zkvm;
 pub use files::Files;
 pub use heap::Heap;
 pub use rt::{Args, Termination, args, args_line, wants};
+pub use sound::Stream;
 pub use sys::{Error, Handle, Result, exit};
 pub use time::Instant;
 pub use window::{Button, Event, Frame, Key, Look, Mods, Pointer, Window};
