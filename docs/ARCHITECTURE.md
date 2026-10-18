@@ -196,6 +196,11 @@ or idles.
   run on, and comes back at most half a slice ahead of the least-run thread,
   preempting the running one if it is 1 ms or more behind it: so the shell
   answers at once while every CPU is busy.
+- **Idle**: a CPU with nothing to run watches its `PC_RESCHED` and run queue
+  for 50 us before `hlt`. While it watches (`PC_POLLING` = 1), a CPU waking
+  a thread there sets `PC_RESCHED` and sends no IPI. Both sides use a locked
+  XCHG and then read the other's flag, so a wake-up is never lost. In a VM, a
+  wake from `hlt` by an IPI costs an exit on each side: 10 us against 0.4.
 - **Where a thread goes**: where it is pinned (`TH_PIN`), where it is hinted
   once (`TH_HINT`), or the CPU that costs least: 64 for each thread there,
   24 for the wrong kind of core for its class (perf: P-cores; eff: E-cores;

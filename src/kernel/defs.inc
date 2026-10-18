@@ -40,6 +40,7 @@ PC_RQ_LEN       equ 292                 ; dword: threads on the run queue
 PC_BUSY         equ 296                 ; dword: 1 while a thread other than idle runs
 PC_RESCHED      equ 300                 ; byte: switch on the way out of the interrupt
 PC_SCHED_ON     equ 301                 ; byte: this CPU takes threads
+PC_POLLING      equ 302                 ; byte: idle, watching PC_RESCHED: no IPI needed
 PC_SKIND        equ 304                 ; the kind the scheduler goes by (CPU_KIND_*)
 PC_SIBLING      equ 312                 ; its SMT sibling's index, or -1
 PC_MIN_VR       equ 320                 ; the least virtual runtime here, never falls
