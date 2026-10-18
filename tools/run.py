@@ -268,6 +268,9 @@ class Monitor:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--headless", action="store_true")
+    ap.add_argument("--demo", action="store_true", help="headless, start the Mandelbrot "
+                    "zoom at boot anyway (it keeps every CPU busy, so headless runs "
+                    "leave it off)")
     ap.add_argument("--smp", default="8")
     ap.add_argument("--mem", default="6G")
     ap.add_argument("--wait", type=float, help="seconds before keys/shot, instead of "
@@ -332,6 +335,8 @@ def main():
                 "-no-reboot",
                 "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
                 *shlex.split(opts.extra)]
+        if opts.headless and not opts.demo:
+            args += ["-smbios", "type=11,value=axiom.demo=off"]
         if opts.nic:
             mac = f",mac={opts.mac}" if opts.mac else ""
             pcap = BUILD / f"net-{MONITOR[1]}.pcap"

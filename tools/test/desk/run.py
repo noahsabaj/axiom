@@ -291,7 +291,7 @@ def main():
     stick = OUT / "stick.img"                   # paint is run from it
     subprocess.run([sys.executable, str(ROOT / "tools" / "mkstick.py"), str(stick)], cwd=ROOT,
                    check=True, capture_output=True)
-    logs = boot_all(OUT, {"desk": (script(), ["--smp", "4", "--extra", TABLET, "--stick",
+    logs = boot_all(OUT, {"desk": (script(), ["--smp", "4", "--demo", "--extra", TABLET, "--stick",
                                               stick.relative_to(ROOT).as_posix()], 120)})
     check(*logs["desk"])
     print(f"{'all passed' if not FAILS else f'{FAILS} FAILED'}")

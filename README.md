@@ -193,6 +193,9 @@ Windows' "Windows Hypervisor Platform" feature. Under WHPX the guest gets
 `-cpu max,-svm,-vmx`, which still has SHA-NI, AES-NI and RDSEED; the firmware
 faults on plain `max` there. Under TCG one Mandelbrot frame takes seconds
 and the shell answers between frames, so type `demo` to stop the zoom.
+Headless runs start without it (`-smbios type=11,value=axiom.demo=off`, an
+OEM string Axiom reads at boot), since it keeps every CPU busy; `--demo`
+starts it anyway.
 
 Headless runs wait for the shell's first prompt line instead of a fixed time,
 and `until TEXT` in `--script` waits for TEXT to appear in the log after the

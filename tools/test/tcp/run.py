@@ -126,6 +126,7 @@ def clients():
     c.sendall(data[sent:])
     t.join()
     said.append(("drained", bytes(back) == data, f"{len(back)} of {len(data)} bytes back"))
+    time.sleep(3)                           # open a while, for a 'tcp' to see the window again
     c.shutdown(socket.SHUT_WR)
     said.append(("fin", c.recv(10) == b"", "their FIN after ours"))
     c.close()

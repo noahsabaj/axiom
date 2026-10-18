@@ -115,6 +115,10 @@ kernel_main:
     call net_init
     call mandel_init
     mov al, [mandel_ok]
+    cmp byte [sm_no_demo], 0            ; the firmware says not to (tests)
+    je .demo_set
+    xor eax, eax
+.demo_set:
     mov [demo_on], al
     call ui_ready
     call shell_init

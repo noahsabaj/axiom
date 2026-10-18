@@ -61,7 +61,7 @@ loader reads: magic `AXIOMKRN`, entry point, file size, memory size.
 | 4 | `pmm.asm`, `vmm.asm`, `heap.asm` | Bitmap page allocator from the UEFI memory map; the kernel's own page tables (no identity map, W^X), the vm region, the heap |
 | 5 | `gfx.asm`, `desk.asm`, `term.asm`, `window.asm`, `ui.asm` | Framebuffer, surfaces, alpha-blended glyphs; the desktop and the first shell's window (the others once the machine is up) |
 | 6 | TSS, IST | Guarded stacks: the BSP moves onto its own, the loader's goes back; #DF, NMI and #MC each get one too |
-| 7 | `acpi.asm`, `smbios.asm` | MADT (CPUs, I/O APICs, overrides), MCFG, FADT, `_S5_`; board, BIOS and memory strings |
+| 7 | `acpi.asm`, `smbios.asm` | MADT (CPUs, I/O APICs, overrides), MCFG, FADT, `_S5_`; board, BIOS and memory strings; OEM strings (`axiom.demo=off`: no zoom at boot) |
 | 8 | `pmm.asm` | Reclaim boot-services memory |
 | 9 | `apic.asm` | x2APIC through MSRs, else xAPIC MMIO; 8259s masked; I/O APIC entries masked |
 | 10 | `object.asm`, `sched.asm`, `ring.asm` | The task `kernel`, which everything at boot acts for; the scheduler: the code running from here on is the thread `main`; the timer is the scheduler's; `async_boot`: the timers' heap and the thread `async` |
