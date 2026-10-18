@@ -27,6 +27,9 @@ PC_CORE         equ 112                 ; core number within its kind
 PC_THREAD       equ 120                 ; SMT thread within the core
 PC_TSS          equ 128                 ; 104-byte TSS
 PC_TLB_GEN      equ 232                 ; last TLB shootdown this CPU answered
+PC_TLB_LAZY     equ 240                 ; dword: 1 asleep in the idle HLT, 2 and it
+                                        ; owes a whole TLB flush when it wakes
+PC_TLB_WAKES    equ 248                 ; whole flushes it owed as it woke
 ; the scheduler's part (sched.asm)
 PC_CURRENT      equ 256                 ; the thread running here
 PC_IDLE_TH      equ 264                 ; this CPU's idle thread

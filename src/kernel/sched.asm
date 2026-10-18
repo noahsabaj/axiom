@@ -1898,8 +1898,10 @@ sched_idle_loop:
     jnz .run
     cmp qword [zombies], 0
     jne .reap
+    mov dword [r12 + PC_TLB_LAZY], 1    ; asleep: a shootdown need not wake it
     sti                                 ; STI's shadow makes STI; HLT atomic
     hlt
+    call tlb_wake                       ; (isr_common did, unless an NMI woke it)
     jmp sched_idle_loop
 .run:
     lea rdi, [r12 + PC_RQ_LOCK]

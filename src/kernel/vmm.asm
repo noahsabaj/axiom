@@ -1005,6 +1005,12 @@ mmio_map:
 ;      interrupts off. Preserves all.
 ;    tlb_service: answer a shootdown this CPU has not answered yet (its IPI
 ;      handler; also called by anyone spinning with interrupts off).
+;    tlb_wake: a CPU woken from its idle HLT, before it runs anything else.
+;
+;  A CPU asleep in its idle HLT (PC_TLB_LAZY = 1) is not sent the IPI nor
+;  waited for: the shootdown marks it (2), and it flushes its whole TLB as
+;  it wakes, in isr_common before any handler runs. Whatever it then touches
+;  is looked up afresh, so it never sees the pages taken away.
 ; -----------------------------------------------------------------------------
 tlb_shootdown:
     push rax
@@ -1036,7 +1042,10 @@ tlb_shootdown:
     mov rax, [tlb_gen]
     mov [gs:PC_TLB_GEN], rax            ; not for us: done above
     inc qword [tlb_count]
-    xor edi, edi
+    call tlb_claim                      ; those asleep flush as they wake
+    test eax, eax
+    jnz .some
+    xor edi, edi                        ; none asleep: one IPI to all of them
     mov esi, ICR_FIXED_OTHERS | VEC_TLB
     call lapic_send_ipi
 .wait:
@@ -1045,6 +1054,9 @@ tlb_shootdown:
     jae .answered
     pause
     jmp .wait
+.some:
+    mov rax, [tlb_gen]                  ; (tlb_claim took RAX)
+    call tlb_send                       ; the rest, one at a time
 .answered:
     mov dword [tlb_lock], 0
     popfq
@@ -1061,14 +1073,123 @@ tlb_service:
     mov rax, [tlb_gen]
     cmp rax, [gs:PC_TLB_GEN]
     je .out
-    mov [gs:PC_TLB_GEN], rax
     mov rdi, [tlb_va]
     mov rsi, [tlb_pages]
     call tlb_flush_local
+    mov [gs:PC_TLB_GEN], rax            ; answered (tlb_send waits for this)
     lock inc dword [tlb_acks]
 .out:
     pop rsi
     pop rdi
+    pop rax
+    ret
+
+; tlb_claim (tlb_lock held) -> EAX = CPUs asleep in their idle HLT, each
+; marked to flush as it wakes; tlb_ipi[i] = 1 for each other CPU awake.
+; Preserves others.
+tlb_claim:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    xor esi, esi                        ; asleep
+    xor ecx, ecx
+.cpu:
+    cmp ecx, [cpu_count]
+    jae .done
+    lea rax, [tlb_ipi]
+    mov byte [rax + rcx], 0
+    cmp rcx, [gs:PC_INDEX]
+    je .next
+    PERCPU rbx, rcx
+    cmp qword [rbx + PC_ONLINE], 0
+    je .next
+    mov eax, 1
+    mov edx, 2
+    lock cmpxchg [rbx + PC_TLB_LAZY], edx
+    je .asleep                          ; 1 -> 2: it owes a flush now
+    cmp eax, 2
+    je .asleep                          ; it owed one already, still asleep
+    lea rax, [tlb_ipi]
+    mov byte [rax + rcx], 1
+    jmp .next
+.asleep:
+    inc esi
+.next:
+    inc ecx
+    jmp .cpu
+.done:
+    mov eax, esi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; tlb_send (tlb_lock held, RAX = tlb_gen): the IPI to each CPU tlb_claim
+; found awake, then wait for each to have answered. Preserves all but RAX.
+tlb_send:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    mov r8, rax
+    xor ecx, ecx
+.send:
+    cmp ecx, [cpu_count]
+    jae .sent
+    lea rax, [tlb_ipi]
+    cmp byte [rax + rcx], 0
+    je .send_next
+    PERCPU rbx, rcx
+    mov edi, [rbx + PC_APIC_ID]
+    mov esi, ICR_FIXED | VEC_TLB
+    call lapic_send_ipi
+.send_next:
+    inc ecx
+    jmp .send
+.sent:
+    xor ecx, ecx
+.wait:
+    cmp ecx, [cpu_count]
+    jae .done
+    lea rax, [tlb_ipi]
+    cmp byte [rax + rcx], 0
+    je .wait_next
+    PERCPU rbx, rcx
+.spin:
+    cmp [rbx + PC_TLB_GEN], r8
+    jae .wait_next
+    pause
+    jmp .spin
+.wait_next:
+    inc ecx
+    jmp .wait
+.done:
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; tlb_wake: this CPU is awake again; if a shootdown passed it by while it
+; slept, its whole TLB goes now. Preserves all.
+tlb_wake:
+    push rax
+    xor eax, eax
+    xchg eax, [gs:PC_TLB_LAZY]
+    cmp eax, 2
+    jne .out
+    push rsi
+    mov esi, TLB_ALL_OVER + 1
+    call tlb_flush_local
+    pop rsi
+    inc qword [gs:PC_TLB_WAKES]
+.out:
     pop rax
     ret
 
@@ -1438,6 +1559,7 @@ tlb_gen:        resq 1
 tlb_va:         resq 1
 tlb_pages:      resq 1
 tlb_count:      resq 1                  ; shootdowns sent
+tlb_ipi:        resb MAX_CPUS           ; tlb_claim: the CPUs awake
 tlb_acks:       resd 1
 tlb_want:       resd 1
 mem_bad_text:   resb 160

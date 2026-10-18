@@ -125,7 +125,11 @@ or idles.
   `tlb_shootdown` sends `VEC_TLB` to every other CPU and waits for them all
   (`invlpg` per page, or a full flush past 64), and only then gives the pages
   and page tables back. A CPU waiting for the lock, or for a job to finish,
-  answers other shootdowns as it waits.
+  answers other shootdowns as it waits. A CPU asleep in its idle `hlt`
+  (`PC_TLB_LAZY` = 1) is neither sent the IPI nor waited for: the shootdown
+  marks it (1 → 2, by `cmpxchg`), and it flushes its whole TLB as it wakes,
+  in `isr_common` before any handler runs, so it never touches a page that
+  was taken away. The others then get the IPI one by one.
 - **The heap**: `kmalloc(bytes)` gives zeroed, 16-byte aligned memory; up to
   1 KiB it comes from slabs (a page from pmm each, through the direct map,
   one object size per slab: 16 to 1024 bytes), larger from a vm mapping of
