@@ -33,6 +33,15 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   links), back, forward, reload and an address bar, scrolled by the wheel,
   the keys or its scrollbar; links clicked, redirects followed, `#anchors`
   scrolled to. No CSS, images or scripts yet.
+- **An office program**, `compose [name]`: one document, three views of it.
+  Pages (rich text: headings, bold, italic, underline, lists, tables and
+  images, flowed onto pages), Slides (16:9, thumbnails, and F5 presents
+  them in a window of their own) and Grid (a spreadsheet: numbers, text and
+  formulas with references, ranges, `SUM`, `AVERAGE`, `MIN`, `MAX`, `IF`,
+  worked out again by what depends on what). A grid or a slide sits in a
+  page, and a page's blocks on a slide. Undo, copy and paste, its own
+  versioned file format (`docs/COMPOSE.md`) saved into the store, and plain
+  text and CSV in and out.
 - **USB** on every xHCI controller: hubs (nested, USB 2 and 3), hot-plug, and a
   HID report parser for keyboards (6-key and N-key rollover), mice and tablets.
   A mouse cursor: in the Mandelbrot's window, click to recentre it, wheel to
@@ -139,7 +148,7 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   killing one (ctrl+C, or a program killing its child) ends every program
   it started too. Several run at once (`&`, `tasks stop <program>`), and
   each gets only the capabilities it declares (the network, the store, the
-  desktop) or is granted for that run (`+net hello`). `hello`, `test`, `child`, `fault`, `spin`, `stash`, `paint` and `browse` come with it
+  desktop) or is granted for that run (`+net hello`). `hello`, `test`, `child`, `fault`, `spin`, `stash`, `paint`, `browse` and `compose` come with it
   (`src/user/`); `user test` runs them all, with a fault of every kind.
 - **Linux programs, unchanged**: `linux <program> [arguments]` runs an
   x86-64 Linux program from a root on the boot stick (`tools/mkroot.py`
