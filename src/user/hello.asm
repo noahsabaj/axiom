@@ -1,7 +1,7 @@
 ; =============================================================================
 ;  hello.asm - the smallest program worth running: says hello, where it is,
-;  and what it was given (the network, the store, the desktop), through its
-;  ring
+;  and what it was given (the network, the store, the desktop, the files),
+;  through its ring
 ;
 ;    hello [arguments]
 ; =============================================================================
@@ -54,6 +54,12 @@ main:
     call ax_add
     inc ebx
 .no_desk:
+    cmp dword [ax_files], 0
+    je .no_files
+    lea rsi, [s_files]
+    call ax_add
+    inc ebx
+.no_files:
     test ebx, ebx
     jnz .given
     lea rsi, [s_nothing]
@@ -74,6 +80,7 @@ s_given:        db 'hello: given:', 0
 s_net:          db ' net', 0
 s_store:        db ' store', 0
 s_desk:         db ' desk', 0
+s_files:        db ' files', 0
 s_nothing:      db ' nothing', 0
 
 AXE_END

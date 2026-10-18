@@ -13,7 +13,10 @@ build/esp/EFI/AXIOM), boots it and checks the serial log:
     in their ring, call the kernel, or have another thread fault, killed in
     time; nothing left over), 'objects' (the console), and poweroff;
   - 'user test' on one CPU, and (unless --quick) under TCG, QEMU's own CPU
-    emulation, on four.
+    emulation, on four;
+  - files through a capability: FSTEST while vol0 is read-only (writes
+    refused) and, after 'vol 0 rw', twice (what it leaves, it cleans up),
+    then the stick's FAT checked from here.
 Outputs go to build/test/user/.
 """
 import argparse
@@ -87,7 +90,7 @@ def jobs(opts):
     text.write_text("Not a program, though long enough to have a header.\n" * 4)
     subprocess.run([sys.executable, str(ROOT / "tools" / "mkstick.py"), str(stick),
                     "--file", f"NOTAPROG.TXT={text}"], cwd=ROOT, check=True, capture_output=True)
-    names = ["four", "one"] + ([] if opts.quick else ["tcg"])
+    names = ["four", "one", "files"] + ([] if opts.quick else ["tcg"])
     for name in names:
         shutil.copyfile(stick, OUT / f"stick-{name}.img")
 
@@ -117,6 +120,11 @@ def jobs(opts):
     jobs = {
         "four": (four, ["--smp", "4", *on("four")], 120),
         "one": ([*READY, *TEST, "type poweroff\\n", "ended"], ["--smp", "1", *on("one")], 90),
+        "files": ([*READY, "type run fstest ro\\n", "until run: FSTEST exited",
+                   "type vol 0 rw\\n", "until vol0 is writable",
+                   "type run fstest\\n", "until run: FSTEST exited",
+                   "type run fstest\\n", "until run: FSTEST exited", "wait 0.3",
+                   "type poweroff\\n", "ended"], ["--smp", "2", *on("files")], 90),
     }
     if not opts.quick:
         jobs["tcg"] = ([*READY, *TEST, "type poweroff\\n", "ended"],
@@ -164,6 +172,20 @@ def four(logs):
     result("QEMU ended by itself" in err, "4 CPUs: powered off")
 
 
+def files(logs):
+    print("-- files")
+    log, err = logs["files"]
+    result("fstest: all 6 checks passed" in log, "fstest ro: writes refused, reads allowed")
+    result(log.count("fstest: all 24 checks passed") == 2, "fstest: all 24 checks, twice")
+    result(log.count("run: FSTEST exited with 0") == 3, "fstest: exited with 0, each time")
+    result("AXIOM PANIC" not in log, "files: no panic")
+    result("QEMU ended by itself" in err, "files: powered off")
+    r = subprocess.run([sys.executable, str(ROOT / "tools" / "fatcheck.py"),
+                        str(OUT / "stick-files.img")], capture_output=True, text=True)
+    result(r.returncode == 0, "files: the stick's FAT has no damage" +
+           ("" if r.returncode == 0 else ": " + (r.stdout + r.stderr).strip()[-300:]))
+
+
 def small(opts, logs):
     print("-- one CPU")
     log, err = logs["one"]
@@ -184,6 +206,7 @@ def main():
     opts = ap.parse_args()
     logs = boot_all(OUT, jobs(opts))
     four(logs)
+    files(logs)
     small(opts, logs)
     print(f"{'all passed' if not FAILS else f'{FAILS} FAILED'}")
     return 1 if FAILS else 0

@@ -97,6 +97,7 @@ kernel_main:
     call cpu_identify_local
     call obj_boot                       ; the task 'kernel'
     call user_boot                      ; the console, for programs
+    call look_make                      ; and the desktop's look (look.asm)
     call sched_init                     ; from here on, this is the thread 'main'
     call async_boot                     ; the thread 'async': timers, rings
     call smp_start
@@ -210,6 +211,8 @@ main_loop:
     cmp byte [desk_reap], 0
     jne .awake
     cmp qword [spawn_list], 0           ; a program starting another
+    jne .awake
+    cmp qword [fs_list], 0              ; one asking for its files
     jne .awake
     mov rcx, [iommu_fault_count]        ; a device refused, not said yet
     cmp rcx, [iommu_fault_said]

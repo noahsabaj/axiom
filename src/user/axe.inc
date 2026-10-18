@@ -17,7 +17,9 @@
 ;    ax_now -> RAX = the TSC; ax_us(RDI) -> RAX = that many us in TSC ticks
 ;    ax_spawn(RSI = NUL-ended "program arguments", EDI = a handle to give it
 ;      or 0) -> RAX = a handle to the task started, RDX = to its first
-;      thread; RAX < 0 if refused
+;      thread; RAX < 0 if refused. ax_spawn2: EDX = a second handle to give.
+;      A desktop, files, the network or the store given is also where the
+;      program finds one it wanted (ax_desk, ax_files, ax_net, ax_store).
 ;    ax_send(EDI = a channel's end, RSI = bytes, RDX = how many, a page at
 ;      most) -> RAX = the bytes, or E_*
 ;    ax_recv(EDI = an end, RSI = to, RDX = room, a page at most, RCX = TSC
@@ -25,15 +27,16 @@
 ;      E_* (E_PEER: the other end is closed, and nothing waits)
 ;  Globals: ax_sb (the start block), ax_ring, ax_ring_va, ax_console, ax_io
 ;  and ax_io_va (a page of memory to write from), ax_tsc_us, ax_gift (what
-;  the task that started it gave it, 0 if nothing), ax_store (its names in
+;  the task that started it gave it, 0 if nothing; ax_gift2 a second), ax_store (its names in
 ;  the store, under "name/", if there is a store), ax_net (the network, all
-;  of it), ax_desk (the desktop, to open windows on): each 0 unless it was
+;  of it), ax_desk (the desktop, to open windows on), ax_files (the files on
+;  every volume, FAT's; written only where 'vol <n> rw' was said): each 0 unless it was
 ;  run from the shell and wanted it, or the shell granted it for that run.
 ;  Each preserves RBX, RBP, R12-R15, as the kernel's functions do.
 ;
 ;  A program says what it needs, once, anywhere in it:
-;    WANTS AW_DESK | AW_NET      (AW_NET, AW_STORE, AW_DESK; or WANTS nothing)
-;  The shell gives it that and no more; '+net', '+store' and '+desk' before
+;    WANTS AW_DESK | AW_NET      (AW_NET, AW_STORE, AW_DESK, AW_FILES; or nothing)
+;  The shell gives it that and no more; '+net', '+store', '+desk', '+files' before
 ;  its name give more, for that run.
 ; =============================================================================
 
@@ -81,12 +84,16 @@ ax_start:
     mov [ax_tsc_us], rax
     mov eax, [rdi + SB_GIFT]
     mov [ax_gift], eax
+    mov eax, [rdi + SB_GIFT2]
+    mov [ax_gift2], eax
     mov eax, [rdi + SB_STORE]
     mov [ax_store], eax
     mov eax, [rdi + SB_NET]
     mov [ax_net], eax
     mov eax, [rdi + SB_DESK]
     mov [ax_desk], eax
+    mov eax, [rdi + SB_FILES]
+    mov [ax_files], eax
     mov edi, 4096                       ; a page to write from
     mov eax, SYS_MEM_NEW
     syscall
@@ -303,9 +310,14 @@ ax_us:
     ret
 
 ; ax_spawn(RSI = "program arguments", EDI = a handle to give, or 0)
+; ax_spawn2(RSI, EDI, EDX = a second handle to give, or 0)
 ax_spawn:
+    xor edx, edx
+ax_spawn2:
     push rbx
+    push r12
     mov ebx, edi
+    mov r12d, edx
     mov rdi, [ax_io_va]                 ; the text, from the page
     xor ecx, ecx
 .copy:
@@ -321,8 +333,10 @@ ax_spawn:
     xor esi, esi
     mov edx, ecx
     mov r10d, ebx
+    mov r8d, r12d
     mov eax, SYS_SPAWN
     syscall
+    pop r12
     pop rbx
     ret
 
@@ -446,9 +460,11 @@ ax_ring:        resd 1
 ax_console:     resd 1
 ax_io:          resd 1
 ax_gift:        resd 1
+ax_gift2:       resd 1
 ax_store:       resd 1
 ax_net:         resd 1
 ax_desk:        resd 1
+ax_files:       resd 1
 ax_rx:          resd 1
 ax_len:         resd 1
 ax_digits:      resb 24

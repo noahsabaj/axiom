@@ -19,48 +19,8 @@
 ;  light, theme accent <name>, theme scale <1..2 in quarters: 4..8>.
 ; =============================================================================
 
-TH_DARK         equ 0
-TH_LIGHT        equ 1
-
-; the theme's colors, dwords (0xRRGGBB, or an alpha 0..256)
-TC_WINDOW       equ 0                   ; a window's own background, a terminal's
-TC_TITLE        equ 4                   ; the title bar of the window with the keys
-TC_TITLE_OFF    equ 8                   ; of the others
-TC_SEP          equ 12                  ; the line under a title bar
-TC_EDGE         equ 16                  ; a window's outline
-TC_EDGE_A       equ 20
-TC_TEXT         equ 24                  ; text: the first, second and third
-TC_TEXT2        equ 28                  ; kinds (labels, notes, what is off)
-TC_TEXT3        equ 32
-TC_BAR          equ 36                  ; the menu bar's tint, over the blur
-TC_BAR_A        equ 40
-TC_DOCK         equ 44                  ; the dock's
-TC_DOCK_A       equ 48
-TC_DOCK_EDGE    equ 52
-TC_DOCK_EDGE_A  equ 56
-TC_SHADOW_A     equ 60                  ; the shadow of the window with the keys
-TC_SHADOW2_A    equ 64                  ; of the others
-TC_LIGHT_OFF    equ 68                  ; a window's buttons, without the keys
-TC_TIP          equ 72                  ; a tooltip, a menu
-TC_TIP_A        equ 76
-TC_TIP_TEXT     equ 80
-TC_PANEL        equ 84                  ; an area raised in a window (a card)
-TC_LINE         equ 88                  ; lines inside a window
-TC_T_DIM        equ 92                  ; a terminal's notes
-TC_T_FAINT      equ 96
-TC_T_GOOD       equ 100
-TC_T_WARN       equ 104
-TC_T_BAD        equ 108
-TC_T_BLUE       equ 112
-TC_T_PCORE      equ 116
-TC_T_ECORE      equ 120
-TC_T_WHITE      equ 124                 ; what xterm's white and bright white,
-TC_T_BRIGHT     equ 128                 ; yellows, are here
-TC_T_YELLOW     equ 132
-TC_T_YELLOW2    equ 136
-TC_HOVER        equ 140                 ; under the pointer: a tint
-TC_HOVER_A      equ 144
-TC_COUNT        equ 148
+; TH_* and the colors' names, TC_*, are in defs.inc: programs see them
+; in the look (LK_C)
 
 ; the wallpaper: a gradient top to bottom, and WALL_BLOBS soft lights
 WALL_BLOBS      equ 5
@@ -177,7 +137,8 @@ theme_color:
 ; theme_apply: th_mode, th_accent_i or ui_s4 changed: everything drawn again
 theme_apply:
     call theme_load
-    jmp desk_restyle
+    call desk_restyle
+    jmp look_update                     ; and programs told
 
 ; -----------------------------------------------------------------------------
 ;  The wallpaper, into wall_sf (the screen's size)

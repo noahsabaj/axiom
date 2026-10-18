@@ -125,6 +125,7 @@ SR_DONE         equ 28                  ; dword: 1 once done
 SR_THREAD       equ 32                  ; the thread asking
 SR_RAX          equ 40                  ; what it gets back
 SR_RDX          equ 48
+SR_GIFT2        equ 56                  ; dword: a second, or 0
 SR_SIZE         equ 64
 SPAWN_TEXT_MAX  equ 255
 SPAWN_DEPTH     equ 8                   ; programs started by programs, this deep
@@ -598,7 +599,8 @@ h_task_kill:
     ret
 
 ; sys_spawn(EDI = memory, RSI = offset, RDX = bytes there of "program
-; arguments", RCX = a handle to give it, or 0) -> RAX = a handle to the task
+; arguments", RCX = a handle to give it, or 0, R8 = a second, or 0) -> RAX
+; = a handle to the task
 ; it started, RDX = to its first thread (RO_JOIN for what it returns). The
 ; main thread reads the file, so it does the loading; this thread waits for
 ; it, and is not cut short meanwhile.
@@ -609,6 +611,7 @@ sys_spawn:
     sub rsp, SR_SIZE
     mov rbx, rsp                        ; RBX = the request
     mov [rbx + SR_GIFT], ecx
+    mov [rbx + SR_GIFT2], r8d
     mov qword [rbx + SR_TEXT], 0
     mov r12d, edi
     mov r13, rsi
@@ -703,6 +706,7 @@ sys_spawn:
 
 ; spawn_service: on the main thread, each program a program asked for, loaded
 spawn_service:
+    call fs_service                     ; and their files (fscap.asm)
     push rbx
     push r12
 .next:
@@ -759,7 +763,10 @@ spawn_one:
     lea rdi, [user_path_buf]
     mov rsi, r12
     lea rdx, [user_name_buf]
-    mov r8d, [rbx + SR_GIFT]
+    mov r8d, [rbx + SR_GIFT2]           ; what it is given: both
+    shl r8, 32
+    mov eax, [rbx + SR_GIFT]
+    or r8, rax
     xor r9d, r9d                        ; (a task's child: nothing granted)
     call user_load
     test rax, rax
@@ -807,6 +814,40 @@ spawn_one:
 .out:
     pop r13
     pop r12
+    ret
+
+; gift_slot(EAX = a handle the new task was given, RBP = its start block;
+; that task the current one): where a handle of its kind goes as well
+; (SB_DESK, SB_FILES, SB_NET, SB_STORE), if that is empty. Preserves RAX.
+gift_slot:
+    push rax
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    mov edi, eax
+    call handle_info                    ; EAX = its type
+    lea rsi, [gift_slots]
+.each:
+    mov ecx, [rsi]
+    test ecx, ecx
+    jz .out
+    cmp eax, ecx
+    je .found
+    add rsi, 8
+    jmp .each
+.found:
+    mov ecx, [rsi + 4]
+    cmp dword [rbp + rcx], 0
+    jne .out
+    mov eax, [rsp + 32]
+    mov [rbp + rcx], eax
+.out:
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rax
     ret
 
 ; user_thread(RDI = entry, RSI = RSP, RDX = RDI, RCX = task) -> RAX = a
@@ -1562,7 +1603,7 @@ user_load:
     mov r13, rsi                        ; buffer's size, [rsp + 24] = what to
     mov r15, rdx                        ; say if it fails, [rsp + 32] = the
     mov [rsp + 32], rcx                 ; task starting it, [rsp + 40] = the
-    mov [rsp + 40], r8                  ; gift, [rsp + 48] = what it is given
+    mov [rsp + 40], r8                  ; gifts (dwords), [rsp + 48] = what it is given
     mov [rsp + 48], r9                  ; (AW_*: granted, and then wanted)
     mov qword [rsp + 24], E_ARG
     xor r14d, r14d                      ; no task yet
@@ -1771,9 +1812,14 @@ user_load:
     mov [rbp + SB_NET], eax
 .no_net:
     test qword [rsp + 8 + 48], AW_DESK
-    jz .given
+    jz .no_desk
     call desk_program                   ; the desktop
     mov [rbp + SB_DESK], eax
+.no_desk:
+    test qword [rsp + 8 + 48], AW_FILES
+    jz .given
+    call files_program                  ; the files, on every volume
+    mov [rbp + SB_FILES], eax
 .given:
     xor eax, eax
     mov esi, [rsp + 8 + 40]             ; and what it is given
@@ -1785,6 +1831,18 @@ user_load:
     cmp rax, E_ANY
     jae .as_us
     mov [rbp + SB_GIFT], eax
+    call gift_slot
+    mov esi, [rsp + 8 + 44]             ; a second
+    test esi, esi
+    jz .gifts
+    mov rdi, [rsp + 8 + 32]
+    mov rdx, r14
+    call task_give
+    cmp rax, E_ANY
+    jae .as_us
+    mov [rbp + SB_GIFT2], eax
+    call gift_slot
+.gifts:
     xor eax, eax
 .as_us:
     mov rcx, [gs:PC_CURRENT]
@@ -2600,6 +2658,9 @@ UT_COUNTS       equ 9
 
 section .rodata
 str_ot_console: db 'console', 0
+align 4
+gift_slots:     dd OT_DESK, SB_DESK, OT_FILES, SB_FILES, OT_NET, SB_NET, OT_STORE, SB_STORE
+                dd 0, 0
 str_user_oom:   db 'Out of memory for the console', 0
 str_user_ring:  db 'ring', 0
 str_user_mem:   db 'memory', 0

@@ -267,7 +267,8 @@ kbd_scancode:
     xor byte [kbd_caps], 1
     ret
 
-; kbd_push(AL = key code): append to the ring (dropped when full). Preserves all.
+; kbd_push(AL = key code): append to the ring (dropped when full), with the
+; modifiers held as it was pressed. Preserves all.
 kbd_push:
     push rcx
     push rdx
@@ -279,6 +280,11 @@ kbd_push:
     push rdx
     lea rdx, [kbd_ring]
     mov [rdx + rcx], al
+    push rax
+    call kbd_mods
+    lea rdx, [kbd_mring]
+    mov [rdx + rcx], al
+    pop rax
     pop rdx
     mov [kbd_head], dx
 .full:
@@ -286,7 +292,48 @@ kbd_push:
     pop rcx
     ret
 
-; kbd_getc -> EAX = next key code, 0 if none. Also polls the serial port.
+; kbd_mods -> AL = the modifiers held now, WM_* (either keyboard). Preserves
+; others.
+kbd_mods:
+    push rcx
+    xor eax, eax
+    movzx ecx, byte [hid_mods]          ; USB: E0..E7, left then right
+    mov ch, cl
+    shr ch, 4
+    or cl, ch                           ; ctrl 1, shift 2, alt 4, gui 8
+    test cl, 2
+    jz .ctrl
+    or al, WM_SHIFT
+.ctrl:
+    test cl, 1
+    jz .alt
+    or al, WM_CTRL
+.alt:
+    test cl, 4
+    jz .gui
+    or al, WM_ALT
+.gui:
+    test cl, 8
+    jz .ps2
+    or al, WM_META
+.ps2:
+    cmp byte [kbd_shift], 0
+    je .ps2_ctrl
+    or al, WM_SHIFT
+.ps2_ctrl:
+    cmp byte [kbd_ctrl], 0
+    je .ps2_alt
+    or al, WM_CTRL
+.ps2_alt:
+    cmp byte [kbd_alt], 0
+    je .out
+    or al, WM_ALT
+.out:
+    pop rcx
+    ret
+
+; kbd_getc -> EAX = next key code, 0 if none; kbd_got = the modifiers held
+; with it. Also polls the serial port.
 kbd_getc:
     push rcx
     push rdx
@@ -294,6 +341,9 @@ kbd_getc:
     movzx ecx, word [kbd_tail]
     cmp cx, [kbd_head]
     je .empty
+    lea rdx, [kbd_mring]
+    movzx eax, byte [rdx + rcx]
+    mov [kbd_got], al
     lea rdx, [kbd_ring]
     movzx eax, byte [rdx + rcx]
     inc ecx
@@ -373,6 +423,8 @@ kbd_alt:        db 0
 kbd_caps:       db 0
 kbd_head:       dw 0
 kbd_tail:       dw 0
+kbd_got:        db 0                    ; the last key's modifiers, WM_*
 
 section .bss
 kbd_ring:       resb KBD_RING
+kbd_mring:      resb KBD_RING           ; each key's modifiers

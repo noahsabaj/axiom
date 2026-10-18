@@ -1135,7 +1135,7 @@ sh_head:
     mov r13, rsi
     mov r15d, edx
     mov dword [sh_grants], 0
-.grant:                                 ; +net, +store, +desk: for a program
+.grant:                                 ; +net, +store, +desk, +files: for a program
     mov rsi, [r13]
     cmp byte [rsi], '+'
     jne .granted
@@ -1146,7 +1146,7 @@ sh_head:
     add r13, 8
     dec r12d
     jnz .grant
-    KLOG "+net, +store and +desk come before a program's name"
+    KLOG "+net, +store, +desk and +files come before a program's name"
     stc
     jmp .out
 .granted:
@@ -1244,7 +1244,7 @@ sh_head:
     call user_start
     jmp .out
 .granted_command:
-    KLOG "+net, +store and +desk are for programs; '%s' is a command", rax
+    KLOG "+net, +store, +desk and +files are for programs; '%s' is a command", rax
     stc
     jmp .out
 .background_command:
@@ -1287,7 +1287,7 @@ sh_grant:
     clc
     jmp .out
 .none:
-    KLOG "'+%s' is not something a program can be given; there are +net, +store and +desk", rsi
+    KLOG "'+%s' is not something a program can be given; there are +net, +store, +desk and +files", rsi
     stc
 .out:
     pop rdi
@@ -1917,8 +1917,10 @@ str_sh_core:    db 'core', 0
 str_sh_net:     db 'net', 0
 str_sh_store:   db 'store', 0
 str_sh_desk:    db 'desk', 0
+str_sh_files:   db 'files', 0
 align 8
-sh_grants_names: dq str_sh_net, AW_NET, str_sh_store, AW_STORE, str_sh_desk, AW_DESK, 0, 0
+sh_grants_names: dq str_sh_net, AW_NET, str_sh_store, AW_STORE, str_sh_desk, AW_DESK
+                dq str_sh_files, AW_FILES, 0, 0
 sh_escapable:   db ' "$|>;&\', 0x27, 0   ; what a \ takes as it is
 sh_tok_pipe:    db '|', 0
 sh_tok_gt:      db '>', 0
@@ -2081,7 +2083,7 @@ sh_stage:       resd SH_STAGES          ; where each stage begins in sh_argv
 sh_status:      resb 1                  ; 1: the last command failed
 sh_bg:          resb 1                  ; 1: the command came with '&'
 alignb 4
-sh_grants:      resd 1                  ; what +net, +store, +desk granted (AW_*)
+sh_grants:      resd 1                  ; what +net, +store, +desk, +files granted (AW_*)
 sh_redir:       resb 1                  ; 0, 1 for >, 2 for >>
 shell_pending:  resb 1                  ; a terminal has the rest of a line to run
 alignb 8

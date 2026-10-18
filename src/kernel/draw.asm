@@ -2462,6 +2462,7 @@ bayer4:         db 8, 136, 40, 168, 200, 72, 232, 104, 56, 184, 24, 152, 248, 12
 %include "gen/uifont.inc"
 align 64
 uifont_data:    incbin "gen/uifont.bin"
+uifont_end:
 
 section .bss
 alignb 8

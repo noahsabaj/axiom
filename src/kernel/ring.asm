@@ -1019,6 +1019,67 @@ ring_exec:
     mov rcx, [rbx + SQ_A1]
     call h_win_title
     jmp .out
+.desk_look:
+    mov edi, [rbx + SQ_HANDLE]
+    call h_desk_look
+    jmp .out
+.fs_volumes:
+    mov edi, [rbx + SQ_HANDLE]
+    mov esi, [rbx + SQ_HANDLE2]
+    mov rdx, [rbx + SQ_A0]
+    mov rcx, [rbx + SQ_A1]
+    call h_fs_volumes
+    jmp .out
+.fs_list:
+    mov edi, [rbx + SQ_HANDLE]
+    mov esi, [rbx + SQ_HANDLE2]
+    mov rdx, [rbx + SQ_A0]
+    mov rcx, [rbx + SQ_A1]
+    mov r8, [rbx + SQ_A2]
+    call h_fs_list
+    jmp .out
+.fs_read:
+    mov edi, [rbx + SQ_HANDLE]
+    mov esi, [rbx + SQ_HANDLE2]
+    mov rdx, [rbx + SQ_A0]
+    mov rcx, [rbx + SQ_A1]
+    mov r8, [rbx + SQ_A2]
+    call h_fs_read
+    jmp .out
+.fs_write:
+    mov edi, [rbx + SQ_HANDLE]
+    mov esi, [rbx + SQ_HANDLE2]
+    mov rdx, [rbx + SQ_A0]
+    mov rcx, [rbx + SQ_A1]
+    mov r8, [rbx + SQ_A2]
+    call h_fs_write
+    jmp .out
+.fs_mkdir:
+    mov edi, [rbx + SQ_HANDLE]
+    mov esi, [rbx + SQ_HANDLE2]
+    mov rdx, [rbx + SQ_A0]
+    call h_fs_mkdir
+    jmp .out
+.fs_remove:
+    mov edi, [rbx + SQ_HANDLE]
+    mov esi, [rbx + SQ_HANDLE2]
+    mov rdx, [rbx + SQ_A0]
+    call h_fs_remove
+    jmp .out
+.fs_rename:
+    mov edi, [rbx + SQ_HANDLE]
+    mov esi, [rbx + SQ_HANDLE2]
+    mov rdx, [rbx + SQ_A0]
+    mov rcx, [rbx + SQ_A1]
+    call h_fs_rename
+    jmp .out
+.fs_sub:
+    mov edi, [rbx + SQ_HANDLE]
+    mov esi, [rbx + SQ_HANDLE2]
+    mov rdx, [rbx + SQ_A0]
+    mov rcx, [rbx + SQ_A1]
+    call h_fs_sub
+    jmp .out
 .bad:
     mov rax, E_ARG                      ; one it does not know
 .out:
@@ -1499,7 +1560,11 @@ ro_exec:        dq ring_exec.nop, ring_exec.signal, ring_exec.reset, ring_exec.b
                 dq ring_exec.st_abort, ring_exec.st_sub, ring_exec.st_rollback, ring_exec.st_list
                 dq ring_exec.net_connect, ring_exec.net_listen, ring_exec.net_accept, ring_exec.net_status
                 dq ring_exec.net_shut, ring_exec.net_sub, ring_exec.win_show, ring_exec.win_title
+                dq ring_exec.bad, ring_exec.bad, ring_exec.desk_look, ring_exec.fs_volumes
+                dq ring_exec.fs_list, ring_exec.fs_read, ring_exec.fs_write, ring_exec.fs_mkdir
+                dq ring_exec.fs_remove, ring_exec.fs_rename, ring_exec.fs_sub
 ro_async:       db 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 ; which wait: RO_WAIT, RO_JOIN, RO_TIMEOUT
+                db 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
                 db 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
 
 section .bss

@@ -384,8 +384,10 @@ win_new:
     mov rax, [font_ch]
     imul rax, rax, 4
     mov [rbx + WN_MIN_H], rax
-    test r10d, WF_PROGRAM               ; a program's: the size of its pixels
-    jz .least
+    mov eax, r10d                       ; a program's: the size of its pixels,
+    and eax, WF_PROGRAM | WF_RESIZE     ; unless they are the screen's
+    cmp eax, WF_PROGRAM
+    jne .least
     mov [rbx + WN_MIN_W], r14
     mov [rbx + WN_MIN_H], r15
 .least:
@@ -524,8 +526,18 @@ win_fit:
     call sf_size
     jc .keep
 .sized:
+    mov rax, r12                        ; RAX: a size it did not have
+    xor rax, [rbx + WN_W]
+    mov rcx, r13
+    xor rcx, [rbx + WN_H]
+    or rax, rcx
     mov [rbx + WN_W], r12
     mov [rbx + WN_H], r13
+    test dword [rbx + WN_FLAGS], WF_PROGRAM
+    jz .keep
+    test rax, rax
+    jz .keep
+    call prog_resized                   ; the program draws it again
 .keep:
     mov rdi, rbx
     mov rsi, [rbx + WN_X]
@@ -845,8 +857,24 @@ win_focus:
     push rdi
     mov rdi, rax                        ; its shadow and title change too
     call win_damage_whole
+    cmp rax, [rsp]
+    je .same
+    push rsi                            ; a program's is told
+    xor esi, esi
+    call focus_tell
+    pop rsi
+.same:
     pop rdi
 .old_done:
+    cmp rdi, rax
+    je .tell_done
+    test rdi, rdi
+    jz .tell_done
+    push rsi
+    mov esi, 1
+    call focus_tell
+    pop rsi
+.tell_done:
     mov [desk_focus], rdi
     test rdi, rdi
     jz .done
@@ -866,6 +894,36 @@ win_focus:
     mov byte [dock_dirty], 1
     pop rdi
     pop rax
+    ret
+
+; focus_tell(RDI = window, ESI = 1: it has the keys, 0: not): a program's
+; window is told. Preserves all.
+focus_tell:
+    test dword [rdi + WN_FLAGS], WF_PROGRAM
+    jz .out
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    mov rbx, rdi
+    call prog_focus
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+.out:
     ret
 
 ; win_minimise(RDI = window): off the screen, into the dock. Preserves all.
