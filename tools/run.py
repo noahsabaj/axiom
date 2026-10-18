@@ -304,7 +304,8 @@ def main():
                     "the log after the last text typed, 'shot FILE' takes a screenshot, "
                     "'type TEXT' types down the serial port, 'press TEXT' on the "
                     "keyboard, 'abs X Y [button]' points (and clicks), 'drag X1 Y1 X2 Y2 "
-                    "[button]' drags, 'wheel X Y N' turns the wheel N notches)")
+                    "[button]' drags, 'wheel X Y N' turns the wheel N notches, 'key NAME "
+                    "down|up' presses or lets go of one key)")
     opts = ap.parse_args()
     fresh = opts.port == 0
 
@@ -434,6 +435,14 @@ def main():
                     qmp.abs(x, y, [(b, True)])
                     time.sleep(0.1)
                     qmp.abs(x, y, [(b, False)])
+            elif line.startswith("key "):
+                # key NAME down|up: one key (a QEMU qcode: a, up, ctrl...)
+                # pressed or let go, so a key can be held, or repeat
+                qmp = qmp or Qmp(MONITOR[1] + 1)
+                parts = line.split()
+                qmp.send({"execute": "input-send-event", "arguments": {"events": [
+                    {"type": "key", "data": {"down": parts[2] == "down",
+                                             "key": {"type": "qcode", "data": parts[1]}}}]}})
             elif line.startswith("wait "):
                 time.sleep(float(line[5:]))
             elif line == "ended":

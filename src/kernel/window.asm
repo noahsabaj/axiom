@@ -7,7 +7,9 @@
 ;  bytes a row, and what happens to it (a key while it has the keys, a
 ;  button pressed in it and let go, the pointer dragged across it, the wheel,
 ;  its close button) comes as messages of WE_SIZE bytes from the channel end
-;  it was given, at that end's peer. On a ring:
+;  it was given, at that end's peer. A game may ask for more (WNF_KEYS: each
+;  key down and up; WNF_HOVER: the pointer over it with no button held, and
+;  leaving). On a ring:
 ;    RO_WIN_SHOW (a window, a0 = x, a1 = y, a2 = w | h << 32, 0 for all of
 ;      it): what was drawn there is put on the screen
 ;    RO_WIN_TITLE (a window, handle2 + a0: a1 bytes of UTF-8): its title
@@ -100,7 +102,11 @@ sys_window_new:
     push r13
     push r14
     push r15
-    and r8d, WNF_RESIZE
+    test r8d, WNF_FULL                  ; full is resizable, zoomed
+    jz .flags
+    or r8d, WNF_RESIZE
+.flags:
+    and r8d, WNF_RESIZE | WNF_FULL | WNF_KEYS | WNF_HOVER
     push r8                             ; [RSP]: WNF_*
     mov r12d, esi
     mov r13d, edx
@@ -511,6 +517,13 @@ wo_open:
     WIN_LOCK
     mov [rbx + WO_WIN], rdi
     WIN_UNLOCK
+    test dword [rbx + WO_WNF], WNF_FULL
+    jz .sized
+    push rdi
+    call win_zoom                       ; filling the screen, to begin with
+    pop rdi
+    jmp .focus                          ; (and told its size, if not the same)
+.sized:
     test dword [rbx + WO_WNF], WNF_RESIZE
     jz .focus
     push rbx                            ; the size it was given, if the
@@ -570,14 +583,74 @@ prog_wheel:
     jmp wo_post
 
 prog_move:
-    cmp rbx, [press_win]                ; only while a button is held in it
-    jne .out
+    cmp rbx, [press_win]                ; while a button is held in it
+    je .post
+    mov rax, [rbx + WN_DATA]            ; or always, if it asked
+    test rax, rax
+    jz .out
+    test dword [rax + WO_WNF], WNF_HOVER
+    jz .out
+    mov [wo_hover], rbx
+.post:
     mov ecx, esi
     mov edx, edi
-    xor esi, esi
+    call ptr_delta
     mov edi, WE_MOVE
     jmp wo_post
 .out:
+    ret
+
+; prog_left(RBX = the window whose client the pointer is over now, 0 if
+; none): the one it was over, which asked (WNF_HOVER), told it left.
+; Preserves RBX, R8, R9.
+prog_left:
+    mov rax, [wo_hover]
+    test rax, rax
+    jz .out
+    cmp rax, rbx
+    je .out
+    mov qword [wo_hover], 0
+    push rbx
+    push r8
+    push r9
+    mov rbx, rax
+    mov edi, WE_LEAVE
+    xor esi, esi
+    xor edx, edx
+    xor ecx, ecx
+    call wo_post
+    pop r9
+    pop r8
+    pop rbx
+.out:
+    ret
+
+; win_key_event(EAX = a key down or up, from key_next): to the window with
+; the keys, if it is a program's that asked (WNF_KEYS)
+win_key_event:
+    push rbx
+    mov rbx, [desk_focus]
+    test rbx, rbx
+    jz .out
+    test dword [rbx + WN_FLAGS], WF_PROGRAM
+    jz .out
+    mov rdi, [rbx + WN_DATA]
+    test rdi, rdi
+    jz .out
+    test dword [rdi + WO_WNF], WNF_KEYS
+    jz .out
+    movzx esi, al                       ; the usage
+    mov edi, WE_KEYUP
+    test eax, 1 << 8
+    jz .up
+    mov edi, WE_KEYDOWN
+.up:
+    shr eax, 16
+    movzx edx, al                       ; WM_*
+    xor ecx, ecx
+    call wo_post
+.out:
+    pop rbx
     ret
 
 prog_ask:
@@ -621,6 +694,10 @@ prog_focus:
     ret
 
 prog_close:
+    cmp rbx, [wo_hover]
+    jne .not_over
+    mov qword [wo_hover], 0
+.not_over:
     mov rdi, [rbx + WN_DATA]
     WIN_LOCK
     mov qword [rdi + WO_WIN], 0
@@ -638,4 +715,5 @@ prog_ops:       dq 0, prog_key, prog_click, prog_wheel, prog_close, prog_move, p
 section .bss
 alignb 8
 wo_list:        resq 1                  ; programs' windows, newest first
+wo_hover:       resq 1                  ; the window (WNF_HOVER) the pointer is over
 win_lock:       resd 1

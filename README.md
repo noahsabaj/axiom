@@ -246,7 +246,8 @@ starts it anyway.
 Headless runs wait for the shell's first prompt line instead of a fixed time,
 and `until TEXT` in `--script` waits for TEXT to appear in the log after the
 last text typed. `type TEXT` sends TEXT down the serial port all at once, as
-a terminal would; `press TEXT` types it on the keyboard, key by key. `abs X Y [button]`,
+a terminal would; `press TEXT` types it on the keyboard, key by key, and
+`key NAME down` (or `up`) holds one down or lets it go. `abs X Y [button]`,
 `drag X1 Y1 X2 Y2` and `wheel X Y N` work a USB tablet (QEMU's 0..32767 on
 each axis; add it with `--extra "-device qemu-xhci,id=ux -device
 usb-tablet,bus=ux.0"`), as `tools/test/desk` does. With
@@ -450,7 +451,8 @@ tools/test/             host-side tests for self-contained modules (tls: the
                         their router; linux: Linux programs from
                         Ubuntu, and threads and signals in C, from a
                         stick with a root on it; rust: the Rust programs,
-                        their heap, files, a window and its events); all.py
+                        their heap, files, a window and its events, keys
+                        down and up from both keyboards); all.py
                         runs them
                         all at once, and qemu.py boots side by side
 tools/mkfont.py         rasterize the console font into src/kernel/gen/

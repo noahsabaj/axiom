@@ -1170,15 +1170,29 @@ text rows.
   width × 4 bytes a row, which the desktop copies from as it composes. Its
   title starts as the program's name. With `WNF_RESIZE` the user may resize
   it: the pixels are as large as the screen, and `WE_RESIZED` says how much
-  of them the window shows now; `WNF_FULL` is the whole screen, without a
-  frame.
+  of them the window shows now; `WNF_FULL` is that, zoomed to begin with
+  (the screen between the bar and the dock; `win_zoom`).
 - **What happens to it** goes to the program as messages of `WE_SIZE`
   bytes, sent from the end it was given (`ch_post`, the kernel's own send)
   so they arrive at the end the program kept: `WE_KEY` while it has the
   keys, `WE_PRESS` and `WE_RELEASE` (the button, where), `WE_MOVE` while a
   button is held in it, `WE_WHEEL`, `WE_CLOSE` from its close button or
   `win close`, which only ask (`OP_ASK`), `WE_RESIZED`, `WE_FOCUS` (it has
-  the keys, or not) and `WE_LOOK`.
+  the keys, or not) and `WE_LOOK`. `WE_MOVE`'s code is how far the mouse
+  moved since the desk last heard (`ptr_delta`: its own counts, before
+  `pointer_accel` and the screen's edges), for a game to look around with.
+- **For games**, asked for in `WNF_*`: `WNF_KEYS` sends `WE_KEYDOWN` and
+  `WE_KEYUP` too, each key once each way, by its USB HID usage. Both
+  keyboards feed them through `key_event` (kbd.asm), which keeps a bit for
+  each usage down, so that a key held, repeating, goes down once and one
+  never seen down does not come up, and queues them in a ring of their own
+  (`key_ring`) that the main loop gives the window with the keys
+  (`key_next`, `win_key_event`). USB keyboards (`hid_keys`) find them by
+  comparing each report with the last; the PS/2 one by its scan codes,
+  made usages by `kbd_usage` and `kbd_e0_usage`, after `kbd_cook` has made
+  them text (pause's E1 sequence is passed over). `WNF_HOVER` sends
+  `WE_MOVE` while the pointer is over the window with no button held, and
+  `WE_LEAVE` once it is not (`wo_hover`, `prog_left` from `desk_motion`).
 - **The look** (`look.asm`): one block of memory, made at boot, that
   programs map read only (`RO_DESK_LOOK`): the theme's colours by role, the
   accent, the scale, the screen's size, and the desktop's fonts with the
@@ -1304,7 +1318,9 @@ text rows.
   Windows: `SYS_CHANNEL_NEW`, `SYS_WINDOW_NEW`, the pixels mapped, the
   look mapped for the screen's size (the stride of a window that can be
   resized), `RO_WIN_SHOW`, `RO_WIN_TITLE`, events by `RO_RECV`, or
-  `RO_WAIT` linked to it with a deadline. Files: the `RO_FS_*` requests,
+  `RO_WAIT` linked to it with a deadline; keys down and up, and the
+  pointer over it, for games (`Window::KEYS`, `Window::HOVER`, USB HID
+  usages in `window::usage`). Files: the `RO_FS_*` requests,
   paths in the io block. Time: the TSC and the start block's rate.
 - **The heap**: few mappings (a task has 128): arenas from 1 MiB doubling
   to 64 MiB, their pages kept as runs, by address, joined when freed;
@@ -1312,7 +1328,8 @@ text rows.
   aligned to themselves, for alignment); pages beyond, grown in place into
   the run after them.
 - `tools/test/rust` builds both programs, runs them from the shell, and
-  checks the log and the screen.
+  checks the log and the screen; a second boot, with a USB keyboard, the
+  keys down and up from it.
 
 ## The browser: `src/user/browse.asm`, `src/user/web/`
 

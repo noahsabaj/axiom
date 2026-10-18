@@ -3335,8 +3335,11 @@ desk_motion:
     cmp edx, P_CLIENT
     jne .none
     mov rbx, rax
+    call prog_left                      ; the one it was over, told
     jmp .tell
 .none:
+    xor ebx, ebx
+    call prog_left
     pop rbx
     ret
 .client:

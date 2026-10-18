@@ -1,10 +1,11 @@
 //! rdemo: Rust on Axiom with std. Opens a window that can be resized and
 //! draws it each frame (about 60 a second): a plain ground, a bar sweeping
 //! across the top, and a square where the mouse last pressed or dragged.
-//! Says each key, press and resize on the console ("rdemo: ..."); q, Esc or
-//! the close button end it, with a count of what happened.
+//! Says each key (as text, and down and up), press, resize, the pointer
+//! over it and leaving, on the console ("rdemo: ..."); q, Esc or the close
+//! button end it, with a count of what happened.
 //!
-//!   rdemo [title]
+//!   rdemo [--full] [title]
 
 #![no_main]
 
@@ -24,14 +25,20 @@ const MARK: u32 = 0xE0_A030;
 const SQUARE: i32 = 40;
 
 fn main() -> Result<(), axiom::Error> {
-    let title: Vec<String> = std::env::args().skip(1).collect();
+    let mut title: Vec<String> = std::env::args().skip(1).collect();
+    let full = title.first().is_some_and(|a| a == "--full");
+    if full {
+        title.remove(0);
+    }
     let title = if title.is_empty() { "Rust on Axiom".to_string() } else { title.join(" ") };
     println!("rdemo: std says hello, {} args", std::env::args().count());
 
-    let mut w = Window::open(640, 400, Window::RESIZE)?;
+    let size = if full { Window::FULL } else { Window::RESIZE };
+    let mut w = Window::open(640, 400, size | Window::KEYS | Window::HOVER)?;
     w.set_title(&title);
     let mut seen: HashMap<&'static str, u32> = HashMap::new();
     let mut mark = (100, 100);
+    let mut held = 0u32;
     let mut frames = 0u64;
     let start = Instant::now();
     loop {
@@ -45,21 +52,43 @@ fn main() -> Result<(), axiom::Error> {
                     }
                     "key"
                 }
+                Event::KeyDown { usage, mods } => {
+                    println!("rdemo: down {:#04x}{}", usage, if mods.ctrl() { " ctrl" } else { "" });
+                    "down"
+                }
+                Event::KeyUp { usage, .. } => {
+                    println!("rdemo: up {:#04x}", usage);
+                    "up"
+                }
                 Event::Press { button, x, y } => {
                     println!("rdemo: press {:?} at {},{}", button, x, y);
+                    held += 1;
                     mark = (x, y);
                     "press"
                 }
-                Event::Move { x, y } => {
+                Event::Move { x, y, .. } if held > 0 => {
                     mark = (x, y);
                     "move"
+                }
+                Event::Move { x, y, dx, dy } => {
+                    if seen.get("hover").copied().unwrap_or(0) < 20 {
+                        println!("rdemo: hover at {},{} by {},{}", x, y, dx, dy);
+                    }
+                    "hover"
+                }
+                Event::Leave => {
+                    println!("rdemo: left");
+                    "leave"
                 }
                 Event::Resized { width, height } => {
                     println!("rdemo: resized {}x{}", width, height);
                     "resized"
                 }
                 Event::Close | Event::Gone => return bye(&seen, frames, start),
-                Event::Release { .. } => "release",
+                Event::Release { .. } => {
+                    held = held.saturating_sub(1);
+                    "release"
+                }
                 Event::Wheel { .. } => "wheel",
                 Event::Look => "look",
                 Event::Focus(_) => "focus",

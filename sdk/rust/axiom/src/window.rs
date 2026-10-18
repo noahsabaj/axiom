@@ -17,10 +17,18 @@
 //! the screen once shown (RO_WIN_SHOW).
 //!
 //! What happens to it comes over a channel, a message each (WE_*): keys
-//! while it has them (no key-up: a key's press, its repeats), presses and
+//! while it has them (as text: a key's press, its repeats), presses and
 //! releases, the pointer while a button is held, the wheel, its close button
 //! (it only asks: the window goes when the program drops it, or ends), a
 //! new size, a new look, the keys gained or lost.
+//!
+//! A game asks for more when it opens the window. Window::KEYS: each key
+//! down and up as well (Event::KeyDown, Event::KeyUp: once each way, by its
+//! USB HID usage, `usage::*`); losing the keys (Event::Focus(false)) is every
+//! key up. Window::HOVER: the pointer over it with no button held too, and
+//! Event::Leave when it goes. Every Event::Move says how far the pointer
+//! went (dx, dy: the mouse's own counts, before it is sped up or stopped at
+//! the screen's edge), for looking around.
 
 use core::sync::atomic::{AtomicPtr, Ordering};
 
@@ -49,6 +57,9 @@ const WE_CLOSE: u32 = 6;
 const WE_RESIZED: u32 = 7;
 const WE_LOOK: u32 = 8;
 const WE_FOCUS: u32 = 9;
+const WE_KEYDOWN: u32 = 10;
+const WE_KEYUP: u32 = 11;
+const WE_LEAVE: u32 = 12;
 
 static LOOK: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
 
@@ -205,6 +216,70 @@ impl Key {
     }
 }
 
+/// Keys as Event::KeyDown and Event::KeyUp name them: USB HID usages (the
+/// keyboard page, 7), where each key is on a US keyboard whatever it types.
+pub mod usage {
+    /// A to Z: A + 0 to A + 25.
+    pub const A: u32 = 0x04;
+    pub const Z: u32 = 0x1D;
+    /// 1 to 9, then 0: DIGIT1 + 0 to DIGIT1 + 9.
+    pub const DIGIT1: u32 = 0x1E;
+    pub const DIGIT0: u32 = 0x27;
+    pub const ENTER: u32 = 0x28;
+    pub const ESCAPE: u32 = 0x29;
+    pub const BACKSPACE: u32 = 0x2A;
+    pub const TAB: u32 = 0x2B;
+    pub const SPACE: u32 = 0x2C;
+    pub const MINUS: u32 = 0x2D;
+    pub const EQUAL: u32 = 0x2E;
+    pub const BRACKET_LEFT: u32 = 0x2F;
+    pub const BRACKET_RIGHT: u32 = 0x30;
+    pub const BACKSLASH: u32 = 0x31;
+    pub const SEMICOLON: u32 = 0x33;
+    pub const QUOTE: u32 = 0x34;
+    pub const BACKQUOTE: u32 = 0x35;
+    pub const COMMA: u32 = 0x36;
+    pub const PERIOD: u32 = 0x37;
+    pub const SLASH: u32 = 0x38;
+    pub const CAPS_LOCK: u32 = 0x39;
+    /// F1 to F12: F1 + 0 to F1 + 11.
+    pub const F1: u32 = 0x3A;
+    pub const F12: u32 = 0x45;
+    pub const PRINT_SCREEN: u32 = 0x46;
+    pub const SCROLL_LOCK: u32 = 0x47;
+    pub const INSERT: u32 = 0x49;
+    pub const HOME: u32 = 0x4A;
+    pub const PAGE_UP: u32 = 0x4B;
+    pub const DELETE: u32 = 0x4C;
+    pub const END: u32 = 0x4D;
+    pub const PAGE_DOWN: u32 = 0x4E;
+    pub const RIGHT: u32 = 0x4F;
+    pub const LEFT: u32 = 0x50;
+    pub const DOWN: u32 = 0x51;
+    pub const UP: u32 = 0x52;
+    pub const NUM_LOCK: u32 = 0x53;
+    /// The keypad: / * - + enter, 1 to 9, 0, the point.
+    pub const KP_DIVIDE: u32 = 0x54;
+    pub const KP_MULTIPLY: u32 = 0x55;
+    pub const KP_SUBTRACT: u32 = 0x56;
+    pub const KP_ADD: u32 = 0x57;
+    pub const KP_ENTER: u32 = 0x58;
+    pub const KP1: u32 = 0x59;
+    pub const KP0: u32 = 0x62;
+    pub const KP_DECIMAL: u32 = 0x63;
+    /// The key beside left shift on keyboards outside the US.
+    pub const INTL_BACKSLASH: u32 = 0x64;
+    pub const MENU: u32 = 0x65;
+    pub const CONTROL_LEFT: u32 = 0xE0;
+    pub const SHIFT_LEFT: u32 = 0xE1;
+    pub const ALT_LEFT: u32 = 0xE2;
+    pub const META_LEFT: u32 = 0xE3;
+    pub const CONTROL_RIGHT: u32 = 0xE4;
+    pub const SHIFT_RIGHT: u32 = 0xE5;
+    pub const ALT_RIGHT: u32 = 0xE6;
+    pub const META_RIGHT: u32 = 0xE7;
+}
+
 /// A mouse button.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Button {
@@ -229,11 +304,18 @@ impl Button {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Event {
     Key { key: Key, mods: Mods, code: u32 },
+    /// Window::KEYS: a key went down (once, however long it is held)
+    KeyDown { usage: u32, mods: Mods },
+    /// and came up (perhaps one pressed before the window had the keys)
+    KeyUp { usage: u32, mods: Mods },
     Press { button: Button, x: i32, y: i32 },
     /// let go, anywhere
     Release { button: Button, x: i32, y: i32 },
-    /// the pointer moved, a button held
-    Move { x: i32, y: i32 },
+    /// the pointer moved, a button held (or Window::HOVER, over it); dx, dy:
+    /// how far, as the mouse counts it
+    Move { x: i32, y: i32, dx: i32, dy: i32 },
+    /// Window::HOVER: the pointer left it
+    Leave,
     /// notches, up positive
     Wheel { notches: i32, x: i32, y: i32 },
     /// its close button: it is asked to go
@@ -302,10 +384,16 @@ impl Window {
     /// SYS_WINDOW_NEW's flags (WNF_*).
     pub const RESIZE: u32 = 1;
     pub const FULL: u32 = 2;
+    pub const KEYS: u32 = 4;
+    pub const HOVER: u32 = 8;
 
     /// A window `width` by `height` pixels (no larger than the screen), with
-    /// Window::RESIZE (the user may resize it) or Window::FULL (no frame,
-    /// the whole screen), or 0. Shown once drawn and shown.
+    /// any of Window::RESIZE (the user may resize it), Window::FULL (as
+    /// RESIZE, and zoomed to begin with: it fills the screen between the bar
+    /// and the dock, and is `width` by `height` when zoomed back),
+    /// Window::KEYS (keys down and up) and Window::HOVER (the pointer with
+    /// no button held), or 0. Shown once drawn and shown. Event::Resized
+    /// gives its size as soon as the desktop has settled it.
     pub fn open(width: u32, height: u32, flags: u32) -> Result<Window> {
         let desk = rt::desk_handle();
         if desk == 0 {
@@ -313,11 +401,7 @@ impl Window {
         }
         let look = Look::get()?;
         let (sw, sh) = look.screen();
-        let (w, h) = if flags & Window::FULL != 0 {
-            (sw, sh)
-        } else {
-            (width.clamp(1, sw.max(1)), height.clamp(1, sh.max(1)))
-        };
+        let (w, h) = (width.clamp(1, sw.max(1)), height.clamp(1, sh.max(1)));
         let (theirs, ours) = unsafe { syscall(SYS_CHANNEL_NEW, 0, 0, 0, 0, 0) };
         let theirs = check(theirs)? as Handle;
         let ours = ours as Handle;
@@ -498,7 +582,13 @@ impl Window {
             }
             WE_PRESS => Event::Press { button: Button::from_code(code), x, y },
             WE_RELEASE => Event::Release { button: Button::from_code(code), x, y },
-            WE_MOVE => Event::Move { x, y },
+            WE_MOVE => {
+                let (dx, dy) = (code as u16 as i16 as i32, (code >> 16) as u16 as i16 as i32);
+                Event::Move { x, y, dx, dy }
+            }
+            WE_KEYDOWN => Event::KeyDown { usage: code, mods: Mods(x as u32) },
+            WE_KEYUP => Event::KeyUp { usage: code, mods: Mods(x as u32) },
+            WE_LEAVE => Event::Leave,
             WE_WHEEL => Event::Wheel { notches: code as i32, x, y },
             WE_CLOSE => Event::Close,
             WE_RESIZED => {

@@ -151,6 +151,11 @@ main_loop:
     call user_service
     call iommu_service
     call shell_service                  ; the rest of a line, after a command
+.keys:
+    call key_next                       ; keys down and up
+    jc .input
+    call win_key_event                  ; to a program with the keys that asks
+    jmp .keys
 .input:
     call kbd_getc
     test eax, eax

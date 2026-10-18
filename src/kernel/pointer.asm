@@ -81,13 +81,21 @@ pointer_service:
     mov eax, r12d                       ; absolute: scale to the screen
     imul rax, [scr_w]
     shr rax, 16
+    mov rdx, rax                        ; how far, in pixels
+    sub rdx, [ptr_x]
+    add [ptr_dx], edx
     mov [ptr_x], rax
     mov eax, r13d
     imul rax, [scr_h]
     shr rax, 16
+    mov rdx, rax
+    sub rdx, [ptr_y]
+    add [ptr_dy], edx
     mov [ptr_y], rax
     jmp .moved
 .relative:
+    add [ptr_dx], r12d                  ; how far, as the mouse counts it
+    add [ptr_dy], r13d
     mov eax, r12d
     call pointer_accel
     add [ptr_x], rax
@@ -105,6 +113,7 @@ pointer_service:
     push rcx
     call desk_motion                    ; where it went first
     mov byte [ptr_moved], 0
+    mov qword [ptr_dx], 0
     pop rcx
     pop rax
     mov [ptr_buttons], ecx
@@ -143,6 +152,7 @@ pointer_service:
     je .still
     mov byte [ptr_moved], 0
     call desk_motion
+    mov qword [ptr_dx], 0
 .still:
     call cursor_move
     pop r14
@@ -177,6 +187,31 @@ pointer_accel:
     sar rax, 3
     pop rdx
     pop rcx
+    ret
+
+; ptr_delta -> ESI = how far the pointer moved since the desk last heard, dx
+; | dy << 16, 16 bits signed each (as far as they go). Preserves others.
+ptr_delta:
+    push rax
+    mov eax, [ptr_dy]
+    call .fit
+    shl eax, 16
+    mov esi, eax
+    mov eax, [ptr_dx]
+    call .fit
+    movzx eax, ax
+    or esi, eax
+    pop rax
+    ret
+.fit:
+    cmp eax, 32767
+    jle .high
+    mov eax, 32767
+.high:
+    cmp eax, -32768
+    jge .low
+    mov eax, -32768
+.low:
     ret
 
 pointer_clamp:
@@ -514,6 +549,8 @@ ptr_y:          resq 1
 cur_x:          resq 1
 cur_y:          resq 1
 ptr_buttons:    resd 1
+ptr_dx:         resd 1                  ; how far it moved since the desk last
+ptr_dy:         resd 1                  ; heard (ptr_delta), cleared as a qword
 ptr_head:       resb 1
 ptr_tail:       resb 1
 alignb 16

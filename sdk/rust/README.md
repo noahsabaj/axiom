@@ -89,7 +89,9 @@ for one run).
 ## The crate
 
 - **`axiom::Window`**: `open(w, h, flags)` (pixels; `Window::RESIZE`, the
-  user may resize it; `Window::FULL`, the whole screen, no frame),
+  user may resize it; `Window::FULL`, resizable and zoomed to begin with,
+  filling the screen between the menu bar and the dock; `Window::KEYS` and
+  `Window::HOVER`, for games, below),
   `size()`, `stride()`, `pixels()` / `frame()`, `show()` / `show_rect()`,
   `set_title()`, `poll()` (does not wait) and `wait(deadline)`.
   - The pixels are memory the program and the desktop share: a `u32` each,
@@ -101,11 +103,20 @@ for one run).
     says its size now; draw all of it again, then `show()`.
   - What was drawn reaches the screen once shown.
   - Events (`axiom::Event`): `Key { key, mods, code }` while it has the
-    keys (a press and its repeats; no key-up yet), `Press` and `Release`
-    (`Button::Left`, `Right`, `Middle`, at x, y in the window), `Move`
-    (while a button is held), `Wheel { notches }`, `Close` (its close
-    button: it only asks), `Resized`, `Look` (the theme or the scale
-    changed), `Focus(bool)`, and `Gone`.
+    keys (as text: a press and its repeats), `Press` and `Release`
+    (`Button::Left`, `Right`, `Middle`, at x, y in the window), `Move { x,
+    y, dx, dy }` (while a button is held), `Wheel { notches }`, `Close`
+    (its close button: it only asks), `Resized`, `Look` (the theme or the
+    scale changed), `Focus(bool)`, and `Gone`.
+  - For games: with `Window::KEYS`, `KeyDown { usage, mods }` and `KeyUp`
+    as well, once each way however long a key is held, by its USB HID usage
+    (`axiom::window::usage`: where the key is, whatever it types), from a
+    USB or a PS/2 keyboard alike. A key pressed before the window had the
+    keys may come up without going down; `Focus(false)` is every key up.
+    With `Window::HOVER`, `Move` with no button held too, while the pointer
+    is over the window, and `Leave` when it goes. `dx`, `dy` are how far
+    the mouse moved, in its own counts: not sped up, not stopped at the
+    screen's edge.
   - `axiom::Look::get()`: the desktop's scale (`px(points)`), dark or light,
     accent, theme colours, the screen's size.
 - **`axiom::Files`**: `get()` (the program's), `read(path)`,
@@ -128,7 +139,7 @@ for one run).
 ## Limits, for now
 
 - One thread: the ring is held while a call waits.
-- Keys come as presses, with no key-up; the pointer moves only while a
-  button is held.
+- No window without a frame: `Window::FULL` is a zoomed window. The
+  pointer is not held or hidden for a game to look around with.
 - An .AXE is 16 MiB at most, its zeroes included.
 - `std::process::exit` aborts: return from `main`, or call `axiom::exit`.

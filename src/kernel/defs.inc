@@ -687,27 +687,42 @@ SYS_COUNT       equ 12
 WE_KIND         equ 0                   ; dword: WE_KEY ...
 WE_CODE         equ 4                   ; dword: the key (WE_X: WM_*); the button (1 left, 2
                                         ; right, 3 middle); the wheel's notches
-                                        ; (up positive)
+                                        ; (up positive); how far the pointer
+                                        ; moved, dx | dy << 16, 16 bits signed
+                                        ; each (the mouse's own counts, before
+                                        ; it is sped up or stopped at an edge)
 WE_X            equ 8                   ; dword, signed: the pointer, in the window
 WE_Y            equ 12
 WE_SIZE         equ 16
 WE_KEY          equ 1                   ; a key, while it has the keys
 WE_PRESS        equ 2                   ; a button pressed in it
 WE_RELEASE      equ 3                   ; and let go (anywhere)
-WE_MOVE         equ 4                   ; the pointer moved, a button held
+WE_MOVE         equ 4                   ; the pointer moved, a button held (or
+                                        ; with WNF_HOVER, over it)
 WE_WHEEL        equ 5
 WE_CLOSE        equ 6                   ; its close button: it is asked to go
 WE_RESIZED      equ 7                   ; its size now: WE_X wide, WE_Y high (draw
                                         ; it all again, then show it)
 WE_LOOK         equ 8                   ; the look changed (LK_SERIAL): draw again
 WE_FOCUS        equ 9                   ; WE_CODE = 1: it has the keys now; 0: not
+WE_KEYDOWN      equ 10                  ; WNF_KEYS: a key went down, once (held, it
+                                        ; repeats only WE_KEY): WE_CODE = its USB
+                                        ; HID usage (page 7: 4 A ... 0x2C space,
+                                        ; 0x4F-0x52 the arrows, 0xE0-0xE7 the
+                                        ; modifiers), WE_X = WM_*, either keyboard
+WE_KEYUP        equ 11                  ; and came up (or one went down before it
+                                        ; had the keys: losing them, WE_FOCUS 0,
+                                        ; is every key up)
+WE_LEAVE        equ 12                  ; WNF_HOVER: the pointer left it
 WM_SHIFT        equ 1                   ; WE_KEY's WE_X: the modifiers held
 WM_CTRL         equ 2
 WM_ALT          equ 4
 WM_META         equ 8
 WNF_RESIZE      equ 1                   ; SYS_WINDOW_NEW: the user may resize it
-WNF_FULL        equ 2                   ; no frame, the whole screen, over the bar
-                                        ; and the dock
+WNF_FULL        equ 2                   ; as WNF_RESIZE, and zoomed to begin with:
+                                        ; the screen between the bar and the dock
+WNF_KEYS        equ 4                   ; WE_KEYDOWN and WE_KEYUP too (games)
+WNF_HOVER       equ 8                   ; WE_MOVE without a button, and WE_LEAVE
 WIN_MAX         equ 4096                ; a side, at most
 
 ; the desktop's themes (theme.asm), and the names of their colors
