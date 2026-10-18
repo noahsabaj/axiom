@@ -504,7 +504,9 @@ into) on screen and serial.
   page in bits the unit ignores (52-61), so two commands sharing a page
   each leave it as they found it. Unmapping a page forgets it in every
   translating unit's IOTLB (page-selective if the unit can, else the whole
-  domain) before it returns. On a unit that does not snoop the caches,
+  domain) before it returns; a buffer of many pages (`iommu_map_va`,
+  `iommu_unmap_va`) is forgotten once for all of them, as a unit in caching
+  mode (QEMU's) is told once of all the pages mapped. On a unit that does not snoop the caches,
   every table and entry written is flushed with `clflush`.
 - **Faults** are recorded by the interrupt (or by `iommu_faults` when
   asked): who (bus, device, function), reading or writing what page, and
