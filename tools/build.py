@@ -5,13 +5,15 @@ the programs in src/user, each to EFI/AXIOM/<NAME>.AXE beside it.
     python tools/build.py              build into build/esp/EFI/BOOT/BOOTX64.EFI
     python tools/build.py --max 1920x1080   cap the display mode the loader picks
     python tools/build.py --all        assemble everything, changed or not
-    python tools/build.py --fast       the kernel without NASM's jump sizing (-O1):
-                                       2 s instead of a minute, 4% larger
+    python tools/build.py --small      the kernel with NASM's jump sizing (-Ox):
+                                       4% smaller, a minute instead of 2 s
 
 The kernel and the programs are assembled side by side, then the loader,
 which embeds the kernel. Each is assembled only if it, a file it includes,
 or the command that makes it changed since last time: NASM lists what each
-includes (-MD, build/deps/<name>.d) as it assembles.
+includes (-MD, build/deps/<name>.d) as it assembles. The kernel is assembled
+with -O1, every jump long: NASM's own sizing (-Ox) takes some 200 passes
+over it, a minute, for 4% less.
 """
 import argparse
 import concurrent.futures
@@ -64,8 +66,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--max", help="largest display mode, WxH")
     ap.add_argument("--all", action="store_true", help="assemble everything, changed or not")
-    ap.add_argument("--fast", action="store_true", help="the kernel with -O1: every jump long, "
-                    "so NASM needs a few passes, not hundreds")
+    ap.add_argument("--small", action="store_true", help="the kernel with -Ox: NASM sizes "
+                    "every jump, in some 200 passes (a minute), for a kernel 4%% smaller")
     opts = ap.parse_args()
 
     boot = BUILD / "esp" / "EFI" / "BOOT"
@@ -83,7 +85,7 @@ def main():
             sys.exit("mkwebfont.py failed: browse needs the DejaVu fonts")
 
     first = [(BUILD / "kernel.bin", "kernel",
-              ["-f", "bin", *(["-O1"] if opts.fast else []), "-w-reloc-abs-qword", "-w-reloc-abs-dword", "-w-reloc-rel-dword",
+              ["-f", "bin", "-Ox" if opts.small else "-O1", "-w-reloc-abs-qword", "-w-reloc-abs-dword", "-w-reloc-rel-dword",
                "-I", "src/kernel/", "-I", "src/include/", "src/kernel/kernel.asm"])]
     for src in sorted((ROOT / "src" / "user").glob("*.asm")):
         first.append((programs / f"{src.stem.upper()}.AXE", src.stem,

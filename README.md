@@ -170,9 +170,9 @@ That writes `build/esp/EFI/BOOT/BOOTX64.EFI` (about 500 KB, the kernel is
 embedded inside it), and the programs, `build/esp/EFI/AXIOM/*.AXE`. `python tools/build.py --max 1920x1080` caps the display
 mode if you'd rather have bigger text. The kernel and the programs are
 assembled side by side, and only what changed (or includes a file that
-changed) is assembled again; `--all` assembles everything. NASM sizes the
-kernel's jumps in some 200 passes, a minute; `--fast` leaves them long
-(`-O1`): a few passes, 2 s, and a kernel 4% larger.
+changed) is assembled again; `--all` assembles everything. The kernel's
+jumps are left long (`-O1`): sizing each (`-Ox`, `--small`) takes NASM
+some 200 passes, a minute, for a kernel 4% smaller.
 
 ## Run in QEMU
 
@@ -228,8 +228,7 @@ Their QEMU boots share the host's idle threads (`tools/test/qemu.py`), so
 the timings the guests measure stay honest; a boot that mostly waits (the
 shell, the browser, the network suites) takes one slot whatever its vCPUs,
 since an idle guest's CPUs sleep. Each suite also runs alone, as
-`python tools/test/<suite>/run.py`; `all.py --fast` builds with
-`build.py --fast`.
+`python tools/test/<suite>/run.py`.
 
 A test disk for the storage code: `tools/mkdisk.py` builds `build/disk.img`
 (GPT, a 64 MiB FAT32 partition full of test files, a blank one), and

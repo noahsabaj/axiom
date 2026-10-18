@@ -42,7 +42,6 @@ def run(name, quick):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--quick", action="store_true", help="skip the TCG boots")
-    ap.add_argument("--fast", action="store_true", help="build the kernel with build.py --fast")
     ap.add_argument("suites", nargs="*", help=f"some of: {' '.join(SUITES)}")
     opts = ap.parse_args()
     names = opts.suites or SUITES
@@ -51,8 +50,7 @@ def main():
         sys.exit(f"no suite {' '.join(unknown)}; there are: {' '.join(SUITES)}")
     OUT.mkdir(parents=True, exist_ok=True)
     start = time.monotonic()
-    build = subprocess.run([sys.executable, str(ROOT / "tools" / "build.py"),
-                            *(["--fast"] if opts.fast else [])], cwd=ROOT,
+    build = subprocess.run([sys.executable, str(ROOT / "tools" / "build.py")], cwd=ROOT,
                            capture_output=True, text=True)
     if build.returncode:
         print(build.stdout + build.stderr)
