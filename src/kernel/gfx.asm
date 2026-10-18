@@ -357,7 +357,6 @@ gfx_set_clip:
     ret
 
 ; gfx_fill(RDI x, RSI y, RDX w, RCX h, R8D color). Preserves all.
-GFX_NT_MIN      equ 1024 * 1024         ; bytes from which a fill bypasses the caches
 gfx_fill:
     push rax
     push rcx
@@ -390,10 +389,6 @@ gfx_fill:
     vmovd xmm0, r8d                     ; last 8 overlapping what came before
     vpbroadcastd ymm0, xmm0
     lea rdx, [rdx * 4 - 32]             ; RDX = where the last 8 start
-    lea rax, [rdx + 32]
-    imul rax, r10
-    cmp rax, GFX_NT_MIN
-    jae .nt_row
 .wide_row:
     mov rdi, r9
     lea rcx, [r9 + rdx]
@@ -418,36 +413,6 @@ gfx_fill:
     add r9, [tg_pitch]
     dec r10
     jnz .wide_row
-    vzeroupper
-    jmp .out
-.nt_row:                                ; a lot of it: past the caches
-    mov rdi, r9
-    lea rcx, [r9 + rdx]
-    vmovdqu [rdi], ymm0
-    add rdi, 32
-    and rdi, -32
-    lea rsi, [rcx - 96]
-.nt_4:
-    cmp rdi, rsi
-    ja .nt_1
-    vmovntdq [rdi], ymm0
-    vmovntdq [rdi + 32], ymm0
-    vmovntdq [rdi + 64], ymm0
-    vmovntdq [rdi + 96], ymm0
-    sub rdi, -128
-    jmp .nt_4
-.nt_1:
-    cmp rdi, rcx
-    ja .nt_last
-    vmovntdq [rdi], ymm0
-    add rdi, 32
-    jmp .nt_1
-.nt_last:
-    vmovdqu [rcx], ymm0
-    add r9, [tg_pitch]
-    dec r10
-    jnz .nt_row
-    sfence
     vzeroupper
 .out:
     pop r10
