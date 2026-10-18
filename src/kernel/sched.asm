@@ -1290,10 +1290,23 @@ sched_arm:
 .keep:
     ret
 
-; sched_timer_set(R12, RAX = TSC deadline or 0, R13 = now): this CPU's timer
+; sched_timer_set(R12, RAX = TSC deadline or 0, R13 = now): this CPU's timer.
+; One already set for sooner stays: the tick it brings finds nothing due and
+; sets the right one, once, where setting it at each switch would cost a
+; WRMSR (in a VM, an exit) every time.
 sched_timer_set:
     cmp rax, [r12 + PC_TIMER_AT]
     je .out
+    push rcx
+    mov rcx, [r12 + PC_TIMER_AT]
+    test rcx, rcx
+    jz .set                             ; none set (or it has fired)
+    test rax, rax
+    jz .keep                            ; none wanted: one tick, then none
+    cmp rcx, rax
+    jbe .keep
+.set:
+    pop rcx
     mov [r12 + PC_TIMER_AT], rax
     push rcx
     push rdx
@@ -1328,6 +1341,9 @@ sched_timer_set:
     pop rdx
     pop rcx
 .out:
+    ret
+.keep:
+    pop rcx
     ret
 
 ; -----------------------------------------------------------------------------
