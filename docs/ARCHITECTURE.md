@@ -604,7 +604,8 @@ into) on screen and serial.
   the shortest `NAME~n.EXT` alias nothing else in the directory has, and an 8.3
   name in one case is stored as 8.3 with the lowercase flags Windows uses.
   There is one cached FAT sector (written to every FAT copy) and one cached
-  directory sector; file data goes straight to its clusters. Every operation
+  directory sector; file data goes straight to its clusters, a run of
+  clusters one after another read in one request (up to 1 MiB). Every operation
   ends by flushing both caches, updating FSInfo's next-free hint and telling
   the drive to flush. Replacing a file empties its entry before freeing the
   old clusters, so an interrupted write leaves an empty file, not a dangling

@@ -1911,6 +1911,7 @@ fat_need_rw:
 ; fat_read_file(R14, RSI = path, RDI = buffer, RCX = its size) -> RAX = bytes
 ; read (all of it, or as much as fits), RDX = the file's size; CF (said why)
 ; if it is missing, a directory, or unreadable.
+FAT_RUN_MAX     equ 1024 * 1024         ; bytes read in one go, at most
 fat_read_file:
     push rbx
     push rcx
@@ -1930,13 +1931,58 @@ fat_read_file:
     mov r9, rdx
 .sized:
     push rdx
+    push r10
+    push r11
     xor ebx, ebx                        ; bytes so far
-    mov ecx, [r14 + VF_MAXCL]
-.cluster:
+    mov ecx, [r14 + VF_MAXCL]           ; clusters the chain may still have
+.cluster:                               ; EAX = the next cluster
     cmp rbx, r9
     jae .done
     call clus_ok
     jc .done                            ; the chain is shorter than the size
+    mov rsi, r9
+    sub rsi, rbx                        ; RSI = bytes still wanted
+    mov edx, [r14 + VF_CBYTES]
+    cmp rsi, rdx
+    jb .partial
+    mov r10d, eax                       ; a run of clusters one after another,
+    mov r11, rdx                        ; each wanted whole: R10D its first,
+.extend:                                ; R11 its bytes; read straight in
+    dec ecx
+    jz .last
+    mov edx, eax
+    call fat_get
+    jc .io
+    inc edx
+    cmp eax, edx
+    jne .run                            ; EAX: the cluster after the run
+    mov edx, [r14 + VF_CBYTES]
+    add rdx, r11
+    cmp rdx, rsi
+    ja .run
+    cmp rdx, FAT_RUN_MAX
+    ja .run
+    mov r11, rdx
+    jmp .extend
+.last:
+    xor eax, eax                        ; nothing after this run
+.run:
+    push rax
+    mov eax, r10d
+    call clus_block
+    mov rsi, rax
+    mov rdx, r11
+    push rcx
+    mov ecx, [r14 + VF_SSHIFT]
+    shr rdx, cl
+    pop rcx
+    lea rdi, [r8 + rbx]
+    call vol_read
+    pop rax
+    jc .io
+    add rbx, r11
+    jmp .cluster
+.partial:                               ; the last part of a cluster
     push rax
     call clus_block
     mov rsi, rax
@@ -1946,28 +1992,23 @@ fat_read_file:
     pop rax
     jc .io
     push rcx
-    mov ecx, [r14 + VF_CBYTES]
-    mov rdx, r9
-    sub rdx, rbx
-    cmp rdx, rcx
-    jae .whole
-    mov ecx, edx
-.whole:
+    mov rcx, r9
+    sub rcx, rbx
     lea rsi, [fat_buf]
     lea rdi, [r8 + rbx]
     add rbx, rcx
     rep movsb
     pop rcx
-    call fat_get
-    jc .io
-    dec ecx
-    jnz .cluster
 .done:
+    pop r11
+    pop r10
     pop rdx
     mov rax, rbx
     clc
     jmp .out
 .io:
+    pop r11
+    pop r10
     pop rdx
     call fat_io_failed
     stc
