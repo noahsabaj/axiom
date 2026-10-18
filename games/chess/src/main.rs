@@ -47,7 +47,7 @@ fn main() {
         }),
         ..default()
     }))
-    .insert_resource(ClearColor(to_color(ui::BACKGROUND)))
+    .insert_resource(ClearColor(to_color(ui::LIGHT_THEME.background)))
     .insert_resource(chess_from_args())
     .init_resource::<Thinking>()
     .insert_non_send(Art { fonts: Fonts::new(FONT), pieces: None, small: None })
@@ -89,6 +89,7 @@ fn chess_from_args() -> Chess {
             Err(e) => error!("bad --fen: {e}"),
         }
     }
+    chess.dark = args.iter().any(|a| a == "--dark");
     if args.iter().any(|a| a == "--two") {
         chess.mode = Mode::TwoPlayers;
     }
@@ -302,6 +303,7 @@ fn press(chess: &mut Chess, thinking: &mut Thinking, hover: Option<Target>, at: 
             chess.new_game();
         }
         Some(Target::CloseResult) => chess.result_closed = true,
+        Some(Target::Appearance) => chess.dark = !chess.dark,
         _ => chess.selected = None,
     }
 }
@@ -349,6 +351,10 @@ fn keys(
             (Key::Character(c), _) if c.as_str().eq_ignore_ascii_case("n") => {
                 stop_thinking(&mut chess, &mut thinking);
                 chess.new_game();
+            }
+            (Key::Character(c), _) if c.as_str().eq_ignore_ascii_case("d") => {
+                chess.dark = !chess.dark;
+                chess.dirty = true;
             }
             (Key::Character(c), _) if c.as_str().eq_ignore_ascii_case("f") => {
                 chess.flipped = !chess.flipped;
@@ -436,6 +442,7 @@ fn draw(
     mut art: NonSendMut<Art>,
     mut images: ResMut<Assets<Image>>,
     mut chess: ResMut<Chess>,
+    mut clear: ResMut<ClearColor>,
     time: Res<Time>,
 ) {
     let t = now(&time);
@@ -456,13 +463,15 @@ fn draw(
     if art.pieces.as_ref().is_none_or(|p| p.size != cell) {
         art.pieces = Some(PieceSet::new(cell));
     }
-    let small = (34.0 * scale).round() as usize;
+    let small = (40.0 * scale).round() as usize;
     if art.small.as_ref().is_none_or(|p| p.size != small) {
         art.small = Some(PieceSet::new(small));
     }
     let art = &*art;
+    clear.0 = to_color(chess.theme().background);
     let mut painter = Painter {
         canvas: &mut frame.canvas,
+        theme: chess.theme(),
         fonts: &art.fonts,
         pieces: art.pieces.as_ref().unwrap(),
         small: art.small.as_ref().unwrap(),

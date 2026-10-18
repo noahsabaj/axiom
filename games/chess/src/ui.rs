@@ -5,20 +5,92 @@ use crate::pieces::PieceSet;
 use chess::ai::LEVELS;
 use chess::rules::{Color, Game, Kind, Move, MoveKind, Outcome, Piece, Square, file_of, rank_of, square};
 
-pub const BACKGROUND: Rgba = rgb(242, 242, 247);
-const CARD: Rgba = rgb(255, 255, 255);
-const TEXT: Rgba = rgb(29, 29, 31);
-const SECONDARY: Rgba = rgb(110, 110, 115);
-const TERTIARY: Rgba = rgb(168, 168, 173);
-const ACCENT: Rgba = rgb(0, 113, 227);
-const FILL: Rgba = rgb(232, 232, 237);
-const LIGHT: Rgba = rgb(236, 239, 242);
-const DARK: Rgba = rgb(141, 162, 182);
-/// The tint of the last move's squares and, stronger, the selected one.
-const TINT: Rgba = rgb(64, 150, 255);
-const HINT: Rgba = rgba(22, 32, 52, 46);
-const CHECK: Rgba = rgba(255, 59, 48, 210);
-const SHADOW: Rgba = rgba(0, 0, 0, 30);
+/// The colours of one appearance, light or dark.
+pub struct Theme {
+    pub background: Rgba,
+    card: Rgba,
+    text: Rgba,
+    secondary: Rgba,
+    tertiary: Rgba,
+    accent: Rgba,
+    accent_hover: Rgba,
+    /// Accent-coloured highlights behind text and pieces.
+    accent_wash: Rgba,
+    /// Text on the accent colour.
+    on_accent: Rgba,
+    fill: Rgba,
+    fill_hover: Rgba,
+    /// The selected segment of a segmented control.
+    knob: Rgba,
+    knob_shadow: Rgba,
+    segment_hover: Rgba,
+    list: Rgba,
+    light: Rgba,
+    dark: Rgba,
+    /// The tint of the last move's squares and, stronger, the selected one.
+    tint: Rgba,
+    hint: Rgba,
+    check: Rgba,
+    shadow: Rgba,
+    shadow_strong: Rgba,
+    /// What dims the board under the promotion picker.
+    scrim: Rgba,
+    result_card: Rgba,
+}
+
+pub const LIGHT_THEME: Theme = Theme {
+    background: rgb(242, 242, 247),
+    card: rgb(255, 255, 255),
+    text: rgb(29, 29, 31),
+    secondary: rgb(110, 110, 115),
+    tertiary: rgb(168, 168, 173),
+    accent: rgb(0, 113, 227),
+    accent_hover: rgb(0, 98, 204),
+    accent_wash: rgba(0, 113, 227, 32),
+    on_accent: rgb(255, 255, 255),
+    fill: rgb(232, 232, 237),
+    fill_hover: rgb(222, 222, 228),
+    knob: rgb(255, 255, 255),
+    knob_shadow: rgba(0, 0, 0, 34),
+    segment_hover: rgba(255, 255, 255, 110),
+    list: rgb(247, 247, 250),
+    light: rgb(236, 239, 242),
+    dark: rgb(141, 162, 182),
+    tint: rgb(64, 150, 255),
+    hint: rgba(22, 32, 52, 46),
+    check: rgba(255, 59, 48, 210),
+    shadow: rgba(0, 0, 0, 30),
+    shadow_strong: rgba(0, 0, 0, 60),
+    scrim: rgba(0, 0, 0, 70),
+    result_card: rgba(255, 255, 255, 246),
+};
+
+pub const DARK_THEME: Theme = Theme {
+    background: rgb(16, 16, 18),
+    card: rgb(30, 30, 32),
+    text: rgb(242, 242, 247),
+    secondary: rgb(152, 152, 159),
+    tertiary: rgb(99, 99, 104),
+    accent: rgb(10, 132, 255),
+    accent_hover: rgb(64, 156, 255),
+    accent_wash: rgba(10, 132, 255, 52),
+    on_accent: rgb(255, 255, 255),
+    fill: rgb(46, 46, 50),
+    fill_hover: rgb(58, 58, 62),
+    knob: rgb(92, 92, 98),
+    knob_shadow: rgba(0, 0, 0, 80),
+    segment_hover: rgba(255, 255, 255, 16),
+    list: rgb(38, 38, 41),
+    light: rgb(156, 170, 186),
+    dark: rgb(98, 116, 138),
+    tint: rgb(80, 160, 255),
+    hint: rgba(8, 12, 22, 70),
+    check: rgba(255, 69, 58, 220),
+    shadow: rgba(0, 0, 0, 110),
+    shadow_strong: rgba(0, 0, 0, 140),
+    scrim: rgba(0, 0, 0, 110),
+    result_card: rgba(44, 44, 47, 248),
+};
 
 /// How long a move takes to slide, in seconds.
 pub const SLIDE: f32 = 0.18;
@@ -76,6 +148,8 @@ pub struct Chess {
     pub scroll: f32,
     /// Whether the player closed the card that says how the game ended.
     pub result_closed: bool,
+    /// Dark appearance rather than light.
+    pub dark: bool,
     pub dirty: bool,
 }
 
@@ -95,6 +169,7 @@ impl Default for Chess {
             hover: None,
             scroll: 0.0,
             result_closed: false,
+            dark: false,
             dirty: true,
         }
     }
@@ -109,6 +184,10 @@ impl Chess {
                 Mode::TwoPlayers => true,
                 Mode::Computer => self.game.position.side == self.human,
             }
+    }
+
+    pub fn theme(&self) -> &'static Theme {
+        if self.dark { &DARK_THEME } else { &LIGHT_THEME }
     }
 
     pub fn computers_turn(&self) -> bool {
@@ -192,6 +271,8 @@ pub enum Target {
     Undo,
     Flip,
     NewGame,
+    /// The button that switches between light and dark.
+    Appearance,
     Promote(Kind),
     CloseResult,
     /// New Game on the card that says how the game ended.
@@ -225,6 +306,7 @@ impl Layout {
         let mut l = Layout { board, cell, panel, list: Rect::default(), row: ROW, targets: Vec::new() };
 
         let inner = panel.inset(PAD);
+        l.targets.push((Target::Appearance, Rect::new(inner.right() - 34.0, inner.y - 2.0, 34.0, 34.0)));
         let mut y = inner.y + 76.0;
         let seg = |l: &mut Layout, y: f32, items: Vec<Target>| {
             let w = inner.w / items.len() as f32;
@@ -315,6 +397,7 @@ fn ease(t: f32) -> f32 {
 
 pub struct Painter<'a> {
     pub canvas: &'a mut Canvas,
+    pub theme: &'a Theme,
     pub fonts: &'a Fonts,
     pub pieces: &'a PieceSet,
     pub small: &'a PieceSet,
@@ -322,7 +405,7 @@ pub struct Painter<'a> {
 
 impl Painter<'_> {
     pub fn draw(&mut self, l: &Layout, chess: &Chess, now: f32) {
-        self.canvas.clear(BACKGROUND);
+        self.canvas.clear(self.theme.background);
         self.board(l, chess, now);
         self.panel(l, chess);
         if chess.promotion.is_some() {
@@ -342,12 +425,12 @@ impl Painter<'_> {
     fn board(&mut self, l: &Layout, chess: &Chess, now: f32) {
         let c = &mut *self.canvas;
         let flipped = chess.flipped;
-        c.shadow(l.board.inset(2.0), 10.0, 18.0, SHADOW);
+        c.shadow(l.board.inset(2.0), 10.0, 18.0, self.theme.shadow);
         let pos = &chess.game.position;
         let last = chess.game.last_move();
         for sq in 0..64u8 {
             let light = (file_of(sq) + rank_of(sq)) % 2 == 1;
-            let base = if light { LIGHT } else { DARK };
+            let base = if light { self.theme.light } else { self.theme.dark };
             let tint = if chess.selected == Some(sq) {
                 0.5
             } else if last.is_some_and(|m| m.from == sq || m.to == sq) {
@@ -355,18 +438,18 @@ impl Painter<'_> {
             } else {
                 0.0
             };
-            c.fill_rect(l.cell_rect(sq, flipped), base.mix(TINT, tint));
+            c.fill_rect(l.cell_rect(sq, flipped), base.mix(self.theme.tint, tint));
         }
         if pos.in_check() {
-            c.glow(l.cell_rect(pos.king(pos.side), flipped), l.cell * 0.7, CHECK);
+            c.glow(l.cell_rect(pos.king(pos.side), flipped), l.cell * 0.7, self.theme.check);
         }
-        c.round_corners(l.board, 10.0, BACKGROUND);
+        c.round_corners(l.board, 10.0, self.theme.background);
 
         // Coordinates, in the corner squares of the edge files and ranks.
         let size = (l.cell * 0.15).clamp(9.0, 13.0);
         for i in 0..8u8 {
             let (file_sq, rank_sq) = if flipped { (square(7 - i, 7), square(7, i)) } else { (square(i, 0), square(0, i)) };
-            let ink = |sq: Square| if (file_of(sq) + rank_of(sq)) % 2 == 1 { DARK } else { LIGHT };
+            let ink = |sq: Square| if (file_of(sq) + rank_of(sq)) % 2 == 1 { self.theme.dark } else { self.theme.light };
             let r = l.cell_rect(file_sq, flipped);
             let label = ((b'a' + file_of(file_sq)) as char).to_string();
             let w = self.fonts.width(Weight::Semibold, size, &label);
@@ -396,9 +479,9 @@ impl Painter<'_> {
                 let r = l.cell_rect(m.to, flipped);
                 let (x, y) = r.center();
                 if m.is_capture() {
-                    self.canvas.ring(x, y, l.cell * 0.47, l.cell * 0.075, HINT);
+                    self.canvas.ring(x, y, l.cell * 0.47, l.cell * 0.075, self.theme.hint);
                 } else {
-                    self.canvas.circle(x, y, l.cell * 0.16, HINT);
+                    self.canvas.circle(x, y, l.cell * 0.16, self.theme.hint);
                 }
             }
         }
@@ -429,30 +512,31 @@ impl Painter<'_> {
         let (Some(first), Some(last)) = (rects.first(), rects.last()) else { return };
         let track = Rect::new(first.x, first.y, last.right() - first.x, first.h);
         let c = &mut *self.canvas;
-        c.round_rect(track, 9.0, FILL);
+        c.round_rect(track, 9.0, self.theme.fill);
         for ((t, label), r) in items.iter().zip(&rects) {
             let on = *t == selected;
             if on {
                 let knob = r.inset(2.0);
-                c.shadow(knob.inset(1.0), 7.0, 3.0, rgba(0, 0, 0, 34));
-                c.round_rect(knob, 7.0, CARD);
+                c.shadow(knob.inset(1.0), 7.0, 3.0, self.theme.knob_shadow);
+                c.round_rect(knob, 7.0, self.theme.knob);
             } else if hover == Some(*t) {
-                c.round_rect(r.inset(2.0), 7.0, rgba(255, 255, 255, 110));
+                c.round_rect(r.inset(2.0), 7.0, self.theme.segment_hover);
             }
             let (cx, cy) = r.center();
             let weight = if on { Weight::Semibold } else { Weight::Medium };
-            c.text_centered(self.fonts, weight, 13.0, cx, cy + 4.5, if on { TEXT } else { SECONDARY }, label);
+            c.text_centered(self.fonts, weight, 13.0, cx, cy + 4.5, if on { self.theme.text } else { self.theme.secondary }, label);
         }
     }
 
     fn panel(&mut self, l: &Layout, chess: &Chess) {
         let fonts = self.fonts;
         let p = l.panel;
-        self.canvas.shadow(p.inset(2.0), 16.0, 18.0, SHADOW);
-        self.canvas.round_rect(p, 16.0, CARD);
+        self.canvas.shadow(p.inset(2.0), 16.0, 18.0, self.theme.shadow);
+        self.canvas.round_rect(p, 16.0, self.theme.card);
         let inner = p.inset(PAD);
-        self.canvas.text(fonts, Weight::Semibold, 26.0, inner.x, inner.y + 26.0, TEXT, "Chess");
-        let status_color = if chess.game.is_over() { TEXT } else { SECONDARY };
+        self.canvas.text(fonts, Weight::Semibold, 26.0, inner.x, inner.y + 26.0, self.theme.text, "Chess");
+        self.appearance_button(l, chess);
+        let status_color = if chess.game.is_over() { self.theme.text } else { self.theme.secondary };
         self.canvas.text(fonts, Weight::Regular, 14.0, inner.x, inner.y + 50.0, status_color, &chess.status());
 
         self.segmented(
@@ -479,10 +563,10 @@ impl Painter<'_> {
         let worth = |c: Color| chess.game.captured_by(c).iter().map(|p| piece_value(p.kind)).sum::<i32>();
         let diff = worth(Color::White) - worth(Color::Black);
         if chess.game.history.iter().all(|p| p.captured.is_none()) {
-            self.canvas.text(fonts, Weight::Regular, 13.0, inner.x, y + 34.0, TERTIARY, "No captures yet");
+            self.canvas.text(fonts, Weight::Regular, 13.0, inner.x, y + 34.0, self.theme.tertiary, "No captures yet");
         }
         for (i, side) in [top, bottom].into_iter().enumerate() {
-            let ry = y + 4.0 + i as f32 * 30.0;
+            let ry = y + 2.0 + i as f32 * 32.0;
             let mut taken = chess.game.captured_by(side);
             taken.sort_by_key(|p| p.kind as u8);
             let step = self.small.size as f32 / self.canvas.scale;
@@ -497,7 +581,7 @@ impl Painter<'_> {
             let lead = if side == Color::White { diff } else { -diff };
             if lead > 0 {
                 let tx = if taken.is_empty() { inner.x } else { x + step + 2.0 };
-                self.canvas.text(fonts, Weight::Medium, 12.0, tx, ry + step * 0.68, TERTIARY, &format!("+{lead}"));
+                self.canvas.text(fonts, Weight::Medium, 12.0, tx, ry + step * 0.68, self.theme.tertiary, &format!("+{lead}"));
             }
         }
 
@@ -508,26 +592,48 @@ impl Painter<'_> {
             let hovered = chess.hover == Some(t);
             let primary = t == Target::NewGame;
             let fill = match (primary, hovered) {
-                (true, false) => ACCENT,
-                (true, true) => rgb(0, 98, 204),
-                (false, false) => FILL,
-                (false, true) => rgb(222, 222, 228),
+                (true, false) => self.theme.accent,
+                (true, true) => self.theme.accent_hover,
+                (false, false) => self.theme.fill,
+                (false, true) => self.theme.fill_hover,
             };
             let enabled = t != Target::Undo || !chess.game.history.is_empty();
             self.canvas.round_rect(r, 10.0, fill);
-            let ink = if primary { CARD } else if enabled { TEXT } else { TERTIARY };
+            let ink = if primary { self.theme.on_accent } else if enabled { self.theme.text } else { self.theme.tertiary };
             let (cx, cy) = r.center();
             self.canvas.text_centered(fonts, Weight::Semibold, 13.5, cx, cy + 5.0, ink, label);
+        }
+    }
+
+    fn appearance_button(&mut self, l: &Layout, chess: &Chess) {
+        let Some(r) = l.rect_of(Target::Appearance) else { return };
+        let t = self.theme;
+        let c = &mut *self.canvas;
+        let (x, y) = r.center();
+        if chess.hover == Some(Target::Appearance) {
+            c.circle(x, y, r.w / 2.0, t.fill);
+        }
+        if chess.dark {
+            // A sun: a disc and eight rays.
+            c.circle(x, y, 4.6, t.secondary);
+            for i in 0..8 {
+                let a = i as f32 * std::f32::consts::FRAC_PI_4;
+                c.circle(x + a.cos() * 8.6, y + a.sin() * 8.6, 1.5, t.secondary);
+            }
+        } else {
+            // A crescent moon: a disc with a bite of the card taken out of it.
+            c.circle(x, y, 8.0, t.secondary);
+            c.circle(x + 4.2, y - 3.4, 7.0, t.card);
         }
     }
 
     fn move_list(&mut self, l: &Layout, chess: &Chess) {
         let fonts = self.fonts;
         let r = l.list;
-        self.canvas.round_rect(r, 10.0, rgb(247, 247, 250));
+        self.canvas.round_rect(r, 10.0, self.theme.list);
         let history = &chess.game.history;
         if history.is_empty() {
-            self.canvas.text_centered(fonts, Weight::Regular, 13.0, r.center().0, r.y + 30.0, TERTIARY, "No moves yet");
+            self.canvas.text_centered(fonts, Weight::Regular, 13.0, r.center().0, r.y + 30.0, self.theme.tertiary, "No moves yet");
             return;
         }
         // Rows of a move number, White's move and Black's; a game from a position with Black to
@@ -541,16 +647,16 @@ impl Painter<'_> {
         for row in first..(first + visible).min(rows) {
             let y = r.y + 4.0 + (row - first) as f32 * l.row;
             let number = chess.game.start.fullmoves as usize + row;
-            self.canvas.text(fonts, Weight::Regular, 13.0, r.x + 12.0, y + 18.0, TERTIARY, &format!("{number}."));
+            self.canvas.text(fonts, Weight::Regular, 13.0, r.x + 12.0, y + 18.0, self.theme.tertiary, &format!("{number}."));
             for side in 0..2 {
                 let Some(i) = (row * 2 + side).checked_sub(offset) else { continue };
                 let Some(played) = history.get(i) else { continue };
                 let x = r.x + 44.0 + side as f32 * col;
                 let last = i + 1 == history.len();
                 if last {
-                    self.canvas.round_rect(Rect::new(x - 6.0, y + 3.0, col - 6.0, l.row - 4.0), 6.0, rgba(0, 113, 227, 30));
+                    self.canvas.round_rect(Rect::new(x - 6.0, y + 3.0, col - 6.0, l.row - 4.0), 6.0, self.theme.accent_wash);
                 }
-                let ink = if last { ACCENT } else { TEXT };
+                let ink = if last { self.theme.accent } else { self.theme.text };
                 self.canvas.text(fonts, if last { Weight::Semibold } else { Weight::Medium }, 13.5, x, y + 18.0, ink, &played.san);
             }
         }
@@ -559,15 +665,15 @@ impl Painter<'_> {
     fn promotion(&mut self, l: &Layout, chess: &Chess) {
         let Some((from, _)) = chess.promotion else { return };
         let color = chess.game.position.at(from).map_or(Color::White, |p| p.color);
-        self.canvas.fill_rect(l.board, rgba(0, 0, 0, 70));
+        self.canvas.fill_rect(l.board, self.theme.scrim);
         let cells: Vec<Rect> = Kind::PROMOTIONS.iter().filter_map(|k| l.rect_of(Target::Promote(*k))).collect();
         let (Some(a), Some(b)) = (cells.first(), cells.last()) else { return };
         let column = Rect::new(a.x, a.y.min(b.y), a.w, a.h * 4.0);
-        self.canvas.shadow(column, 12.0, 14.0, rgba(0, 0, 0, 60));
-        self.canvas.round_rect(column, 12.0, CARD);
+        self.canvas.shadow(column, 12.0, 14.0, self.theme.shadow_strong);
+        self.canvas.round_rect(column, 12.0, self.theme.card);
         for (kind, r) in Kind::PROMOTIONS.iter().zip(&cells) {
             if chess.hover == Some(Target::Promote(*kind)) {
-                self.canvas.round_rect(r.inset(4.0), 10.0, rgba(0, 113, 227, 36));
+                self.canvas.round_rect(r.inset(4.0), 10.0, self.theme.accent_wash);
             }
             self.piece(Piece::new(color, *kind), *r, 1.0);
         }
@@ -577,8 +683,8 @@ impl Painter<'_> {
         let Some(outcome) = chess.game.outcome() else { return };
         let fonts = self.fonts;
         let card = l.result_card();
-        self.canvas.shadow(card, 18.0, 24.0, rgba(0, 0, 0, 60));
-        self.canvas.round_rect(card, 18.0, rgba(255, 255, 255, 246));
+        self.canvas.shadow(card, 18.0, 24.0, self.theme.shadow_strong);
+        self.canvas.round_rect(card, 18.0, self.theme.result_card);
         let (cx, _) = card.center();
         let (title, detail) = match outcome {
             Outcome::Checkmate { winner } => {
@@ -594,21 +700,21 @@ impl Painter<'_> {
             Outcome::FiftyMoves => ("Draw".into(), "Fifty moves without a capture or pawn move.".into()),
             Outcome::InsufficientMaterial => ("Draw".into(), "Neither side can checkmate.".into()),
         };
-        self.canvas.text_centered(fonts, Weight::Semibold, 22.0, cx, card.y + 46.0, TEXT, &title);
+        self.canvas.text_centered(fonts, Weight::Semibold, 22.0, cx, card.y + 46.0, self.theme.text, &title);
         let size = if fonts.width(Weight::Regular, 14.0, &detail) > card.w - 32.0 { 12.5 } else { 14.0 };
-        self.canvas.text_centered(fonts, Weight::Regular, size, cx, card.y + 74.0, SECONDARY, &detail);
+        self.canvas.text_centered(fonts, Weight::Regular, size, cx, card.y + 74.0, self.theme.secondary, &detail);
         for (t, label, primary) in [(Target::CloseResult, "Close", false), (Target::Rematch, "New Game", true)] {
             let Some(r) = l.rect_of(t) else { continue };
             let hovered = chess.hover == Some(t);
             let fill = match (primary, hovered) {
-                (true, false) => ACCENT,
-                (true, true) => rgb(0, 98, 204),
-                (false, false) => FILL,
-                (false, true) => rgb(222, 222, 228),
+                (true, false) => self.theme.accent,
+                (true, true) => self.theme.accent_hover,
+                (false, false) => self.theme.fill,
+                (false, true) => self.theme.fill_hover,
             };
             self.canvas.round_rect(r, 10.0, fill);
             let (bx, by) = r.center();
-            self.canvas.text_centered(fonts, Weight::Semibold, 14.0, bx, by + 5.0, if primary { CARD } else { TEXT }, label);
+            self.canvas.text_centered(fonts, Weight::Semibold, 14.0, bx, by + 5.0, if primary { self.theme.on_accent } else { self.theme.text }, label);
         }
     }
 }

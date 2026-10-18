@@ -8,6 +8,7 @@ Chess for AxiomOS, made with Hearth.
   in check are lit. Captured pieces, a move list in algebraic notation, and undo.
 - Against the computer at four levels (Easy, Casual, Strong, Master), from either side, or two
   players at one screen.
+- Light and dark appearances: the sun or moon button by the title, or D.
 
 ## Playing
 
@@ -16,6 +17,7 @@ Chess for AxiomOS, made with Hearth.
 | Backspace, ←, Ctrl+Z | Undo (against the computer, your move and its reply) |
 | N | New game |
 | F | Flip the board |
+| D | Switch between light and dark |
 | Esc | Drop the selection |
 
 ## How it's made
@@ -31,6 +33,10 @@ Chess for AxiomOS, made with Hearth.
   shows as a sprite. Axiom has no GPU, so this needs no more of a renderer than a textured quad.
   The pieces are drawn here as layered vector shapes.
 - The font is Mona Sans (SIL Open Font License, `assets/fonts/MonaSans-OFL.txt`), embedded.
+
+Arguments: `--fen <FEN>` starts from a position, `--two` with two players, `--dark` in the dark
+appearance, and `--no-threads` makes the computer think between frames, as on a system without
+threads.
 
 ## Building
 
