@@ -12,7 +12,8 @@ symbolic link on the way (/bin -> usr/bin, the loader's name, ...).
 /etc is Axiom's own (passwd, group, hosts, nsswitch.conf), never the
 distribution's, but for ld.so.cache. Test programs of our own, assembled
 from tools/test/linux/*.asm or compiled from tools/test/linux/*.c by WSL's
-gcc (against the distribution's glibc), go in /test.
+gcc (against the distribution's glibc), go in /test, with the shell scripts
+(tools/test/linux/*.sh).
 
 META, a line each, tab-separated:
     d <path> <mode>          a directory
@@ -37,6 +38,9 @@ PROGRAMS = [
     "/usr/bin/ls", "/usr/bin/uname", "/usr/bin/env", "/usr/bin/wc",
     "/usr/bin/head", "/usr/bin/sha256sum", "/usr/bin/date", "/usr/bin/id",
     "/usr/bin/sleep", "/usr/bin/stty", "/usr/bin/tput", "/usr/bin/clear", "/usr/bin/less",
+    "/usr/bin/bash", "/usr/bin/dash", "/usr/bin/sh", "/usr/bin/grep", "/usr/bin/sort",
+    "/usr/bin/tr", "/usr/bin/tail", "/usr/bin/cut", "/usr/bin/uniq", "/usr/bin/seq",
+    "/usr/bin/xargs",
 ]
 FILES = ["/etc/ld.so.cache", "/bin", "/lib/x86_64-linux-gnu/libm.so.6",
          "/lib/x86_64-linux-gnu/libgcc_s.so.1", "/usr/share/terminfo/x/xterm-256color",
@@ -179,6 +183,17 @@ def assemble_tests():
     return out
 
 
+def script_tests():
+    """tools/test/linux/*.sh -> ROOT/test/<name>.sh, as they are."""
+    out = {}
+    for src in sorted((ROOT / "tools" / "test" / "linux").glob("*.sh")):
+        dst = OUT / "ROOT" / "test" / src.name
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes(src.read_bytes().replace(b"\r\n", b"\n"))
+        out["/test/" + src.name] = dst.stat().st_size
+    return out
+
+
 def compile_tests(distro, meta):
     """tools/test/linux/*.c -> ROOT/test/<name>, by gcc in WSL; each library
     they need must be in the root already."""
@@ -233,6 +248,8 @@ def main():
         dst.write_bytes(text.encode())
         meta[path] = f"f\t{path}\t644\t{len(text.encode())}"
     for path, size in assemble_tests().items():
+        meta[path] = f"f\t{path}\t755\t{size}"
+    for path, size in script_tests().items():
         meta[path] = f"f\t{path}\t755\t{size}"
     for path, size in compile_tests(opts.distro, meta).items():
         meta[path] = f"f\t{path}\t755\t{size}"

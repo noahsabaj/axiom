@@ -8,10 +8,12 @@
 ;  line editing, ECHO, ISIG's ctrl+C, ctrl+\ and ctrl+Z, ICRNL, VMIN and
 ;  VTIME), and an output side that gives what the program writes (OPOST's
 ;  ONLCR done) to vt.asm, with a copy, escape sequences left out, to the
-;  serial log a line at a time. The window's size is its size; the program
-;  is sent SIGWINCH when that changes. Its foreground process (LY_FG) is
-;  the one 'linux' started there, until it ends; while there is one, the
-;  window's keys are its (lt_key), xterm's bytes for each.
+;  serial log a line at a time. The window's size is its size; the
+;  foreground group is sent SIGWINCH when that changes. The process that
+;  has it (LY_FG) is the one 'linux' started there, until it ends; while
+;  there is one, the window's keys are its session's (lt_key), xterm's
+;  bytes for each, and ISIG's signals go to the foreground process group
+;  (LY_PGRP, TIOCSPGRP).
 ;
 ;  poll, ppoll, select and pselect6 are here too: an open file that is not
 ;  a terminal is always ready; a terminal is readable once a read would
@@ -319,15 +321,28 @@ ly_measure:
 ; foreground. Preserves all.
 ly_winch:
     push rsi
+    mov esi, SIGWINCH
+    call ly_signal_fg
+    pop rsi
+    ret
+
+; ly_signal_fg(RBX = terminal, locked, ESI = a signal): to its foreground
+; process group, or, if that has no process, the process that has the
+; terminal. Preserves all.
+ly_signal_fg:
+    push rax
     push rdi
+    mov edi, [rbx + LY_PGRP]
+    call lx_signal_group
+    test eax, eax
+    jnz .out
     mov rdi, [rbx + LY_FG]
     test rdi, rdi
     jz .out
-    mov esi, SIGWINCH
     call lx_signal_proc
 .out:
     pop rdi
-    pop rsi
+    pop rax
     ret
 
 ; lx_poll_kick: something may be readable now: waits look again. Preserves
@@ -558,10 +573,7 @@ ly_input:
     mov [rbx + LY_TAIL], eax
     mov [rbx + LY_EDIT_LEN], eax
 .send:
-    mov rdi, [rbx + LY_FG]
-    test rdi, rdi
-    jz .out
-    call lx_signal_proc
+    call ly_signal_fg
 .out:
     pop r14
     pop r13
@@ -1415,7 +1427,13 @@ lx_poll_scan:
 .open:
     cmp dword [rax + LF_KIND], LFK_TTY
     je .tty
+    cmp dword [rax + LF_KIND], LFK_PIPE
+    je .pipe
     mov eax, POLLIN | POLLOUT | POLLRDNORM | POLLWRNORM
+    jmp .events
+.pipe:
+    mov rdi, rax
+    call lx_pipe_ready
     jmp .events
 .tty:
     mov rdi, [rax + LF_TTY]
