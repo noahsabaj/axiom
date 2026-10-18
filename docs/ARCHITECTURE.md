@@ -1136,6 +1136,43 @@ text rows.
   adds damage, which any thread may. The window closes when its last handle
   goes (`wo_orphan`): the program ended, was killed, or its shell closed.
 
+## The browser: `src/user/browse.asm`, `src/user/web/`
+
+- A ring-3 program in a 1400×1000 window of its own: a toolbar (back,
+  forward, reload, the address field), the page, a scrollbar and a status
+  line. It reaches the network through sockets (`sock.inc`), so only by the
+  capability its shell gave it.
+- **Fetching** (`web/url.inc`, `web/fetch.inc`): a URL parsed and resolved
+  against the page's (relative paths, `..`, queries, fragments, `//host`;
+  userinfo dropped), then a GET over plain TCP or TLS, the body read by its
+  length, chunked, or to the close. Up to 8 redirects are followed; a
+  fragment within the same document only scrolls.
+- **Parsing** (`web/html.inc`): a tokenizer and tree builder for the HTML
+  that is out there: implied ends (`p`, `li`, `td`, `tr`, …), raw text for
+  `script` and `style`, named and numeric references, into nodes in an
+  arena. The charset comes from the Content-Type, a `<meta charset>` in the
+  first kilobyte, or whether the bytes are UTF-8; otherwise Windows-1252.
+  `text/plain` is shown as `pre`.
+- **Layout** (`web/layout.inc`): one walk of the tree with a stack of
+  styles (from the tags alone: block or inline, hidden, the heading sizes,
+  bold, italic, monospace, links, `align=center`), lines filled and wrapped
+  at the page's width, whitespace collapsed outside `pre`, margins
+  collapsed, list markers, quotes indented, rules, and tables in columns
+  measured from what their cells want. What comes out is a display list in
+  document coordinates (text runs and rectangles, each run with its link),
+  a link table and the anchors (`id`, `name`).
+- **Drawing** (`web/draw.inc`): the visible part of the display list at the
+  scroll offset, clipped, each glyph's coverage blended into the window's
+  pixels. The fonts are DejaVu Sans, Sans Mono and their bold and oblique
+  faces at six sizes, rasterised on the host by `tools/mkwebfont.py` into
+  `src/user/gen/webfont.bin` (8-bit coverage) and `webfont.inc` (the
+  glyph tables), which `tools/build.py` makes if they are missing.
+- Each load logs `browse: <url>: <status>, <bytes> bytes, <elements>
+  elements, <links> links`; the window is titled `<title> · browse`.
+- `tools/test/browse/render.py` assembles the same `web/*.inc` into a DLL
+  for the host, so a page can be laid out and drawn there; the QEMU suite,
+  `tools/test/browse/run.py`, compares browse's window with that.
+
 ## Terminals: `term.asm`
 
 - Each shell is a window with a terminal (`TW_*`): 1000 lines of 256 cells

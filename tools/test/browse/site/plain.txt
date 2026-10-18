@@ -1,0 +1,5 @@
+A plain text file, shown as it is.
+	A tab, then <b>not bold</b> & no entities: &amp;
+    four spaces kept
+
+The end.

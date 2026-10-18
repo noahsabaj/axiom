@@ -49,6 +49,14 @@ def main():
           "-I", "src/boot/", "-I", "src/include/", "-I", "build/",
           "-o", str((boot / "BOOTX64.EFI").relative_to(ROOT)), "src/boot/uefi.asm"])
 
+    # browse's fonts (src/user/gen/webfont.*), made by tools/mkwebfont.py
+    # from DejaVu if they are not there, are assembled into BROWSE.AXE
+    font = ROOT / "src" / "user" / "gen" / "webfont.bin"
+    if not font.exists() or not font.with_suffix(".inc").exists():
+        result = subprocess.run([sys.executable, str(ROOT / "tools" / "mkwebfont.py")], cwd=ROOT)
+        if result.returncode:
+            sys.exit("mkwebfont.py failed: browse needs the DejaVu fonts")
+
     programs = BUILD / "esp" / "EFI" / "AXIOM"
     programs.mkdir(parents=True, exist_ok=True)
     made = []
