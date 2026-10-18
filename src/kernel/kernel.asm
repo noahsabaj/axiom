@@ -115,6 +115,7 @@ section .text
 %include "linux.asm"
 %include "lxsig.asm"
 %include "lxtty.asm"
+%include "bench.asm"
 %include "boot.asm"
 
 section .data

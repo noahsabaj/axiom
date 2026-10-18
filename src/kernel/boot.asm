@@ -10,6 +10,7 @@ section .text
 kernel_main:
     cli
     cld
+    BOOTMARK BM_ENTRY
     mov [boot_info], rdi
     mov [boot_rsp], rsp
     mov rax, 'AXIOMBI1'
@@ -39,6 +40,7 @@ kernel_main:
     call rtc_read
     KLOG "clock: %04u-%02u-%02u %02u:%02u:%02u", qword [rtc_year], qword [rtc_mon], qword [rtc_day], qword [rtc_hour], qword [rtc_min], qword [rtc_sec]
     call log_init
+    BOOTMARK BM_CPU
     lea rax, [cpu_brand]
     KLOG "cpu: %s, TSC %u MHz", rax, qword [tsc_mhz]
 
@@ -49,6 +51,7 @@ kernel_main:
     call vmm_init
     call heap_init
     call tlb_init
+    BOOTMARK BM_MEMORY
     lea rax, [kernel_rodata]
     mov rcx, KERNEL_BASE
     sub rax, rcx
@@ -61,6 +64,7 @@ kernel_main:
     KLOG "memory: our own page tables; code %b read-only, constants %b, data %b not executable; no identity map", rax, rdx, r8
     call gfx_init
     call ui_init
+    BOOTMARK BM_DISPLAY
     mov byte [log_to_screen], 1
     KLOG "Axiom 0.1 - first light. Written in assembly, nothing else underneath."
     mov rax, [boot_info]
@@ -86,6 +90,7 @@ kernel_main:
     KLOG "acpi: %u tables, %u processors in the MADT, %u I/O APIC(s)", rcx, rax, rdx
     call smbios_init
     call pmm_release_boot_services
+    BOOTMARK BM_FIRMWARE
     mov rax, [pmm_free_pages]
     shl rax, 12
     KLOG "memory: boot services reclaimed, %b free", rax
@@ -99,20 +104,27 @@ kernel_main:
     call user_boot                      ; the console, for programs
     call sched_init                     ; from here on, this is the thread 'main'
     call async_boot                     ; the thread 'async': timers, rings
+    BOOTMARK BM_SCHED
     call smp_start
     call sched_topology
+    BOOTMARK BM_SMP
     mov eax, [cpus_online]
     mov ecx, [cpu_count]
     KLOG "smp: %u of %u threads online in %u us", rax, rcx, qword [smp_us]
     call pci_init
     call iommu_init                     ; before any driver lets a device do DMA
+    BOOTMARK BM_PCI
     mov eax, [pci_count]
     KLOG "pci: %u functions", rax
     call kbd_init
     call usb_init
+    BOOTMARK BM_USB
     call disk_init
+    BOOTMARK BM_DISKS
     call crypto_boot
+    BOOTMARK BM_CRYPTO
     call net_init
+    BOOTMARK BM_NET
     call mandel_init
     mov al, [mandel_ok]
     cmp byte [sm_no_demo], 0            ; the firmware says not to (tests)
@@ -122,9 +134,11 @@ kernel_main:
     mov [demo_on], al
     call ui_ready
     call shell_init
+    BOOTMARK BM_SHELL
     sti
     mov byte [ints_on], 1
     call store_init                     ; interrupts on: the drive completes by them
+    BOOTMARK BM_STORE
 
     RDTSC64
     mov [next_refresh], rax
