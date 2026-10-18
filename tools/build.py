@@ -4,6 +4,8 @@ the programs in src/user, each to EFI/AXIOM/<NAME>.AXE beside it.
 
     python tools/build.py              build into build/esp/EFI/BOOT/BOOTX64.EFI
     python tools/build.py --max 1920x1080   cap the display mode the loader picks
+    python tools/build.py --define LX_TRACE  the kernel with a NASM define (each
+                                             Linux system call said, with LX_TRACE)
 """
 import argparse
 import pathlib
@@ -31,6 +33,8 @@ def nasm(args):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--max", help="largest display mode, WxH")
+    ap.add_argument("--define", action="append", default=[], metavar="NAME",
+                    help="a NASM define for the kernel")
     opts = ap.parse_args()
 
     BUILD.mkdir(exist_ok=True)
@@ -38,7 +42,7 @@ def main():
     boot.mkdir(parents=True, exist_ok=True)
 
     nasm(["-f", "bin", "-w-reloc-abs-qword", "-w-reloc-abs-dword", "-w-reloc-rel-dword",
-          "-I", "src/kernel/", "-I", "src/include/",
+          "-I", "src/kernel/", "-I", "src/include/", *("-D" + d for d in opts.define),
           "-o", "build/kernel.bin", "src/kernel/kernel.asm"])
 
     defines = []

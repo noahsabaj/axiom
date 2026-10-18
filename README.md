@@ -132,12 +132,14 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   as Linux would, glibc's system calls answered by Axiom's own (memory
   filled in on demand and shared with the file cache, a read-only view of
   the root, the clocks, `uname`, the ids, threads, futexes and signals with
-  handlers), and a terminal that speaks xterm: termios, the window's size,
-  keys as xterm sends them, colours, the alternate screen, answers to a
-  program's questions. Ubuntu's `ls -la`, `cat`, `date`, `id`, `uname -a`,
-  `sha256sum`, `stty`, `tput`, `less` and others run, and programs using
-  pthreads; ctrl+C sends SIGINT. Processes, the network and Claude Code
-  itself come next (see `docs/VISION.md`).
+  handlers, `fork`, `execve`, `wait4`, pipes, process groups), and a
+  terminal that speaks xterm: termios, the window's size, keys as xterm
+  sends them, colours, the alternate screen, answers to a program's
+  questions. Ubuntu's bash (interactive, with job control and readline),
+  dash, `ls -la`, `cat`, `grep`, `sort`, `xargs`, `date`, `sha256sum`,
+  `stty`, `less` and others run, and programs using pthreads; ctrl+C sends
+  SIGINT. The network and Claude Code itself come next (see
+  `docs/VISION.md`).
 - ACPI (MADT, MCFG, FADT, the DSDT's `_S5_`), SMBIOS, PCI Express enumeration,
   x2APIC (falling back to xAPIC), I/O APIC, TSC-deadline timer, and a panic
   screen that stops every other CPU.
