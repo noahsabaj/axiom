@@ -44,6 +44,17 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   given `AW_FILES` (or `+files`) reaches the FAT volumes through a handle,
   or one folder of them through a handle made from it, and writes only a
   volume the user made writable.
+- **Files**, `files [folder]` (or Files in the dock): the volumes laid out
+  as Finder lays them out. The volumes at the left; back, forward, the
+  folder's name, icons or a list and a search at the top; icons for
+  folders, pages with a badge of what they hold and program tiles, or a
+  list with when each was written, its size and its kind, sorted by any of
+  them; the path at the bottom, each part a way back. A folder opens in
+  place; a text file opens in Notes, which is handed that folder alone and
+  nothing more; space looks at a file without opening it. Things are made,
+  renamed, duplicated, copied, moved and deleted (a folder and all it
+  holds, once asked) with Finder's keys or a right click, and only on a
+  volume the user made writable: Files says how, never does it itself.
 - **A web browser**, `browse [url]`: HTML and plain text over HTTP and
   HTTPS in a window of its own, laid out and drawn with anti-aliased
   DejaVu text (headings, bold, italic, monospace, lists, quotes, tables,
@@ -156,7 +167,7 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   killing one (ctrl+C, or a program killing its child) ends every program
   it started too. Several run at once (`&`, `tasks stop <program>`), and
   each gets only the capabilities it declares (the network, the store, the
-  desktop) or is granted for that run (`+net hello`). `hello`, `test`, `child`, `fault`, `spin`, `stash`, `paint`, `browse`, `notes` and `fstest` come with it
+  desktop) or is granted for that run (`+net hello`). `hello`, `test`, `child`, `fault`, `spin`, `stash`, `paint`, `browse`, `notes`, `files` and `fstest` come with it
   (`src/user/`); `user test` runs them all, with a fault of every kind.
 - **Linux programs, unchanged**: `linux <program> [arguments]` runs an
   x86-64 Linux program from a root on the boot stick (`tools/mkroot.py`

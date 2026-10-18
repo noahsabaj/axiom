@@ -604,7 +604,11 @@ into) on screen and serial.
   ends by flushing both caches, updating FSInfo's next-free hint and telling
   the drive to flush. Replacing a file empties its entry before freeing the
   old clusters, so an interrupted write leaves an empty file, not a dangling
-  chain.
+  chain. `fat_rename` writes a thing's entries again under its new name, in
+  the same folder or another, its clusters left where they are (a folder
+  moved has its `..` pointed at its new parent); it puts the old entries
+  back if the new ones cannot be made, and refuses to move a folder into
+  itself or to move the shell's current folder or one it is in.
 - Shell: `disks`, `vol`, and the `files` thing (`files show`, `copy`,
   `move`, `new`, `write`, `remove`, `find`), `go`, `here`.
   File times come from the CMOS clock (`rtc.asm`, also `date`).
@@ -1201,7 +1205,8 @@ text rows.
   `..`.
 - On the ring: `RO_FS_VOLUMES`, `RO_FS_LIST`, `RO_FS_READ`, `RO_FS_WRITE`
   (a whole file, made or replaced), `RO_FS_MKDIR`, `RO_FS_REMOVE`,
-  `RO_FS_RENAME`, `RO_FS_SUB`. What a volume allows still holds: a program
+  `RO_FS_RENAME` (a file or a folder, renamed or moved to another folder
+  of its volume, in place), `RO_FS_SUB`. What a volume allows still holds: a program
   never makes one writable, only the user's `vol <n> rw` does, and until
   then a write is `E_READONLY`.
 - The FAT code is the main thread's alone: the program's thread queues what
@@ -1221,8 +1226,9 @@ text rows.
   (`kit_mono`, `kit_mtext`), and the controls drawn the desktop's way:
   buttons (`KB_*`: the default one in the accent, held, off), one-line fields with a caret,
   choosing by keys and the mouse and the clipboard (`kit_edraw`,
-  `kit_ekey`, `kit_eclick`), and scrollers. Memory comes from `kit_alloc`
-  (a mapped block, by handle).
+  `kit_ekey`, `kit_eclick`; `KE_INDENT` leaves room for an icon before
+  the text), and scrollers. Memory comes from `kit_alloc` (a mapped block,
+  by handle); `kit_close` lets the window go before the program ends.
 
 ## Notes: `src/user/notes.asm`, `src/user/notes/`
 
@@ -1245,6 +1251,37 @@ text rows.
 - **Sheets** (`panel.inc`): Open and Save As browse the volumes (folders
   first, sorted, type to select), make folders and ask before replacing;
   closing what was not saved asks Save, Don't Save or Cancel.
+
+## Files: `src/user/files.asm`, `src/user/files/`
+
+- A file browser in the desktop's look, laid out as Finder's: the sidebar,
+  the toolbar, what the folder holds, the path bar. Each part is drawn
+  again only when it changed (`N_*`), and only it is shown.
+- **The model** (`model.inc`): a folder is listed whole (`RO_FS_LIST`) into
+  one block; what is shown at all (not hidden, not a system file, no name
+  starting with `.`) is kept by index, then what the search leaves, sorted
+  folders first by name (as people read them: "file 2" before "file 10"),
+  date, size or kind, either way. Back and forward are stacks of paths; the
+  folder left is chosen in the one gone back or up to.
+- **Icons** (`icons.inc`): a kind for each ending (`KD_*`: its name, whether
+  it is text, a badge's colour), drawn at any size from round rectangles and
+  anti-aliased strokes: folders, pages with a folded corner and lines or a
+  badge, program tiles, drives, a lock, chevrons, a lens.
+- **The view** (`view.inc`): icons in a grid with names in up to two lines,
+  or a list with headings that sort it; a menu, an alert or Quick Look over
+  the window (a file's text in Cascadia Mono, scrolled, or what it is).
+  Presses find what they hit in tables made as each part is drawn.
+- **Doing** (`ops.inc`): a folder opens in place; text (by its ending, or no
+  NUL in its first page) opens in Notes, spawned with two handles: one to
+  that folder alone (`RO_FS_SUB`) and one to the desktop (`RO_DUP`), so it
+  reaches nothing else. Files keeps each Notes' thread and, closing, lets
+  its window go and waits for them (a program's children end with it).
+  Renames and moves are `RO_FS_RENAME`; a copy is read and written whole;
+  a folder is deleted with what it holds, deepest first. Every write is
+  checked against the volume first: a read-only one is said, with the
+  `vol <n> rw` that would allow it.
+- The user suite makes a folder with Files, names it, and checks the stick
+  from the host.
 
 ## The browser: `src/user/browse.asm`, `src/user/web/`
 

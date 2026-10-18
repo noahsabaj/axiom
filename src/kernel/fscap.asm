@@ -1062,73 +1062,15 @@ fsq_remove:
 .out:
     ret
 
-; a file renamed: copied to its new name, then the old one removed
+; a file or a folder renamed, or moved to another folder of its volume
 fsq_rename:
-    push r12
     call fs_writable
     jc .out
-    lea rsi, [rbx + FQ_PATH]
-    call fat_resolve
-    jnc .there
-    call fs_failed
-    jmp .out
-.there:
-    mov rax, E_ARG
-    test byte [fat_ent + 11], 0x10      ; a file
-    jnz .out
-    mov r12d, [fat_ent + 28]
-    lea rsi, [rbx + FQ_PATH2]
-    call fat_resolve
-    jc .new
-    mov rax, E_EXISTS
-    jmp .out
-.new:
     mov byte [fat_ioerr], 0
-    lea rsi, [rbx + FQ_PATH2]
-    call fat_parent
-    jnc .room
-    call fs_failed
-    jmp .out
-.room:
-    mov rax, E_NOMEM
-    cmp r12, FS_ROOM_MAX
-    ja .out
-    lea rdi, [r12 + 1]
-    call kmalloc
-    test rax, rax
-    jz .nomem
-    mov [rbx + FQ_BUF], rax
     lea rsi, [rbx + FQ_PATH]
-    mov rdi, rax
-    mov rcx, r12
-    call fat_read_file
-    jc .io
-    lea rsi, [rbx + FQ_PATH2]
-    mov rdi, [rbx + FQ_BUF]
-    mov rcx, r12
-    call fat_write_file
-    jc .write_failed
-    lea rsi, [rbx + FQ_PATH]
-    call fat_remove
-    jc .io
-    xor eax, eax
-    jmp .free
-.write_failed:
-    call fsq_write.failed
-    jmp .free
-.io:
-    mov rax, E_IO
-.free:
-    push rax
-    mov rdi, [rbx + FQ_BUF]
-    call kfree
-    mov qword [rbx + FQ_BUF], 0
-    pop rax
-    jmp .out
-.nomem:
-    mov rax, E_NOMEM
+    lea rdi, [rbx + FQ_PATH2]
+    call fat_rename
 .out:
-    pop r12
     ret
 
 fsq_folder:

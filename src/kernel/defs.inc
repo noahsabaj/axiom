@@ -462,8 +462,9 @@ RO_FS_WRITE     equ 38                  ; handle, handle2 + a0: a file; handle2 
 RO_FS_MKDIR     equ 39                  ; handle, handle2 + a0: a folder -> 0, made
 RO_FS_REMOVE    equ 40                  ; handle, handle2 + a0: a file or an empty
                                         ; folder -> 0, gone
-RO_FS_RENAME    equ 41                  ; handle, handle2 + a0: a file, handle2 +
-                                        ; a1: its new path, on the same volume -> 0
+RO_FS_RENAME    equ 41                  ; handle, handle2 + a0: a file or a folder,
+                                        ; handle2 + a1: its new path, on the same
+                                        ; volume -> 0 (renamed, or moved, in place)
 RO_FS_SUB       equ 42                  ; handle, handle2 + a0: a folder, a1 =
                                         ; rights -> a handle to it alone
 RO_COUNT        equ 43

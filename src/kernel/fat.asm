@@ -2299,6 +2299,256 @@ fat_remove:
     pop rcx
     pop rbx
     ret
+RN_ENTRIES      equ 32                  ; a name's entries, at most (20 long, 1 short)
+
+; fat_rename(R14, RSI = path, RDI = its new path) -> CF and RAX = E_* (said
+; why): a file or a folder renamed where it is, or moved to another folder
+; of the volume. Its entries are written again; what it holds stays where it
+; is on the disk. Preserves others but RAX.
+fat_rename:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r12
+    push r13
+    push r15
+    mov [rn_new], rdi
+    call fat_need_rw
+    mov eax, E_READONLY
+    jc .err
+    call fat_parent                     ; the old: the folder it is in
+    jc .missing_part
+    call comp_here
+    jc .refuse
+    cmp word [fat_comp], '..'
+    jne .look
+    cmp byte [fat_comp + 2], 0
+    je .refuse
+.look:
+    mov r15d, edi                       ; R15D: the folder it is in
+    lea rsi, [fat_comp]
+    call fat_lookup
+    jc .missing
+    mov r12d, eax                       ; R12D: its cluster
+    mov ebx, [ent_idx]                  ; EBX: its own entry, R13D: its first
+    mov r13d, [ent_first]
+    mov eax, ebx
+    sub eax, r13d
+    cmp eax, RN_ENTRIES
+    jae .refuse
+    lea rsi, [fat_ent]
+    lea rdi, [rn_ent]
+    mov ecx, 4
+    rep movsq
+    test byte [rn_ent + 11], 0x10
+    jz .new
+    cmp r12d, [r14 + VF_ROOT]
+    je .refuse
+    mov eax, [r14 + VF_CWD]             ; not the shell's folder, nor one it is in
+    mov edx, r12d
+    call dir_within
+    jc .busy
+.new:
+    mov rsi, [rn_new]                   ; the new: its folder
+    call fat_parent
+    jc .missing_part
+    call comp_here
+    jc .refuse
+    mov ebp, edi                        ; EBP: the folder it goes to
+    lea rsi, [fat_comp]
+    call fat_lookup
+    jc .free
+    cmp ebp, r15d                       ; itself, its case changed: fine
+    jne .exists
+    cmp [ent_idx], ebx
+    jne .exists
+    jmp .named
+.free:
+    cmp byte [fat_ioerr], 0
+    jne .io
+.named:
+    push r12
+    lea r12, [fat_comp]
+    call fat_name_ok
+    pop r12
+    mov eax, E_ARG
+    jc .err
+    test byte [rn_ent + 11], 0x10       ; a folder: not into itself
+    jz .unmark
+    cmp ebp, r15d
+    je .unmark
+    mov eax, ebp
+    mov edx, r12d
+    call dir_within
+    jc .inside
+.unmark:
+    mov edi, r15d                       ; its entries let go, their first
+    mov esi, r13d                       ; bytes kept, to put back
+    xor ecx, ecx
+.mark:
+    call dir_entry
+    jc .io
+    mov dl, [rax]
+    mov [rn_first + rcx], dl
+    mov byte [rax], 0xE5
+    call sec_mark
+    inc ecx
+    inc esi
+    cmp esi, ebx
+    jbe .mark
+    mov [rn_count], ecx
+    lea rsi, [fat_comp]                 ; its new ones
+    mov edi, ebp
+    mov dl, [rn_ent + 11]
+    call fat_create
+    jc .restore
+    call dir_entry
+    jc .io
+    push rsi
+    push rdi
+    lea rsi, [rn_ent + 13]              ; its times, its cluster, its size
+    lea rdi, [rax + 13]
+    mov ecx, 32 - 13
+    rep movsb
+    pop rdi
+    pop rsi
+    call sec_mark
+    test byte [rn_ent + 11], 0x10       ; a folder moved: its ".." too
+    jz .synced
+    cmp ebp, r15d
+    je .synced
+    mov edi, r12d
+    mov esi, 1
+    call dir_entry
+    jc .io
+    mov edx, ebp
+    cmp edx, [r14 + VF_ROOT]
+    jne .up
+    xor edx, edx                        ; the root is cluster 0 here
+.up:
+    mov [rax + 26], dx
+    shr edx, 16
+    mov [rax + 20], dx
+    call sec_mark
+.synced:
+    call fat_sync
+    jc .io
+    xor eax, eax
+    clc
+    jmp .out
+.restore:
+    mov edi, r15d
+    mov esi, r13d
+    xor ecx, ecx
+.back:
+    cmp ecx, [rn_count]
+    jae .restored
+    call dir_entry
+    jc .io
+    mov dl, [rn_first + rcx]
+    mov [rax], dl
+    call sec_mark
+    inc ecx
+    inc esi
+    jmp .back
+.restored:
+    call fat_sync
+    mov eax, E_ARG
+    cmp byte [fat_ioerr], 0
+    je .err
+    mov eax, E_IO
+    jmp .err
+.missing_part:
+    mov eax, E_NOFILE
+    cmp byte [fat_ioerr], 0
+    je .err
+    mov eax, E_IO
+    jmp .err
+.missing:
+    cmp byte [fat_ioerr], 0
+    jne .io
+    lea rax, [fat_comp]
+    KLOG "nothing called '%s' there", rax
+    mov eax, E_NOFILE
+    jmp .err
+.exists:
+    lea rax, [fat_comp]
+    KLOG "'%s' is already there", rax
+    mov eax, E_EXISTS
+    jmp .err
+.refuse:
+    KLOG "that cannot be renamed"
+    mov eax, E_ARG
+    jmp .err
+.busy:
+    KLOG "that is the current folder, or holds it ('go' elsewhere first)"
+    mov eax, E_ARG
+    jmp .err
+.inside:
+    KLOG "a folder cannot go inside itself"
+    mov eax, E_ARG
+    jmp .err
+.io:
+    call fat_io_failed
+    call fat_sync
+    mov eax, E_IO
+.err:
+    movsx rax, eax
+    stc
+.out:
+    pop r15
+    pop r13
+    pop r12
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; dir_within(R14, EAX = a directory, EDX = another) -> CF if the other is it,
+; or a folder it is in (or the disk failed finding out). Preserves others but
+; RAX.
+dir_within:
+    push rcx
+    push rsi
+    push rdi
+    mov ecx, 256                        ; deeper than a path goes
+.each:
+    cmp eax, edx
+    je .yes
+    cmp eax, [r14 + VF_ROOT]
+    je .no
+    test eax, eax
+    jz .no
+    dec ecx
+    jz .no
+    mov edi, eax                        ; up, by its ".."
+    mov esi, 1
+    call dir_entry
+    jc .yes
+    movzx edi, word [rax + 20]
+    shl edi, 16
+    mov di, [rax + 26]
+    mov eax, edi
+    test eax, eax
+    jnz .each
+    mov eax, [r14 + VF_ROOT]
+    jmp .each
+.yes:
+    stc
+    jmp .out
+.no:
+    clc
+.out:
+    pop rdi
+    pop rsi
+    pop rcx
+    ret
 
 ; -----------------------------------------------------------------------------
 ;  Shell: the files thing, go and here. Each action takes its words (EDI =
@@ -3398,6 +3648,10 @@ lfn_sum:        resd 1
 lfn_first:      resd 1
 ent_idx:        resd 1
 ent_first:      resd 1
+rn_new:         resq 1                  ; fat_rename: the new path
+rn_count:       resd 1
+rn_ent:         resb 32                 ; its entry, as it was
+rn_first:       resb RN_ENTRIES         ; its entries' first bytes, to put back
 fat_basis:      resq 1
 fat_tail:       resq 1
 fat_sname:      resb 11

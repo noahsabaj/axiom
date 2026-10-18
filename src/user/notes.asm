@@ -5,7 +5,8 @@
 ;
 ;  Opens each file named in a tab of its own (a new, empty one if none is),
 ;  in a window of the desktop's, in its look: its colours, its scale, its
-;  fonts. A name without "vol<n>:" is on the stick Axiom started from. What
+;  fonts. A name with blanks in it goes in quotes ("my notes.txt"). A name
+;  without "vol<n>:" is on the stick Axiom started from. What
 ;  a name ends in says what the file holds, and that is coloured as Xcode
 ;  colours it: assembly, C and the languages written like it, Python,
 ;  shell and settings, JSON, Markdown.
@@ -299,18 +300,24 @@ fsq:
     pop rbx
     ret
 
-; path_in(RSI = a name, to a blank or the end, RDI = FS_PATH bytes) -> the
-; path to it, RSI past it: with "vol<boot>:/" before it if it has no volume
-; and the files reach every one
+; path_in(RSI = a name, to a blank or the end, or in quotes, RDI = FS_PATH
+; bytes) -> the path to it, RSI past it: with "vol<boot>:/" before it if it
+; has no volume and the files reach every one
 path_in:
     push rbx
     mov rbx, rdi
+    mov r8b, ' '                        ; R8B: what ends it
+    cmp byte [rsi], '"'
+    jne .unquoted
+    mov r8b, '"'
+    inc rsi
+.unquoted:
     xor ecx, ecx                        ; does it name its volume?
 .scan:
     mov al, [rsi + rcx]
     test al, al
     jz .plain
-    cmp al, ' '
+    cmp al, r8b
     je .plain
     cmp al, ':'
     je .named
@@ -340,7 +347,7 @@ path_in:
     mov al, [rsi]
     test al, al
     jz .done
-    cmp al, ' '
+    cmp al, r8b
     je .done
     cmp rdi, rcx
     jae .skip
@@ -351,6 +358,10 @@ path_in:
     jmp .byte
 .done:
     mov byte [rdi], 0
+    cmp al, '"'                         ; past the closing quote
+    jne .out
+    inc rsi
+.out:
     pop rbx
     ret
 

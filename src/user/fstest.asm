@@ -4,7 +4,9 @@
 ;
 ;    fstest        checks on vol0, which 'vol 0 rw' made writable: a folder
 ;                  made, a file written, read back (all of it, and as much as
-;                  fits), listed, renamed, removed; paths with . or .. or //
+;                  fits), listed, renamed, removed; a folder renamed, a
+;                  file moved and back, a folder not into itself; paths
+;                  with . or .. or //
 ;                  refused; a handle to one folder (RO_FS_SUB) that reaches
 ;                  nothing outside it, and keeps no more rights than it was
 ;                  given; with +desk, the desktop's look mapped and read.
@@ -19,7 +21,7 @@
 %include "axe.inc"
 WANTS AW_FILES
 
-CHECKS          equ 24
+CHECKS          equ 27
 CHECKS_RO       equ 6
 IO_PATH         equ 0                   ; the page: a path's field
 IO_PATH2        equ FS_PATH             ; a second one
@@ -339,7 +341,59 @@ main:
     test rax, rax
     jnz fail
 
-    mov r15d, 22                        ; a folder with things in it stays
+    mov r15d, 22                        ; a folder renamed, what it holds with it
+    mov edi, r12d
+    lea rsi, [p_dir]
+    lea rdx, [p_dir2]
+    call rename
+    test rax, rax
+    jnz fail
+    mov edi, r12d
+    lea rsi, [p_bye2]
+    mov edx, IO_ROOM
+    call read
+    cmp rax, HELLO_LEN
+    jne fail
+    mov edi, r12d
+    lea rsi, [p_dir2]
+    lea rdx, [p_dir]
+    call rename
+    test rax, rax
+    jnz fail
+    mov r15d, 23                        ; a file moved to another folder, and back
+    mov edi, r12d
+    lea rsi, [p_bye]
+    lea rdx, [p_bye_top]
+    call rename
+    test rax, rax
+    jnz fail
+    mov edi, r12d
+    lea rsi, [p_bye_top]
+    mov edx, IO_ROOM
+    call read
+    cmp rax, HELLO_LEN
+    jne fail
+    mov edi, r12d
+    lea rsi, [p_bye_top]
+    lea rdx, [p_bye]
+    call rename
+    test rax, rax
+    jnz fail
+    mov r15d, 24                        ; not into itself, nor onto a name taken
+    mov edi, r12d
+    lea rsi, [p_dir]
+    lea rdx, [p_dir_in]
+    call rename
+    cmp rax, E_ARG
+    jne fail
+    mov edi, r12d
+    lea rsi, [p_bye]
+    lea rdx, [p_dir]
+    call rename
+    cmp rax, E_EXISTS
+    jne fail
+
+    mov r15d, 25                        ; a folder with things in it stays
     mov edi, r12d
     lea rsi, [p_dir]
     call remove
@@ -355,14 +409,14 @@ main:
     call remove
     test rax, rax
     jnz fail
-    mov r15d, 23                        ; gone
+    mov r15d, 26                        ; gone
     mov edi, r12d
     lea rsi, [p_dir]
     call list
     cmp rax, E_NOFILE
     jne fail
 
-    mov r15d, 24                        ; the desktop's look, if it was given
+    mov r15d, 27                        ; the desktop's look, if it was given
     mov edi, [ax_desk]
     test edi, edi
     jz .looked
@@ -673,6 +727,10 @@ p_root:         db 'vol0:/', 0
 p_dir:          db 'vol0:/fstest', 0
 p_hello:        db 'vol0:/fstest/hello.txt', 0
 p_bye:          db 'vol0:/fstest/bye.txt', 0
+p_dir2:         db 'vol0:/fstest2', 0
+p_bye2:         db 'vol0:/fstest2/bye.txt', 0
+p_bye_top:      db 'vol0:/fsbye.txt', 0
+p_dir_in:       db 'vol0:/fstest/inner', 0
 p_ro:           db 'vol0:/fstest.txt', 0
 p_ro_in:        db 'fstest.txt', 0
 p_none:         db '', 0

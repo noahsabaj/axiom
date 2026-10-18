@@ -18,6 +18,7 @@
 ;    kit_show(EDI = x, ESI = y, EDX = w, ECX = h), kit_show_all: what was
 ;      drawn there goes to the screen
 ;    kit_title(RSI = UTF-8, NUL-ended)
+;    kit_close: the window gone; the program goes on without it
 ;    kit_pt(EDI = points) -> EAX = pixels
 ;    kit_c(EDI = TC_*) -> EAX = the theme's colour; kit_accent -> EAX;
 ;      kit_dark -> ZF if the theme is dark
@@ -95,7 +96,8 @@ KE_CARET        equ 16                  ; where the caret is, a byte
 KE_ANCHOR       equ 20                  ; the other end of what is chosen
 KE_SCROLL       equ 24                  ; pixels of it scrolled out, at the left
 KE_X            equ 28                  ; where its text began, last drawn
-KE_SIZE         equ 32
+KE_INDENT       equ 32                  ; dword: room at its left, pixels (an icon)
+KE_SIZE         equ 40
 
 section .text
 
@@ -317,6 +319,34 @@ kit_next:
     pop r12
     pop rbx
     mov eax, WE_PRESS
+.out:
+    ret
+
+kit_close:
+    mov edi, [kit_win]
+    call k_close
+    mov edi, [kit_end]
+    call k_close
+    mov dword [kit_win], 0
+    mov dword [kit_end], 0
+    ret
+
+; k_close(EDI = a handle, or 0): closed
+k_close:
+    test edi, edi
+    jz .out
+    sub rsp, SQ_SIZE
+    push rdi
+    lea rdi, [rsp + 8]
+    xor eax, eax
+    mov ecx, SQ_SIZE / 8
+    rep stosq
+    pop rdi
+    mov byte [rsp + SQ_OP], RO_CLOSE
+    mov [rsp + SQ_HANDLE], edi
+    mov rdi, rsp
+    call ax_do
+    add rsp, SQ_SIZE
 .out:
     ret
 
@@ -2235,6 +2265,7 @@ kit_edraw:
     mov ecx, r14d                       ; scrolled to keep the caret in it
     sub ecx, [rsp + 20]
     sub ecx, [rsp + 20]
+    sub ecx, [rbx + KE_INDENT]
     sub ecx, 2
     mov edx, eax
     sub edx, [rbx + KE_SCROLL]
@@ -2258,14 +2289,17 @@ kit_edraw:
     mov [rsp + 12], eax
     mov edi, r12d                       ; and narrowed to the text
     add edi, [rsp + 20]
+    add edi, [rbx + KE_INDENT]
     mov esi, r13d
     mov edx, r14d
     sub edx, [rsp + 20]
     sub edx, [rsp + 20]
+    sub edx, [rbx + KE_INDENT]
     mov ecx, r15d
     call k_narrow
     mov eax, r12d                       ; where the text begins
     add eax, [rsp + 20]
+    add eax, [rbx + KE_INDENT]
     sub eax, [rbx + KE_SCROLL]
     mov [rbx + KE_X], eax
     mov rsi, rbx                        ; what is chosen, behind it
