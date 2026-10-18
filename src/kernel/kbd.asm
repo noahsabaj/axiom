@@ -150,12 +150,27 @@ kbd_scancode:
 .not_prefix:
     movzx edx, byte [kbd_e0]
     mov byte [kbd_e0], 0
+    mov byte [kbd_hold], 1              ; its key codes not seen yet
     push rax
     push rdx
     call kbd_cook                       ; a key code
     pop rdx
     pop rax
-    jmp kbd_raw                         ; and the key, down or up
+    call kbd_raw                        ; and the key, down or up
+    mov dl, [key_head]                  ; its key codes after its key down
+    lea rax, [kbd_kring]
+    movzx ecx, word [kbd_head]
+.mark:
+    cmp cx, [kbd_made]
+    je .show
+    mov [rax + rcx], dl
+    inc ecx
+    and ecx, KBD_RING - 1
+    jmp .mark
+.show:
+    mov byte [kbd_hold], 0
+    mov [kbd_head], cx                  ; (after what it says is there)
+    ret
 
 ; kbd_cook(AL = set-1 byte, EDX = 1 after E0): the modifiers kept, a key
 ; pressed made a key code (kbd_push)
@@ -369,13 +384,21 @@ key_event:
     ret
 
 ; key_next -> EAX = the next key down or up (as key_event queued it: usage |
-; 1 << 8 if down | WM_* << 16), CF if none. Main loop.
+; 1 << 8 if down | WM_* << 16), CF if none, or none before the next key code
+; (kbd_getc): the two come out in the order they happened. Main loop.
 key_next:
     push rcx
     push rdx
     movzx ecx, byte [key_tail]
-    cmp cl, [key_head]
-    je .none
+    cmp cl, [key_head]                  ; (first: a key code seen after this
+    je .none                            ; is marked after this key)
+    movzx edx, word [kbd_tail]
+    cmp dx, [kbd_head]
+    je .take
+    lea rax, [kbd_kring]
+    cmp cl, [rax + rdx]
+    je .none                            ; that key code's turn
+.take:
     lea rdx, [key_ring]
     mov eax, [rdx + rcx * 4]
     inc cl
@@ -389,12 +412,22 @@ key_next:
     pop rcx
     ret
 
+; key_pending -> ZF clear if a key down or up is waiting
+key_pending:
+    push rax
+    mov al, [key_tail]
+    cmp al, [key_head]
+    pop rax
+    ret
+
 ; kbd_push(AL = key code): append to the ring (dropped when full), with the
-; modifiers held as it was pressed. Preserves all.
+; modifiers held as it was pressed, after the keys down and up queued so far
+; (kbd_kring). While kbd_hold, not seen yet: kbd_scancode shows it once its
+; key down is queued, and puts it after that. Preserves all.
 kbd_push:
     push rcx
     push rdx
-    movzx ecx, word [kbd_head]
+    movzx ecx, word [kbd_made]
     lea edx, [ecx + 1]
     and edx, KBD_RING - 1
     cmp dx, [kbd_tail]
@@ -406,8 +439,14 @@ kbd_push:
     call kbd_mods
     lea rdx, [kbd_mring]
     mov [rdx + rcx], al
+    mov al, [key_head]
+    lea rdx, [kbd_kring]
+    mov [rdx + rcx], al
     pop rax
     pop rdx
+    mov [kbd_made], dx
+    cmp byte [kbd_hold], 0
+    jne .full
     mov [kbd_head], dx
 .full:
     pop rdx
@@ -454,8 +493,9 @@ kbd_mods:
     pop rcx
     ret
 
-; kbd_getc -> EAX = next key code, 0 if none; kbd_got = the modifiers held
-; with it. Also polls the serial port.
+; kbd_getc -> EAX = next key code, 0 if none, or none until the keys down
+; and up before it are out (key_next); kbd_got = the modifiers held with it.
+; Also polls the serial port.
 kbd_getc:
     push rcx
     push rdx
@@ -463,6 +503,10 @@ kbd_getc:
     movzx ecx, word [kbd_tail]
     cmp cx, [kbd_head]
     je .empty
+    lea rdx, [kbd_kring]
+    mov al, [rdx + rcx]
+    cmp al, [key_tail]
+    jne .empty
     lea rdx, [kbd_mring]
     movzx eax, byte [rdx + rcx]
     mov [kbd_got], al
@@ -566,6 +610,8 @@ kbd_alt:        db 0
 kbd_caps:       db 0
 kbd_head:       dw 0
 kbd_tail:       dw 0
+kbd_made:       dw 0                    ; kbd_head, and those not seen yet (kbd_hold)
+kbd_hold:       db 0                    ; a scancode's key codes being made
 kbd_got:        db 0                    ; the last key's modifiers, WM_*
 key_head:       db 0
 key_tail:       db 0
@@ -573,6 +619,7 @@ key_tail:       db 0
 section .bss
 kbd_ring:       resb KBD_RING
 kbd_mring:      resb KBD_RING           ; each key's modifiers
+kbd_kring:      resb KBD_RING           ; and key_head as it came: its turn
 alignb 4
 key_ring:       resd KEY_RING           ; keys down and up (key_event)
 key_down:       resb 32                 ; a bit for each usage down now

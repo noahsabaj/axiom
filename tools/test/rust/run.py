@@ -15,8 +15,8 @@ screen.
     (the press where it began, the square where it ended), the wheel, then
     its close button: it ends, 0, having counted what happened. Games' input
     on the way: each key down and up as its HID usage (ctrl+A, F5 and up
-    from the keyboard; w held while it repeats: one down, one up, three
-    keys), the pointer over it with no button held (where, and how far it
+    from the keyboard, each down, then what it typed, then up; w held
+    while it repeats: one down, one up, three keys), the pointer over it with no button held (where, and how far it
     went) and leaving it; the pointer held (g: Pointer::Grab): hidden, in
     the window's middle, only how far it moved changing; ctrl+alt lets it
     go, a click holds it again;
@@ -152,6 +152,14 @@ def check_keys(log, who, repeats):
            and has("rdemo: up 0xe0"), f"{who}: ctrl+A down and up, as HID usages")
     result(has("rdemo: down 0x3e") and has("rdemo: up 0x3e"), f"{who}: F5 down and up")
     result(has("rdemo: down 0x52") and has("rdemo: up 0x52"), f"{who}: up down and up")
+    def order(*lines):
+        at = [log.find(t) for t in lines]
+        return -1 not in at and at == sorted(at)
+
+    result(order("rdemo: down 0x04 ctrl", "rdemo: key Char('a') ctrl", "rdemo: up 0x04") and
+           order("rdemo: down 0x3e", "rdemo: key F(5)", "rdemo: up 0x3e") and
+           order("rdemo: down 0x52", "rdemo: key Up", "rdemo: up 0x52"),
+           f"{who}: each key down, then what it typed, then up, in that order")
     downs, ups, keys = (log.count(t) for t in ("rdemo: down 0x1a", "rdemo: up 0x1a", "rdemo: key Char('w')"))
     result((downs, ups, keys) == (1, 1, repeats),
            f"{who}: w held: down once, up once, {repeats} as text ({downs}, {ups}, {keys})")
