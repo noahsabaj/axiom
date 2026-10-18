@@ -8,6 +8,7 @@ plain text and CSV. Screenshots go to build/test/compose/.
     python tools/test/compose/app.py
 """
 import pathlib
+import subprocess
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -180,6 +181,55 @@ check("opened", app.log[-1 - 0].startswith("compose: opened first.axd") or
       app.log[-2].startswith("compose: opened first.axd"), True)
 check("the same again", blocks(app), before)
 check("the view kept", app.dump()[0].split(", cursor")[0], "compose: document, 9 blocks, view slides")
+
+# --- light and dark --------------------------------------------------------------------------
+LIGHT_PAPER, DARK_PAPER = (255, 255, 255), (0x1C, 0x1C, 0x1F)
+THEME_BUTTON = (1102, 26)
+
+
+def paper():
+    return app.image().getpixel((300, 120))[:3]          # a page's margin
+
+
+app.key("f1")
+check("light at first", paper(), LIGHT_PAPER)
+check("the system's dark, followed", (app.system_theme(True), app.log[-1], paper()),
+      (1, "compose: theme auto, dark", DARK_PAPER))
+check("told again: nothing to do", app.system_theme(True), 0)
+shot(app, "dark_pages")
+app.key("f2")
+shot(app, "dark_slides")
+app.key("f5")
+check("the presenter, dark", app.presenter().getpixel((40, 40))[:3], DARK_PAPER)
+app.presenter().save(OUT / "dark_present.png")
+app.key("esc")
+app.key("f3")
+shot(app, "dark_grid")
+app.key("f1")
+app.key("f7")
+check("F7: light, whatever the system's", (app.log[-1], paper(), app.store.get("compose/theme")),
+      ("compose: theme light, light", LIGHT_PAPER, b"light\n"))
+check("the system's then: kept, not followed", (app.system_theme(False), app.system_theme(True),
+                                                paper()), (0, 0, LIGHT_PAPER))
+app.key("f7")
+check("F7: dark", (app.log[-1], paper(), app.store.get("compose/theme")),
+      ("compose: theme dark, dark", DARK_PAPER, b"dark\n"))
+app.click(*THEME_BUTTON)
+check("the button: auto, as the system's is", (app.log[-1], app.store.get("compose/theme")),
+      ("compose: theme auto, dark", b"auto\n"))
+app.click(*THEME_BUTTON)
+check("the button: light", app.log[-1], "compose: theme light, light")
+shot(app, "light_again")
+app.system_theme(False)
+app.click(*THEME_BUTTON)
+app.click(*THEME_BUTTON)
+check("auto again, light", (app.log[-1], paper()), ("compose: theme auto, light", LIGHT_PAPER))
+r = subprocess.run([sys.executable, "-c", (
+    "import sys; sys.path.insert(0, {!r}); from host import App\n"
+    "app = App(store={{'compose/theme': b'dark\\n'}}); app.open('x')\n"
+    "print(app.image().getpixel((300, 120))[:3])").format(str(pathlib.Path(__file__).parent))],
+    capture_output=True, text=True)
+check("dark, as it was kept", r.stdout.strip(), str(DARK_PAPER))
 
 # --- plain text and CSV ------------------------------------------------------------------------
 app.key("f9")

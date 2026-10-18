@@ -113,6 +113,7 @@ class App:
                 ("t_open", None, [ctypes.c_char_p]),
                 ("t_event", ctypes.c_int64, [ctypes.c_int64] * 5),
                 ("t_paint", None, []),
+                ("t_theme", ctypes.c_int64, [ctypes.c_int64]),
                 ("t_pres", None, [ctypes.c_void_p, ctypes.c_int64, ctypes.c_int64])):
             f = getattr(d, name)
             f.restype = res
@@ -152,6 +153,10 @@ class App:
 
     def event(self, kind, code=0, x=0, y=0, pres=0):
         return self.d.t_event(kind, code, x, y, pres)
+
+    def system_theme(self, dark):
+        """The system's theme, as compose.asm reads it from the settings."""
+        return self.d.t_theme(1 if dark else 0)
 
     def key(self, k):
         return self.event(WE_KEY, KEYS[k] if isinstance(k, str) else k)

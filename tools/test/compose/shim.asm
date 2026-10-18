@@ -23,6 +23,7 @@
 ;      presenter's) -> RAX = AE_*
 ;    t_paint: paint_all
 ;    t_pres(RCX = pixels, RDX = width, R8 = height): pres_paint
+;    t_theme(RCX = 1 if the system's theme is dark) -> RAX = AE_*: app_theme
 ; =============================================================================
 
 bits 64
@@ -36,7 +37,7 @@ section .bss bss align=4096
 %include "defs.inc"
 
 global t_init, t_grid_new, t_cell_set, t_cell_show, t_num
-global t_hooks, t_app, t_open, t_event, t_paint, t_pres, t_app_bytes
+global t_hooks, t_app, t_open, t_event, t_paint, t_pres, t_theme, t_app_bytes
 global calc_count, nblocks, da_top, da_base, view, cur_blk, cur_off, anc_blk
 global anc_off, ed_on, pres_on, pres_slide, sl_n, modified, doc_name, st_msg
 global blocks, scroll_y
@@ -288,6 +289,13 @@ t_event:
 t_paint:
     WIN_SAVE
     call paint_all
+    WIN_RESTORE
+    ret
+
+t_theme:
+    WIN_SAVE
+    mov edi, ecx
+    call app_theme
     WIN_RESTORE
     ret
 

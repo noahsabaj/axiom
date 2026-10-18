@@ -42,8 +42,7 @@ TH_BYTES        equ TH_W * TH_H * 4
 PIC_W           equ 480
 PIC_H           equ 270
 
-C_CARD          equ 0xFBFBFD            ; a slide's frame on a page
-C_SLIDE_RING    equ C_ACCENT
+%define C_SLIDE_RING    C_ACCENT
 
 section .text
 
@@ -448,7 +447,7 @@ paint_cards:
     mov edx, [rbx + LN_W]
     mov ecx, [rbx + LN_H]
     call ring_shadow
-    mov dword [ui_fill], C_CARD
+    PUT_C [ui_fill], C_CARD
     mov edi, [rbx + LN_X0]
     add edi, [vw_ox]
     mov esi, [rbx + LN_Y]
@@ -1312,7 +1311,7 @@ paint_grid:
     mov ecx, 1
     mov r8d, C_HAIRLINE
     call fill_rect
-    mov dword [ui_fill], C_PAPER
+    PUT_C [ui_fill], C_PAPER
     mov edi, 12
     mov esi, VIEW_Y + 7
     mov edx, 72
@@ -1336,7 +1335,7 @@ paint_grid:
     mov r8d, WF_ITALIC * WF_SIZES + WF_PX16
     mov r9d, C_FAINT
     call label
-    mov dword [ui_fill], C_PAPER
+    PUT_C [ui_fill], C_PAPER
     mov edi, 124
     mov esi, VIEW_Y + 7
     mov edx, WIN_W - 136
@@ -1590,7 +1589,7 @@ paint_grid:
     mov r9d, C_INK
     cmp byte [r14 + CE_KIND], VK_ERR
     jne .ink
-    mov r9d, 0xD70015
+    mov r9d, C_ERROR
 .ink:
     lea edi, [rbp + 6]
     cmp dword [rsp + 8], 0
@@ -1608,7 +1607,7 @@ paint_grid:
     mov r9d, C_INK
     cmp byte [r14 + CE_KIND], VK_ERR
     jne .draw_cell
-    mov r9d, 0xD70015
+    mov r9d, C_ERROR
 .draw_cell:
     call label
     mov edi, GV_HEAD_W
@@ -1725,7 +1724,7 @@ paint_tabs:
     inc dword [gv_ntabs]
     cmp ebx, [cur_blk]
     jne .plain
-    mov dword [ui_fill], C_PAPER
+    PUT_C [ui_fill], C_BUTTON
     mov edi, r12d
     mov esi, GV_BOTTOM + 5
     mov edx, r13d
@@ -1791,7 +1790,7 @@ paint_toolbar:
     mov ecx, SEG_H - 4
     mov r8d, 7
     mov r9d, C_BUTTON_EDGE
-    mov dword [ui_fill], C_PAPER
+    PUT_C [ui_fill], C_BUTTON
     call frame_round
     xor ebx, ebx
 .seg:

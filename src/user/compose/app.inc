@@ -22,6 +22,8 @@
 ;      .txt or .csv imported), or a new one of that name
 ;    app_event(EDI = WE_*, ESI = its code, EDX = x, ECX = y, R8D = 1 if it
 ;      is the presenter's window's) -> EAX = AE_* to do
+;    app_theme(EDI = 1 if the system's theme is dark, 0 if light) -> EAX =
+;      AE_* to do: compose follows it, unless it was set light or dark
 ; =============================================================================
 
 ; keys, as kbd.asm sends them
@@ -65,6 +67,11 @@ ACT_PRESENT     equ 12
 ACT_SAVE        equ 13
 ACT_ROW         equ 14
 ACT_COL         equ 15
+ACT_THEME       equ 16
+
+THEME_AUTO      equ 0                   ; as the system's theme is
+THEME_LIGHT     equ 1
+THEME_DARK      equ 2
 
 SEG_X           equ 16                  ; the views' control
 SEG_Y           equ 10
@@ -140,6 +147,7 @@ app_init:
     mov ecx, NAME_MAX
     call str_copy
     call doc_new
+    call theme_load
     xor eax, eax
 .out:
     ret
@@ -1019,6 +1027,8 @@ on_key:
     je .f3
     cmp ebx, KEY_F1 + 4
     je .f5
+    cmp ebx, KEY_F1 + 6
+    je .f7
     cmp ebx, KEY_F1 + 8
     je .f9
     cmp ebx, KEY_F1 + 9
@@ -1187,6 +1197,9 @@ on_key:
     mov eax, AE_PAINT | AE_PRESENT
     pop rbx
     ret
+.f7:
+    call k_theme
+    jmp .paint
 .f9:
     call export_text
     jmp .paint
@@ -1360,7 +1373,7 @@ grid_at_end:
 
 ; act(EDI = ACT_*)
 act:
-    cmp edi, ACT_COL
+    cmp edi, ACT_THEME
     ja .out
     lea rax, [act_calls]
     mov rax, [rax + rdi * 8]
@@ -1869,6 +1882,115 @@ dump:
     pop rbx
     ret
 
+; --- the theme ----------------------------------------------------------------
+
+; app_theme(EDI = 1 if the system's theme is dark) -> EAX = AE_* to do
+app_theme:
+    xor eax, eax
+    cmp dil, [sys_dark]
+    je .out
+    mov [sys_dark], dil
+    cmp byte [theme_mode], THEME_AUTO
+    jne .out                            ; set light or dark here: kept
+    call theme_apply
+    call theme_log
+    mov eax, AE_PAINT
+    cmp byte [pres_on], 0
+    je .out
+    or eax, AE_PRESENT
+.out:
+    ret
+
+; k_theme: auto, then light, then dark, then auto again; kept in the store
+k_theme:
+    movzx eax, byte [theme_mode]
+    inc eax
+    cmp eax, THEME_DARK
+    jbe .set
+    xor eax, eax
+.set:
+    mov [theme_mode], al
+    call theme_apply
+    call theme_log
+    jmp theme_save
+
+; theme_apply: the colours as theme_mode and sys_dark have them; the
+; thumbnails drawn again in them
+theme_apply:
+    movzx eax, byte [theme_mode]
+    lea rcx, [theme_labels]
+    mov rcx, [rcx + rax * 8]
+    mov [theme_label], rcx
+    xor edi, edi
+    cmp eax, THEME_LIGHT
+    je .set
+    inc edi
+    cmp eax, THEME_DARK
+    je .set
+    movzx edi, byte [sys_dark]
+.set:
+    mov [dark], dil
+    call ui_theme
+    mov dword [thumb_gen], -1
+    mov byte [thumbs_all], 1
+    ret
+
+; theme_log: "compose: theme auto, dark"
+theme_log:
+    call log_start
+    lea rsi, [s_theme_is]
+    call sb_str
+    movzx eax, byte [theme_mode]
+    lea rsi, [theme_names]
+    mov rsi, [rsi + rax * 8]
+    call sb_str
+    lea rsi, [s_comma_light]
+    cmp byte [dark], 0
+    je .shown
+    lea rsi, [s_comma_dark]
+.shown:
+    call sb_str
+    jmp log_sb
+
+; theme_save: theme_mode into the store, as "auto", "light" or "dark"
+theme_save:
+    movzx eax, byte [theme_mode]
+    lea rsi, [theme_names]
+    mov rsi, [rsi + rax * 8]
+    mov rdi, [save_buf]
+    xor edx, edx
+.copy:
+    mov al, [rsi + rdx]
+    test al, al
+    jz .copied
+    mov [rdi + rdx], al
+    inc edx
+    jmp .copy
+.copied:
+    mov byte [rdi + rdx], 10
+    inc edx
+    lea rsi, [s_theme_file]
+    jmp plat_save
+
+; theme_load: theme_mode from the store (auto if it has none), and applied
+theme_load:
+    mov byte [theme_mode], THEME_AUTO
+    lea rsi, [s_theme_file]
+    call plat_load
+    test rax, rax
+    jle .apply
+    mov rsi, [save_buf]
+    mov al, [rsi]
+    cmp al, 'l'
+    jne .dark
+    mov byte [theme_mode], THEME_LIGHT
+.dark:
+    cmp al, 'd'
+    jne .apply
+    mov byte [theme_mode], THEME_DARK
+.apply:
+    jmp theme_apply
+
 section .rodata
 s_untitled:     db 'untitled.axd', 0
 s_dir:          db 0                    ; (the store's names are compose's own)
@@ -1928,6 +2050,16 @@ s_b_slide:      db '+ Slide', 0
 s_b_image:      db '+ Image', 0
 s_b_present:    db 'Present', 0
 s_b_save:       db 'Save', 0
+s_th_auto:      db 'Auto', 0
+s_th_light:     db 'Light', 0
+s_th_dark:      db 'Dark', 0
+s_theme_auto:   db 'auto', 0
+s_theme_light:  db 'light', 0
+s_theme_dark:   db 'dark', 0
+s_theme_is:     db 'theme ', 0
+s_comma_light:  db ', light', 0
+s_comma_dark:   db ', dark', 0
+s_theme_file:   db 'theme', 0
 s_b_row:        db '+ Row', 0
 s_b_col:        db '+ Column', 0
 s_b_grid:       db '+ Grid', 0
@@ -1944,6 +2076,9 @@ ctrl_keys:      dq 0, k_all, k_bold, k_copy, k_strike, k_italic, 0, k_image ; 0-
                 dq k_cut, k_redo, k_undo, 0, 0, 0, 0, k_col           ; 24-31
 act_calls:      dq 0, k_bold, k_italic, k_under, a_h1, a_h2, a_text, a_bullet
                 dq a_number, k_table, k_slide, k_image, k_present, k_save, k_row, k_col
+                dq k_theme
+theme_labels:   dq s_th_auto, s_th_light, s_th_dark
+theme_names:    dq s_theme_auto, s_theme_light, s_theme_dark
 
 BT_RIGHT        equ WIN_W - 16
 buttons:
@@ -1961,6 +2096,7 @@ buttons:
     BUTTON 290, 80, ACT_ROW, VG, BS_PLAIN, UI_FONT, s_b_row, 0
     BUTTON 376, 104, ACT_COL, VG, BS_PLAIN, UI_FONT, s_b_col, 0
     BUTTON 490, 84, ACT_TABLE, VG, BS_PLAIN, UI_FONT, s_b_grid, 0
+    BUTTON BT_RIGHT - 80 - 10 - 104 - 10 - 76, 76, ACT_THEME, VP | VS | VG, BS_PLAIN, UI_FONT, 0, 0
     BUTTON BT_RIGHT - 80 - 10 - 104, 104, ACT_PRESENT, VP | VS | VG, BS_PRIMARY, UI_BOLD, s_b_present, 0
     BUTTON BT_RIGHT - 80, 80, ACT_SAVE, VP | VS | VG, BS_PLAIN, UI_FONT, s_b_save, 0
     times BT_SIZE db 0
@@ -1981,5 +2117,10 @@ st_msg:         resb 96
 pres_on:        resb 1
 dragging:       resb 1
 quitting:       resb 1
+theme_mode:     resb 1                  ; THEME_*
+sys_dark:       resb 1                  ; the system's theme: 1 dark
+dark:           resb 1                  ; what is shown
+alignb 8
+theme_label:    resq 1                  ; the theme button's (theme_labels)
 
 section .text

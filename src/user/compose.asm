@@ -14,12 +14,14 @@
 ;  The keys and the file format are in docs/COMPOSE.md.
 ;
 ;  What compose does is compose/app.inc and what it includes; this file is
-;  its platform: memory, the windows, their events, the store. It says
+;  its platform: memory, the windows, their events, the store, and the
+;  system's theme (display.theme, through the settings, if it was given
+;  them), which compose follows unless F7 set it light or dark. It says
 ;  "compose: ..." on the console as it opens, saves and presents.
 ; =============================================================================
 
 %include "axe.inc"
-WANTS AW_DESK | AW_STORE
+WANTS AW_DESK | AW_STORE | AW_SETTINGS
 
 PRES_W          equ 1600                ; the presenter's window
 PRES_H          equ 900
@@ -28,6 +30,8 @@ IO_WHY          equ 64                  ; why it was saved,
 IO_DATA         equ 4096                ; then the document (save_buf)
 ST_BYTES        equ IO_DATA + SAVE_MAX
 POLL_US         equ 15000               ; presenting: each window this often
+THEME_US        equ 500000              ; the system's theme: looked at this often
+SET_BYTES       equ 32 * SI_SIZE        ; the settings, read into this
 
 main:
     push rbx
@@ -79,6 +83,8 @@ main:
     call app_init
     test rax, rax
     js .refused
+    call set_init
+    call sys_theme
     lea rsi, [arg_name]
     cmp byte [rsi], 0
     jne .open
@@ -88,9 +94,13 @@ main:
     call paint_main
 .event:
     xor ecx, ecx                        ; wait: for ever, or a while if presenting
+    mov edi, POLL_US                    ; or the theme is to be looked at
     cmp byte [pres_on], 0
+    jne .until
+    mov edi, THEME_US
+    cmp qword [set_va], 0
     je .wait
-    mov edi, POLL_US
+.until:
     call ax_us
     mov rbx, rax
     call ax_now
@@ -121,7 +131,8 @@ main:
     jz .drain
     jmp .act
 .presenter:
-    xor ebx, ebx
+    call sys_theme                      ; (it ran out: the theme looked at)
+    mov ebx, eax
 .presenter_too:
     cmp byte [pres_on], 0
     je .act
@@ -447,6 +458,84 @@ plat_load:
 plat_mem:
     jmp mem_new
 
+; set_init: a page for the settings, if compose was given them
+set_init:
+    cmp dword [ax_settings], 0
+    je .out
+    mov edi, SET_BYTES
+    mov eax, SYS_MEM_NEW
+    syscall
+    test rax, rax
+    js .out
+    mov [set_mem], eax
+    mov edi, eax
+    mov eax, SYS_MAP
+    syscall
+    test rax, rax
+    js .out
+    mov [set_va], rax
+.out:
+    ret
+
+; sys_theme -> EAX = AE_* to do: display.theme read (at most each
+; THEME_US), and compose told (app_theme) whether it is dark
+sys_theme:
+    cmp qword [set_va], 0
+    je .none
+    call ax_now
+    cmp rax, [theme_next]
+    jb .none
+    push rax
+    mov edi, THEME_US
+    call ax_us
+    pop rcx
+    add rax, rcx
+    mov [theme_next], rax
+    xor eax, eax
+    sub rsp, SQ_SIZE
+    mov rdi, rsp
+    mov ecx, SQ_SIZE / 8
+    rep stosq
+    mov byte [rsp + SQ_OP], RO_SET_LIST
+    mov eax, [ax_settings]
+    mov [rsp + SQ_HANDLE], eax
+    mov eax, [set_mem]
+    mov [rsp + SQ_HANDLE2], eax
+    mov qword [rsp + SQ_A1], SET_BYTES
+    mov rdi, rsp
+    call ax_do
+    add rsp, SQ_SIZE
+    test rax, rax
+    jle .none
+    cmp eax, SET_BYTES / SI_SIZE
+    jbe .fits
+    mov eax, SET_BYTES / SI_SIZE
+.fits:
+    mov ecx, eax
+    mov rdx, [set_va]
+.find:
+    lea rdi, [rdx + SI_NAME]
+    lea rsi, [s_theme]
+.same:
+    mov al, [rsi]
+    cmp al, [rdi]
+    jne .next
+    inc rsi
+    inc rdi
+    test al, al
+    jnz .same
+    xor edi, edi                        ; display.theme: 0 dark, 1 light
+    cmp qword [rdx + SI_VALUE], 0
+    sete dil
+    jmp app_theme
+.next:
+    add rdx, SI_SIZE
+    dec ecx
+    jnz .find
+.none:
+    xor eax, eax
+    ret
+
 plat_present:
     test edi, edi
     jz .close
@@ -511,6 +600,7 @@ s_refused:      db 'compose: refused, ', 0
 s_closed:       db 'closed', 0
 s_why:          db 'compose: ', 0
 s_pres_title:   db 'Presenting ', 0xE2, 0x80, 0x94, ' Compose', 0
+s_theme:        db 'display.theme', 0
 
 section .bss
 alignb 8
@@ -518,7 +608,10 @@ st_va:          resq 1
 win:            resb W_SIZE
 pres:           resb W_SIZE
 ev:             resb WE_SIZE
+set_va:         resq 1                  ; the settings' page, if there are any
+theme_next:     resq 1                  ; when to look at the theme again
 st_mem:         resd 1
+set_mem:        resd 1
 arg_name:       resb NAME_MAX + 8
 
 AXE_END

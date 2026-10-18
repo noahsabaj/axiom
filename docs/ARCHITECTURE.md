@@ -1242,7 +1242,8 @@ text rows.
 ## Compose: `src/user/compose.asm`, `src/user/compose/`
 
 - One ring-3 program for documents, slides and spreadsheets, in a
-  1360×900 window, with the desktop and the store capabilities. The whole
+  1360×900 window, with the desktop, the store and the settings
+  capabilities. The whole
   of it is described in `docs/COMPOSE.md`; this is how it is put together.
 - **One model, three views.** A document is a list of blocks (text,
   headings, list items, grids, images, slide frames; `compose/doc.inc`).
@@ -1267,6 +1268,12 @@ text rows.
   format.
 - Text is drawn with `web/draw.inc` and browse's DejaVu faces; the
   presenter scales the slide to its window, bilinear.
+- **Light and dark**: every colour is a slot of `pal` (`ui.inc`), filled
+  from a light or a dark table, and the layout is made again at each
+  paint, so a change of theme is a paint (and the thumbnails again). The
+  platform reads `display.theme` with `RO_SET_LIST` as it starts and every
+  half second it waits, and tells the app (`app_theme`); F7 sets Auto,
+  Light or Dark, kept in the store as `compose/theme`.
 - Each open, save, view and slide is logged (`compose: saved report.axd,
   ...`), and F12 logs the document block by block and cell by cell, which
   `tools/test/compose/run.py` reads.
@@ -1561,8 +1568,8 @@ capabilities it says it needs.
   net`). Several run at once: `&` at the end of a command runs it in the
   background, the job's task number said, and `tasks` lists them. A
   program gets only the capabilities it declares in its header (paint: the
-  desktop; browse: the desktop and the network; compose: the desktop and
-  the store; net: the network; stash:
+  desktop; browse: the desktop and the network; compose: the desktop,
+  the store and the settings; net: the network; stash:
   the store; the rest nothing); `+net`, `+store` and `+desk` before its name
   grant more, for that run (`+net hello`). Commands take neither grants nor
   `&`, and a program in the background takes no `|` or `>`.

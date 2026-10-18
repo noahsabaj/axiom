@@ -71,6 +71,7 @@ long is fine.
 | ctrl+Z, ctrl+Y | undo, redo (typing in one block is one change; 100 kept) |
 | ctrl+A, ctrl+C, ctrl+X, ctrl+V | everything, copy, cut, paste (inside compose) |
 | ctrl+S | save into the store, and commit |
+| F7 | the theme: auto (as the system's), light, dark; the toolbar's button too |
 | F9, F10 | export NAME.txt, NAME.csv (the cursor's grid, or the first one) |
 | F12 | the document, block by block, on the console |
 | ctrl+Q, ctrl+W | close |
@@ -84,6 +85,19 @@ On a grid:
 The mouse places the cursor and dragging selects. The toolbar has the views,
 the styles, the inserts, Present and Save. In the Grid view you can click a
 cell, the formula bar, or a grid's tab. The wheel scrolls.
+
+## Light and dark
+
+Compose is light or dark, all of it: the toolbar, the pages, the slides, the
+presenter and the grid. As it starts, it is as the system's theme is
+(`display.theme`, read through compose's settings capability), and it
+follows a change to it (`settings set display.theme light`) within half a
+second.
+
+F7, or the theme button left of Present, goes from Auto to Light to Dark
+and back to Auto. Light and Dark hold whatever the system's theme is. The
+choice is kept in the store as `compose/theme` (`auto`, `light` or `dark`),
+so the next document opens the same way.
 
 ## Files
 
@@ -135,7 +149,7 @@ snapshot of the document in it before each change.
 ## Inside
 
 compose.asm is only a platform layer. It handles the memory, the window and
-the presenter's window, their events, and the store. Everything else is in
+the presenter's window, their events, the store, and the system's theme. Everything else is in
 src/user/compose/ and is plain code: events go in, pixels come out.
 
 | file | what |
@@ -145,7 +159,7 @@ src/user/compose/ and is plain code: events go in, pixels come out.
 | file.inc | the .axd format, plain text, CSV |
 | layout.inc | pages, slides and frame cards laid out: a display list and a line table |
 | edit.inc | the cursor, selection, typing, structure, cells, undo, the clipboard |
-| ui.inc | colours, rounded rectangles, shadows, buttons (to follow the desktop's themes) |
+| ui.inc | the light and dark colours, rounded rectangles, shadows, buttons |
 | view.inc | the toolbar, each view, the thumbnails, the presenter (scaled bilinear) |
 | app.inc | keys, clicks, the wheel, saving, opening, presenting |
 

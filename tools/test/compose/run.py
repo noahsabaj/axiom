@@ -7,12 +7,14 @@ The boot has a blank NVMe drive (serial AXIOMTEST) for the store, the boot
 stick, and a USB tablet. In it, by keyboard and mouse:
   - 'store format', then 'compose report &': a new document, its window;
   - a heading, text, a table typed cell by cell with formulas (=SUM,
-    =C2+C3), checked from F12's log of the document;
-  - a slide frame; Slides (F2), PgUp to the first; F5 presents in a window of its own, the
-    arrow key moves on, Esc ends it;
+    =C2+C3), checked from F12's log of the document; dark, as the system's
+    theme is, then light after 'settings set display.theme light';
+  - a slide frame; Slides (F2), PgUp to the first; F5 presents in a window
+    of its own, the arrow key moves on, Esc ends it;
   - Grid (F3), a click on a cell, a formula over the table's totals;
+  - F7 twice: light, then dark, whatever the system's;
   - ctrl+S saves into the store and commits; ctrl+Q closes it;
-  - 'compose report &' again: the same document, the same values;
+  - 'compose report &' again: the same document, the same values, dark;
   - screenshots of each view and the presenter.
 --quick skips the host's tests. Outputs go to build/test/compose/.
 """
@@ -34,6 +36,7 @@ WX, WY = 100, 100                               # compose's frame, once moved
 BORDER, TITLE = 1, 45
 SHELL1 = (150, 1500)                            # in shell 1, below compose's windows
 ACCENT = (0x0A, 0x84, 0xFF)
+DARK_PAPER = (0x1C, 0x1C, 0x1F)
 
 
 def at(x, y):
@@ -98,6 +101,10 @@ def script():
         *press("The grid works the totals out."), "wait 0.5",
         shot("pages"),
         "sendkey f12", "until compose: document", "wait 0.5",
+        f"abs {at(*SHELL1)} left", "wait 0.5",               # the system's theme: light
+        "type settings set display.theme light\\n", "until compose: theme auto, light",
+        "wait 0.5", shot("pages_light"),
+        f"abs {at(WX + 60, WY + 20)} left", "wait 0.5",      # compose's title: the keys back
         "sendkey ctrl-k", "wait 0.3",
         *press("Highlights\nRevenue up 12 percent\n"),
         "sendkey f2", "until compose: view slides", "wait 0.5",
@@ -115,6 +122,8 @@ def script():
         *press("=B4+C4\n"), "wait 0.5",
         shot("grid"),
         "sendkey f12", "until compose: document", "wait 0.5",
+        "sendkey f7", "until compose: theme light, light", "wait 0.3",   # light, then dark,
+        "sendkey f7", "until compose: theme dark, dark", "wait 0.3",     # whatever the system's
         "sendkey ctrl-s", "until compose: saved report.axd", "wait 0.5",
         "sendkey ctrl-q", "until run: COMPOSE exited", "wait 0.5",
         f"abs {at(*SHELL1)} left", "wait 0.3",
@@ -176,7 +185,13 @@ def check(log, err):
     result(len(blocks) == 2 and blocks[0] == blocks[1], "opened again: the same blocks")
     result("compose: closed" in log, "ctrl+Q closes it")
     result(near(pixel("pages.png", *client(1158, 26)), ACCENT), "on the screen: its toolbar")
-    result(near(pixel("pages.png", *client(680, 100)), (255, 255, 255), 2), "a page")
+    result("compose: theme auto, dark" in log, "the system's theme, dark, followed")
+    result(near(pixel("pages.png", *client(300, 120)), DARK_PAPER, 2), "a page, dark")
+    result(near(pixel("pages_light.png", *client(300, 120)), (255, 255, 255), 2),
+           "'settings set display.theme light': the page, light")
+    result("compose: theme dark, dark" in log, "F7: light, then dark")
+    result(near(pixel("reopened.png", *client(800, 500)), DARK_PAPER, 2),
+           "opened again: dark, as F7 left it, though the system's is light")
     result("AXIOM PANIC" not in log, "no panic")
     result("QEMU ended by itself" in err, "powered off")
 

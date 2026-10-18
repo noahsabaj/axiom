@@ -3,7 +3,7 @@
 ;  (px_base, px_stride, the clip): blended rectangles, rounded ones with
 ;  anti-aliased corners, labels, buttons. All of compose's look is here and
 ;  in the colours below, so it can follow the desktop's shared widgets and
-;  themes when they come.
+;  themes when they come. The colours are light or dark (ui_theme).
 ;    blend_rect(EDI = x, ESI = y, EDX = w, ECX = h, R8D = colour, R9D =
 ;      alpha 0-255)
 ;    fill_round(EDI, ESI, EDX, ECX, R8D = radius, R9D = colour)
@@ -19,28 +19,64 @@
 ;  Each preserves RBX, RBP, R12-R15.
 ; =============================================================================
 
-; colours: compose's theme
-C_WINDOW        equ 0xF2F2F5            ; behind the pages
-C_CHROME        equ 0xF7F7F8            ; the toolbar, the status line
-C_HAIRLINE      equ 0xD9D9DE
-C_INK           equ 0x1D1D1F
-C_SECOND        equ 0x6E6E73
-C_FAINT         equ 0xAEAEB2
-C_ACCENT        equ 0x0A84FF            ; the system blue
-C_ACCENT_DK     equ 0x0060DF
-C_SELECT        equ 0xB4D5FE            ; text chosen
-C_PAPER         equ 0xFFFFFF
-C_BUTTON        equ 0xFFFFFF
-C_BUTTON_EDGE   equ 0xD1D1D6
-C_BUTTON_ON     equ 0xE4EEFE
-C_PRESSED       equ 0xE0E0E5
-C_SEG_TRACK     equ 0xE5E5EA
-C_TABLE_HEAD    equ 0xF2F2F7
-C_TABLE_LINE    equ 0xD1D1D6
-C_GRID_LINE     equ 0xE0E0E5
-C_GRID_HEAD     equ 0xF5F5F7
-C_SIDEBAR       equ 0xECECEF
-C_BLACK         equ 0x000000
+; colours: compose's theme, light or dark. Each C_* is a dword of pal,
+; which ui_theme fills from pal_light or pal_dark; so a colour is read
+; (mov r8d, C_INK), and put into memory through a register (PUT_C).
+P_WINDOW        equ 0                   ; behind the pages
+P_CHROME        equ 4                   ; the toolbar, the status line
+P_HAIRLINE      equ 8
+P_INK           equ 12
+P_SECOND        equ 16
+P_FAINT         equ 20
+P_ACCENT        equ 24                  ; the system blue
+P_ACCENT_DK     equ 28                  ; pressed, and lit labels
+P_SELECT        equ 32                  ; text chosen
+P_PAPER         equ 36                  ; pages, slides, cells
+P_BUTTON        equ 40
+P_BUTTON_EDGE   equ 44
+P_BUTTON_ON     equ 48
+P_PRESSED       equ 52
+P_SEG_TRACK     equ 56
+P_TABLE_HEAD    equ 60
+P_TABLE_LINE    equ 64
+P_GRID_LINE     equ 68
+P_GRID_HEAD     equ 72
+P_SIDEBAR       equ 76
+P_CARD          equ 80                  ; a slide's frame on a page
+P_ERROR         equ 84                  ; a cell's error
+P_BYTES         equ 88
+
+%define C_WINDOW        dword [pal + P_WINDOW]
+%define C_CHROME        dword [pal + P_CHROME]
+%define C_HAIRLINE      dword [pal + P_HAIRLINE]
+%define C_INK           dword [pal + P_INK]
+%define C_SECOND        dword [pal + P_SECOND]
+%define C_FAINT         dword [pal + P_FAINT]
+%define C_ACCENT        dword [pal + P_ACCENT]
+%define C_ACCENT_DK     dword [pal + P_ACCENT_DK]
+%define C_SELECT        dword [pal + P_SELECT]
+%define C_PAPER         dword [pal + P_PAPER]
+%define C_BUTTON        dword [pal + P_BUTTON]
+%define C_BUTTON_EDGE   dword [pal + P_BUTTON_EDGE]
+%define C_BUTTON_ON     dword [pal + P_BUTTON_ON]
+%define C_PRESSED       dword [pal + P_PRESSED]
+%define C_SEG_TRACK     dword [pal + P_SEG_TRACK]
+%define C_TABLE_HEAD    dword [pal + P_TABLE_HEAD]
+%define C_TABLE_LINE    dword [pal + P_TABLE_LINE]
+%define C_GRID_LINE     dword [pal + P_GRID_LINE]
+%define C_GRID_HEAD     dword [pal + P_GRID_HEAD]
+%define C_SIDEBAR       dword [pal + P_SIDEBAR]
+%define C_CARD          dword [pal + P_CARD]
+%define C_ERROR         dword [pal + P_ERROR]
+C_BLACK         equ 0x000000            ; shadows, the presenter's bars
+
+; PUT_C [memory], C_*: a colour put into a dword. Preserves all.
+%macro PUT_C 2
+    push rax
+    mov eax, %2
+    mov %1, eax
+    pop rax
+%endmacro
 
 UI_FONT         equ WF_SANS * WF_SIZES + WF_PX16
 UI_BOLD         equ WF_BOLD * WF_SIZES + WF_PX16
@@ -519,6 +555,10 @@ button:
     add eax, ecx
     mov [ui_mid], eax
     mov rsi, [rbx + BT_LABEL]
+    test rsi, rsi                       ; none: the theme's (theme_label)
+    jnz .labelled_by
+    mov rsi, [theme_label]
+.labelled_by:
     xor ecx, ecx
 .len:
     cmp byte [rsi + rcx], 0
@@ -538,7 +578,7 @@ button:
 .ink:
     cmp byte [rbx + BT_STYLE], BS_PRIMARY
     jne .labelled
-    mov r9d, C_PAPER
+    mov r9d, 0xFFFFFF                   ; white on the accent, light or dark
 .labelled:
     call label_c
     pop r15
@@ -548,7 +588,28 @@ button:
     pop rbx
     ret
 
+; ui_theme(EDI = 1 for dark, 0 for light): pal from that theme's colours
+ui_theme:
+    lea rsi, [pal_light]
+    test edi, edi
+    jz .copy
+    lea rsi, [pal_dark]
+.copy:
+    lea rdi, [pal]
+    mov ecx, P_BYTES / 4
+    rep movsd
+    ret
+
 section .rodata
+align 4
+pal_light:      dd 0xF2F2F5, 0xF7F7F8, 0xD9D9DE, 0x1D1D1F, 0x6E6E73, 0xAEAEB2
+                dd 0x0A84FF, 0x0060DF, 0xB4D5FE, 0xFFFFFF, 0xFFFFFF, 0xD1D1D6
+                dd 0xE4EEFE, 0xE0E0E5, 0xE5E5EA, 0xF2F2F7, 0xD1D1D6, 0xE0E0E5
+                dd 0xF5F5F7, 0xECECEF, 0xFBFBFD, 0xD70015
+pal_dark:       dd 0x111113, 0x232326, 0x38383C, 0xEDEDF0, 0x9A9AA0, 0x5E5E64
+                dd 0x0A84FF, 0x4DA3FF, 0x2A4A73, 0x1C1C1F, 0x333337, 0x48484D
+                dd 0x1D3557, 0x45454A, 0x141416, 0x29292D, 0x46464B, 0x2E2E32
+                dd 0x242427, 0x1A1A1D, 0x262629, 0xFF6961
 align 8
 ui_half:        dq 0.5
 ui_one:         dq 1.0
@@ -557,6 +618,7 @@ shadow_alpha:   db 6, 10, 18
 
 section .bss
 alignb 4
+pal:            resd P_BYTES / 4        ; the colours now (ui_theme)
 ui_fill:        resd 1
 ui_mid:         resd 1
 ui_alpha:       resd 1

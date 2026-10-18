@@ -1070,7 +1070,7 @@ lay_blocks:
     je .frame
     mov dword [lt_kind], -1
     mov dword [lt_align], -1
-    mov dword [lt_colour], C_INK
+    PUT_C [lt_colour], C_INK
     mov edi, ebx
     mov esi, r13d
     mov edx, r14d
@@ -1104,7 +1104,7 @@ lay_blocks:
 .frame_text:                            ; (never nested: its title, as text)
     mov dword [lt_kind], BK_H1
     mov dword [lt_align], -1
-    mov dword [lt_colour], C_INK
+    PUT_C [lt_colour], C_INK
     mov edi, ebx
     mov esi, r13d
     mov edx, r14d
@@ -1242,7 +1242,7 @@ lay_slide_at:
     mov [lc_y], eax
     mov dword [lt_kind], BK_SLIDE
     mov dword [lt_align], AL_CENTER
-    mov dword [lt_colour], C_INK
+    PUT_C [lt_colour], C_INK
     mov edi, ebx
     mov esi, r14d
     add esi, [ls_m]
@@ -1261,7 +1261,7 @@ lay_slide_at:
     add [lc_y], eax
     mov dword [lt_kind], -1
     mov dword [lt_align], AL_CENTER
-    mov dword [lt_colour], C_SECOND
+    PUT_C [lt_colour], C_SECOND
     mov edi, r12d
     mov esi, r14d
     add esi, [ls_m]
@@ -1281,7 +1281,7 @@ lay_slide_at:
     je .body
     mov dword [lt_kind], BK_SLIDE
     mov dword [lt_align], -1
-    mov dword [lt_colour], C_INK
+    PUT_C [lt_colour], C_INK
     mov edi, ebx
     mov esi, r14d
     add esi, [ls_m]
