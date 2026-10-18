@@ -18,7 +18,8 @@ Two boots, one after the other, from the same USB stick:
     hello), the power button doing what power.button says, and 'settings
     reset all' leaving SETTINGS.TXT without a setting.
 The look is the desktop's theme (theme.asm): the shell's 'theme' and the
-settings change the same thing, and each says what the other did.
+settings change the same thing (its look, its accent, teal among them, and
+its scale, display.scale), and each says what the other did.
 Outputs go to build/test/settings/.
 """
 import pathlib
@@ -44,7 +45,7 @@ BORDER, TITLE = 0, 28 * 2                       # its title bar, 28 points at 2 
 LIGHT_SIDE, DARK_SIDE = (0xE5, 0xE5, 0xEA), (0x0A, 0x0D, 0x13)
 BAR_SPOT = (1500, 3)                            # an empty part of the menu bar
 SIDE_SPOT = (20, 760)                           # the app's sidebar, under its categories
-SETTINGS_N = 18
+SETTINGS_N = 19
 
 
 def result(ok, text):
@@ -78,6 +79,14 @@ def said(text):
     return lambda lines: any(text in l for l in lines)
 
 
+def scale(lines):
+    """'theme''s record -> its scale, as a number."""
+    try:
+        return float(record(lines).get("scale", ""))
+    except ValueError:
+        return None
+
+
 def values(lines):
     return {r.get("name"): r.get("value") for r in table(lines)}
 
@@ -107,10 +116,11 @@ FIRST = [
     ("settings display.text-size", lambda l: record(l).get("applies") == "at the next start",
      "a setting for the next start says so"),
     ("settings display", lambda l: [r["name"] for r in table(l)] ==
-     ["display.theme", "display.accent", "display.text-size"], "settings <category>"),
+     ["display.theme", "display.accent", "display.text-size", "display.scale"],
+     "settings <category>"),
     ("settings keyboard.*", lambda l: [r["name"] for r in table(l)] ==
      ["keyboard.repeat-delay", "keyboard.repeat-rate", "keyboard.layout"], "settings <pattern>"),
-    ("settings | where name ~ display*", lambda l: len(table(l)) == 3,
+    ("settings | where name ~ display*", lambda l: len(table(l)) == 4,
      "settings | where name ~ display*"),
     ("settings | count", said(str(SETTINGS_N)), "settings | count"),
     ("settings nope", said("settings: no setting is called 'nope' ('settings' lists them)"),
@@ -131,6 +141,20 @@ FIRST = [
      "theme accent: the desktop's theme"),
     ("settings display.accent", lambda l: record(l).get("value") == "green",
      "theme accent green: kept as display.accent"),
+    ("theme accent teal", lambda l: record(l).get("accent") == "teal", "theme accent teal"),
+    ("settings display.accent", lambda l: record(l).get("value") == "teal",
+     "theme accent teal: kept as display.accent"),
+    ("settings set display.accent green", lambda l: values(l).get("display.accent") == "green",
+     "display.accent green, as a name"),
+    ("settings set display.scale 1.5x", lambda l: values(l).get("display.scale") == "1.5x",
+     "display.scale 1.5x"),
+    ("theme", lambda l: scale(l) == 1.5, "display.scale 1.5x: the desktop drawn at it, at once"),
+    ("theme scale 5", lambda l: scale(l) == 1.25, "theme scale 5"),
+    ("settings display.scale", lambda l: record(l).get("value") == "1.25x",
+     "theme scale 5: kept as display.scale"),
+    ("settings reset display.scale", lambda l: values(l).get("display.scale") == "auto",
+     "display.scale auto, by default"),
+    ("theme", lambda l: scale(l) == 2, "display.scale auto: the screen's own (2x at 2560x1600)"),
     ("settings set desktop.wallpaper dusk", lambda l: values(l).get("desktop.wallpaper") ==
      "dusk", "desktop.wallpaper: one of the theme's wallpapers"),
     ("theme light", lambda l: record(l).get("look") == "light", "theme light"),
@@ -176,14 +200,14 @@ def first_script():
           f"type run settings &{NL}", "until in the background", "wait 4",
           f"abs {at(*SHELL1)} left", "wait 0.5",
           f"type win{NL}", f"type echo mark''{n}{NL}", f"until mark{n}",
-          f"type win move 5 {WX} {WY}{NL}", "wait 1",
+          f"type win move 5 {WX} {WY}{NL}", "wait 2",
           f"shot {(OUT / 'app-light.png').as_posix()}",
           # the shell changes it: the window follows
           f"type settings set display.theme dark{NL}", "wait 1.5",
           f"shot {(OUT / 'app-dark.png').as_posix()}",
           # clicks in the window
           f"abs {cat(0)} left", "wait 0.5",
-          f"abs {app(862 + 42, 280)} left", "wait 0.7",          # accent: blue
+          f"abs {app(862, 280)} left", "wait 0.7",               # accent: blue
           f"abs {cat(2)} left", "wait 0.5",
           f"abs {app(950, 160)} left", "wait 0.7",               # repeat delay: 1100 ms
           f"abs {cat(3)} left", "wait 0.5",

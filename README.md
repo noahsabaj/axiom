@@ -62,8 +62,8 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   the keys or its scrollbar; links clicked, redirects followed, `#anchors`
   scrolled to. No CSS, images or scripts yet.
 - **Settings**, one store of them in the kernel, typed and described: the
-  look (`display.theme` dark or light, `display.accent`, the wallpaper, the
-  bar's clock), the text size, the keyboard's repeat and layout (US, Dvorak,
+  look (`display.theme` dark or light, `display.accent`, `display.scale`,
+  the wallpaper, the bar's clock), the text size, the keyboard's repeat and layout (US, Dvorak,
   Colemak), the pointer's speed and natural scrolling, the time zone, the
   machine's name (for DHCP and Linux), IPv4 by DHCP or by hand, what the
   power button does, the log, and Claude's model. `settings` lists them as

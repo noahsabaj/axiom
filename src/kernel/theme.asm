@@ -4,7 +4,7 @@
 ;
 ;  Colors have names (TC_*): the desktop and the windows draw with th_c +
 ;  TC_*, never with a color of their own, so a theme changes all of them.
-;  The accent (th_accent) is one of eight, each with a light and a dark
+;  The accent (th_accent) is one of nine, each with a light and a dark
 ;  shade. Text a terminal was given keeps the color it was written in (the
 ;  dark theme's COL_*); theme_color says what each of those is now.
 ;
@@ -16,10 +16,11 @@
 ;  computed at a quarter of the size, then drawn smooth and dithered. It is
 ;  the theme's own (aurora: night or day), or one desktop.wallpaper names.
 ;
-;  The look, the accent and the wallpaper are settings (settings.asm:
-;  display.theme, display.accent, desktop.wallpaper): kept on the stick,
-;  and changed from the shell's 'settings set' or a Settings window as from
-;  here (cfg_theme, cfg_set_look). The scale is this boot's.
+;  The look, the accent, the scale and the wallpaper are settings
+;  (settings.asm: display.theme, display.accent, display.scale,
+;  desktop.wallpaper): kept on the stick, and changed from the shell's
+;  'settings set' or a Settings window as from here (cfg_theme,
+;  cfg_set_look). display.scale auto is th_auto_s4, this screen's own.
 ;
 ;  In the shell, 'theme' is a thing: theme (as it is), theme dark, theme
 ;  light, theme accent <name>, theme scale <1..2 in quarters: 4..8>.
@@ -41,7 +42,7 @@ WL_BOTTOM       equ 4
 WL_BLOBS        equ 8
 WL_SIZE         equ WL_BLOBS + WALL_BLOBS * WB_SIZE
 
-ACCENTS         equ 8
+ACCENTS         equ 9
 
 section .text
 
@@ -64,8 +65,9 @@ theme_init:
     jbe .high
     mov eax, 8
 .high:
+    mov [th_auto_s4], eax
     mov [ui_s4], eax
-    call cfg_theme                      ; th_mode, th_accent_i, th_wall
+    call cfg_theme                      ; th_mode, th_accent_i, th_wall, ui_s4
     call theme_load
     pop rdx
     pop rcx
@@ -490,11 +492,11 @@ theme_set_accent:
     call cfg_set_look
     jmp theme_changed
 .unknown:
-    KLOG "theme: no accent '%s' (blue, purple, pink, red, orange, yellow, green, graphite)", rdi
+    KLOG "theme: no accent '%s' (blue, purple, pink, red, orange, yellow, green, teal, graphite)", rdi
     stc
     ret
 .usage:
-    KLOG "usage: theme accent <blue|purple|pink|red|orange|yellow|green|graphite>"
+    KLOG "usage: theme accent <blue|purple|pink|red|orange|yellow|green|teal|graphite>"
     stc
     ret
 
@@ -510,6 +512,9 @@ theme_set_scale:
     cmp eax, 8
     ja .usage
     mov [ui_s4], eax
+    mov edi, CFG_SCALE                  ; kept, as display.scale (1x: 1)
+    lea esi, [eax - 3]
+    call cfg_set_look
     jmp theme_changed
 .usage:
     KLOG "usage: theme scale <4..8>: pixels a point, in quarters (4: 1, 6: 1.5, 8: 2)"
@@ -580,7 +585,7 @@ theme_map:
     dd 0xF5F543, TC_T_YELLOW2
     dd -1, -1
 
-; the eight accents: dark shade, light shade
+; the nine accents (graphite last, as icons.asm has it): dark shade, light shade
 accent_colors:
     dd 0x0A84FF, 0x007AFF               ; blue
     dd 0xBF5AF2, 0xAF52DE               ; purple
@@ -589,11 +594,12 @@ accent_colors:
     dd 0xFF9F0A, 0xFF9500               ; orange
     dd 0xFFD60A, 0xFFCC00               ; yellow
     dd 0x30D158, 0x28CD41               ; green
+    dd 0x40C8E0, 0x30B0C7               ; teal
     dd 0x98989D, 0x8E8E93               ; graphite
 align 8
 accent_names:
     dq str_ac_blue, str_ac_purple, str_ac_pink, str_ac_red
-    dq str_ac_orange, str_ac_yellow, str_ac_green, str_ac_graphite
+    dq str_ac_orange, str_ac_yellow, str_ac_green, str_ac_teal, str_ac_graphite
 str_ac_blue:    db 'blue', 0
 str_ac_purple:  db 'purple', 0
 str_ac_pink:    db 'pink', 0
@@ -601,6 +607,7 @@ str_ac_red:     db 'red', 0
 str_ac_orange:  db 'orange', 0
 str_ac_yellow:  db 'yellow', 0
 str_ac_green:   db 'green', 0
+str_ac_teal:    db 'teal', 0
 str_ac_graphite: db 'graphite', 0
 
 ; the wallpapers, as desktop.wallpaper's choices have them (settings.asm,
@@ -656,7 +663,7 @@ themes_actions:
     ACTION  '',       theme_show,   '', 'how the desktop looks: light or dark, its accent, its scale'
     ACTION  'dark',   theme_dark,   '', 'the dark look'
     ACTION  'light',  theme_light,  '', 'the light look'
-    ACTION  'accent', theme_set_accent, '<color>', 'the accent: blue, purple, pink, red, orange, yellow, green or graphite'
+    ACTION  'accent', theme_set_accent, '<color>', 'the accent: blue, purple, pink, red, orange, yellow, green, teal or graphite'
     ACTION  'scale',  theme_set_scale, '<4..8>', 'pixels a point, in quarters'
     dq 0, 0, 0, 0, 0
 
@@ -667,6 +674,7 @@ th_mode:        resb 1                  ; TH_*
 th_accent_i:    resb 1                  ; which accent
 th_wall:        resb 1                  ; which wallpaper (walls)
 alignb 4
+th_auto_s4:     resd 1                  ; ui_s4 for this screen (display.scale auto)
 th_accent:      resd 1                  ; its color in this theme
 th_c:           resd TC_COUNT / 4
 alignb 8

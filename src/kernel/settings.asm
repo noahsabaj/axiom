@@ -77,6 +77,7 @@ cfg_table:
         'the colour of the prompt, of headings and of what is chosen'
     SETTING CFG_TEXT_SIZE, 'display.text-size', SK_CHOICE, SIF_RESTART, 0, 0, 0, 0, cfg_sizes, '', 0, \
         'the size of text, and of the bar and the frames with it (auto: the largest that leaves 50 lines)'
+    SETTING CFG_SCALE, 'display.scale', SK_CHOICE, 0, 0, 0, 0, 0, cfg_scales, '', cfg_apply_look,         "the size the desktop is drawn at: its bar, dock and windows (auto: the screen's own)"
     SETTING CFG_WALLPAPER, 'desktop.wallpaper', SK_CHOICE, 0, 0, 0, 0, 0, cfg_walls, '', cfg_apply_look, \
         'what is behind the windows'
     SETTING CFG_CLOCK, 'desktop.clock', SK_CHOICE, 0, 0, 0, 0, 0, cfg_clocks, '', cfg_apply_clock, \
@@ -133,6 +134,13 @@ cfg_sizes:      CNAME 'auto'
                 CNAME 'medium'
                 CNAME 'large'
                 dq 0
+cfg_scales:     CNAME 'auto'             ; theme.asm's ui_s4: 1x is 4
+                CNAME '1x'
+                CNAME '1.25x'
+                CNAME '1.5x'
+                CNAME '1.75x'
+                CNAME '2x'
+                dq 0
 cfg_walls:      CNAME 'aurora'
                 CNAME 'plain'
                 CNAME 'dusk'
@@ -158,6 +166,7 @@ cfg_accents:    SWATCH 'blue', 0x0A84FF ; theme.asm's accents, in accent_colors'
                 SWATCH 'orange', 0xFF9F0A
                 SWATCH 'yellow', 0xFFD60A
                 SWATCH 'green', 0x30D158
+                SWATCH 'teal', 0x40C8E0
                 SWATCH 'graphite', 0x98989D
                 dq 0, 0
 
@@ -1419,7 +1428,7 @@ cfg_save:
 ;  What a change does (SD_APPLY: RDI = the value, on the main thread)
 ; -----------------------------------------------------------------------------
 
-cfg_apply_look:                         ; display.theme, .accent, desktop.wallpaper
+cfg_apply_look:                         ; display.theme, .accent, .scale, desktop.wallpaper
     call cfg_theme
     jc theme_apply                      ; (not when theme.asm made the change)
     ret
@@ -1654,13 +1663,14 @@ cfg_clock:
     ret
 
 ; -----------------------------------------------------------------------------
-;  The look: theme.asm's, from display.theme, display.accent and
-;  desktop.wallpaper. The shell's 'theme' changes them through here too, so
+;  The look: theme.asm's, from display.theme, display.accent,
+;  display.scale and desktop.wallpaper. The shell's 'theme' changes them through here too, so
 ;  what it says is kept and every Settings window hears of it.
 ; -----------------------------------------------------------------------------
 
-; cfg_theme: th_mode, th_accent_i and th_wall from the settings (an accent
-; that is no swatch: the nearest one) -> CF if any of them changed.
+; cfg_theme: th_mode, th_accent_i, th_wall and ui_s4 from the settings (an
+; accent that is no swatch: the nearest one; scale auto: th_auto_s4, once
+; theme_init has set it) -> CF if any of them changed.
 ; Preserves all.
 cfg_theme:
     push rax
@@ -1707,6 +1717,19 @@ cfg_theme:
     mov [th_wall], al
     mov bl, 1
 .wall:
+    mov eax, [cfg_vals + CFG_SCALE * 8]
+    add eax, 3                          ; 1x: 4 quarters a point
+    cmp eax, 3
+    jne .scale
+    mov eax, [th_auto_s4]
+    test eax, eax
+    jz .scaled                          ; (before theme_init)
+.scale:
+    cmp eax, [ui_s4]
+    je .scaled
+    mov [ui_s4], eax
+    mov bl, 1
+.scaled:
     neg bl                              ; CF if BL was 1
     pop rdi
     pop rsi
@@ -1743,7 +1766,7 @@ cfg_rgb_far:
     pop rbx
     ret
 
-; cfg_set_look(EDI = CFG_THEME, CFG_ACCENT or CFG_WALLPAPER, RSI = its
+; cfg_set_look(EDI = CFG_THEME, CFG_ACCENT, CFG_SCALE or CFG_WALLPAPER, RSI = its
 ; value): theme.asm changed it itself (the shell's 'theme'): kept, and
 ; told to every settings object. Preserves all.
 cfg_set_look:

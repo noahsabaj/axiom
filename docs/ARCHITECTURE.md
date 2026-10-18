@@ -718,8 +718,9 @@ off. `log` shows the state; `log save`, `log on`, `log off`.
   its queue woken). `cfg_service`, from the main loop, runs each pending
   setting's apply (`SD_APPLY`) on the main thread, and saves.
 - **What reads them:** the desktop's theme (`theme.asm`: `cfg_theme` makes
-  `display.theme`, `display.accent` and `desktop.wallpaper` its `th_mode`,
-  `th_accent_i`, the nearest of its eight accents, and `th_wall`, then
+  `display.theme`, `display.accent`, `display.scale` and `desktop.wallpaper`
+  its `th_mode`, `th_accent_i` (the nearest of its nine accents), `ui_s4`
+  (auto: `th_auto_s4`, the screen's own) and `th_wall`, then
   `theme_apply`; the shell's `theme` changes the same settings through
   `cfg_set_look`, so each says what the other did), `cfg_clock` (the menu
   bar's clock, from the CMOS clock: 24-hour, 12-hour or none), `cfg_font`
@@ -1160,8 +1161,8 @@ text rows.
   ...); `theme_color` maps the terminal's palette into them. `theme_apply`
   loads one and `desk_restyle` remakes what was drawn from it: the
   wallpaper, the bar, the shadows, the icons, the cursor, every window. The
-  `theme` thing in the shell shows and changes it. Light or dark, the accent
-  and the wallpaper (the theme's own aurora, plain, dusk, ocean, graphite:
+  `theme` thing in the shell shows and changes it. Light or dark, the accent,
+  the scale and the wallpaper (the theme's own aurora, plain, dusk, ocean, graphite:
   `walls`, a gradient and soft lights each) are settings, kept on the stick.
 - **Drawing** (`draw.asm`): rounded rectangles walked as spans with an
   anti-aliased edge (`rr_walk`), soft shadows made once per radius and
