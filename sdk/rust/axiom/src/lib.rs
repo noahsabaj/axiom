@@ -41,7 +41,7 @@ pub use heap::Heap;
 pub use rt::{Args, Termination, args, args_line, wants};
 pub use sys::{Error, Handle, Result, exit};
 pub use time::Instant;
-pub use window::{Button, Event, Frame, Key, Look, Mods, Window};
+pub use window::{Button, Event, Frame, Key, Look, Mods, Pointer, Window};
 
 /// For a program without std: a panic said on the console, and the program
 /// ended (101).

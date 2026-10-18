@@ -49,6 +49,7 @@ pointer_pending:
 
 ; pointer_service: apply queued events (main loop)
 pointer_service:
+    call ptr_mode
     mov al, [ptr_tail]
     cmp al, [ptr_head]
     jne .work
@@ -81,21 +82,31 @@ pointer_service:
     mov eax, r12d                       ; absolute: scale to the screen
     imul rax, [scr_w]
     shr rax, 16
-    mov rdx, rax                        ; how far, in pixels
-    sub rdx, [ptr_x]
-    add [ptr_dx], edx
-    mov [ptr_x], rax
-    mov eax, r13d
-    imul rax, [scr_h]
-    shr rax, 16
+    mov ecx, r13d
+    imul rcx, [scr_h]
+    shr rcx, 16
+    cmp byte [ptr_abs], 0               ; how far, in pixels, from where it
+    je .first_abs                       ; last was
     mov rdx, rax
-    sub rdx, [ptr_y]
+    sub rdx, [ptr_ax]
+    add [ptr_dx], edx
+    mov rdx, rcx
+    sub rdx, [ptr_ay]
     add [ptr_dy], edx
-    mov [ptr_y], rax
+.first_abs:
+    mov byte [ptr_abs], 1
+    mov [ptr_ax], rax
+    mov [ptr_ay], rcx
+    cmp qword [grab_win], 0             ; held: it stays
+    jne .moved
+    mov [ptr_x], rax
+    mov [ptr_y], rcx
     jmp .moved
 .relative:
     add [ptr_dx], r12d                  ; how far, as the mouse counts it
     add [ptr_dy], r13d
+    cmp qword [grab_win], 0             ; held: it stays
+    jne .moved
     mov eax, r12d
     call pointer_accel
     add [ptr_x], rax
@@ -189,6 +200,68 @@ pointer_accel:
     pop rcx
     ret
 
+; ptr_mode: the pointer as the windows ask for it (RO_WIN_POINTER, WO_PTRM):
+; held by the one with the keys if it grabs it (moved to its middle first;
+; not while ctrl+alt has let it go), and not drawn while held, nor over a
+; window that draws its own. Main loop.
+ptr_mode:
+    push rbx
+    xor ebx, ebx                        ; RBX: the window to hold it
+    mov rax, [desk_focus]
+    test rax, rax
+    jz .grab
+    test dword [rax + WN_FLAGS], WF_PROGRAM
+    jz .grab
+    mov rcx, [rax + WN_DATA]
+    test rcx, rcx
+    jz .grab
+    cmp dword [rcx + WO_PTRM], PTRM_GRAB
+    jne .grab
+    cmp byte [grab_off], 0
+    jne .grab
+    mov rbx, rax
+.grab:
+    cmp rbx, [grab_win]
+    je .hide
+    mov [grab_win], rbx
+    test rbx, rbx
+    jz .hide
+    mov rdi, rbx                        ; held in its middle
+    call win_client
+    shr rdx, 1
+    add rdi, rdx
+    shr rcx, 1
+    add rsi, rcx
+    mov [ptr_x], rdi
+    mov [ptr_y], rsi
+    call pointer_clamp
+    call desk_motion                    ; over it now
+    mov qword [ptr_dx], 0
+.hide:
+    mov eax, 1                          ; not drawn: held,
+    test rbx, rbx
+    jnz .set
+    mov rcx, [ptr_over]                 ; or over one that draws its own
+    test rcx, rcx
+    jz .shown
+    test dword [rcx + WN_FLAGS], WF_PROGRAM
+    jz .shown
+    mov rcx, [rcx + WN_DATA]
+    test rcx, rcx
+    jz .shown
+    cmp dword [rcx + WO_PTRM], PTRM_HIDDEN
+    je .set
+.shown:
+    xor eax, eax
+.set:
+    cmp al, [cursor_off]
+    je .out
+    mov [cursor_off], al
+    call cursor_move                    ; drawn, or taken away
+.out:
+    pop rbx
+    ret
+
 ; ptr_delta -> ESI = how far the pointer moved since the desk last heard, dx
 ; | dy << 16, 16 bits signed each (as far as they go). Preserves others.
 ptr_delta:
@@ -259,8 +332,12 @@ cursor_move:
     jz .first
     call gfx_blit_raw                   ; uncover the old spot
 .first:
+    mov byte [cursor_shown], 0
+    cmp byte [cursor_off], 0            ; a window would have none
+    jne .hidden
     mov byte [cursor_shown], 1
     call cursor_paint
+.hidden:
     pop rcx
     pop rdx
     pop rsi
@@ -540,6 +617,9 @@ cursor_art:
 
 section .data
 cursor_shown:   db 0
+cursor_off:     db 0                    ; not drawn (ptr_mode)
+grab_off:       db 0                    ; ctrl+alt let a held pointer go
+ptr_abs:        db 0                    ; an absolute position came (ptr_ax)
 ptr_moved:      db 0                    ; since the desk last heard
 
 section .bss
@@ -551,6 +631,10 @@ cur_y:          resq 1
 ptr_buttons:    resd 1
 ptr_dx:         resd 1                  ; how far it moved since the desk last
 ptr_dy:         resd 1                  ; heard (ptr_delta), cleared as a qword
+ptr_ax:         resq 1                  ; where a tablet last put it
+ptr_ay:         resq 1
+ptr_over:       resq 1                  ; the window it is over (desk_motion)
+grab_win:       resq 1                  ; the window holding it (ptr_mode)
 ptr_head:       resb 1
 ptr_tail:       resb 1
 alignb 16

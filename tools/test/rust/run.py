@@ -17,7 +17,9 @@ screen.
     on the way: each key down and up as its HID usage (ctrl+A, F5 and up
     from the keyboard; w held while it repeats: one down, one up, three
     keys), the pointer over it with no button held (where, and how far it
-    went) and leaving it;
+    went) and leaving it; the pointer held (g: Pointer::Grab): hidden, in
+    the window's middle, only how far it moved changing; ctrl+alt lets it
+    go, a click holds it again;
   - rdemo --full: filling the screen between the bar and the dock, drawn
     there; q ends it;
   - the keys down and up again from a USB keyboard (hid.asm, where the first
@@ -81,6 +83,15 @@ def script(tag):
         "key w up", "wait 0.4",
         f"abs {win(*H1)}", "wait 0.3", f"abs {win(*H2)}", "wait 0.3",
         f"abs {at(CX + 300, CY - TITLE // 2)}", "wait 0.4",  # its title bar: out of it
+        "type g", "until rdemo: pointer Grab", "wait 0.3",   # held, in its middle
+        f"abs {win(*H1)}", "wait 0.3", f"abs {win(*H2)}", "wait 0.3",
+        f"shot build/test/rust/{tag}grabbed.png",
+        "key ctrl down", "key alt down", "wait 0.1", "key alt up", "key ctrl up", "wait 0.3",
+        f"abs {win(*H1)}", "wait 0.4",                       # let go: it moves
+        f"shot build/test/rust/{tag}released.png",
+        f"abs {win(*H2)} left", "wait 0.5",                  # a click: held again
+        f"abs {win(*H1)}", "wait 0.3",
+        "type g", "until rdemo: pointer Arrow", "wait 0.3",
         f"abs {at(CX + 14 * PT, CY - TITLE // 2)} left",   # its close button
         "until run: RDEMO exited", "wait 0.3",
         "type rdemo --full\\n", "until rdemo: first frame", "wait 0.5",
@@ -157,6 +168,25 @@ def check(log, err):
     result(bool(m) and near(m[0][2], H2[0] - H1[0], 2) and near(m[0][3], H2[1] - H1[1], 2),
            f"rdemo: the pointer over it, no button, and how far it went ({m[0] if m else hovers})")
     result(has("rdemo: left"), "rdemo: and leaving it")
+    after = log.split("rdemo: pointer Grab", 1)[1].split("rdemo: pointer Arrow", 1)[0]         if "rdemo: pointer Grab" in log else ""
+    held = [tuple(int(v) for v in h) for h in re.findall(r"rdemo: hover at (\d+),(\d+) by (-?\d+),(-?\d+)", after)]
+    mid = (320, 200)                                    # the middle of 640x400
+    def find(start, x, y, dx=None, dy=None):
+        for i in range(start, len(held)):
+            h = held[i]
+            if near(h[0], x, 1) and near(h[1], y, 1) and (dx is None or (near(h[2], dx, 2) and near(h[3], dy, 2))):
+                return i
+        return None
+    i = find(0, *mid, H2[0] - H1[0], H2[1] - H1[1])
+    result(i is not None, f"rdemo: held in its middle, only how far it moved changing ({held})")
+    j = find(i + 1, *H1) if i is not None else None
+    result(j is not None, "rdemo: ctrl+alt let it go")
+    k = find(j + 1, *mid, H1[0] - H2[0], H1[1] - H2[1]) if j is not None else None
+    result(k is not None, "rdemo: and a click held it again")
+    p = pixel("grabbed.png", CX + mid[0] + 4, CY + mid[1] + 12)
+    result(p == GROUND, f"rdemo: no pointer drawn while held ({p})")
+    p = pixel("released.png", CX + H1[0] + 4, CY + H1[1] + 12)
+    result(p is not None and p != GROUND, f"rdemo: and drawn once let go ({p})")
     m = re.search(r"rdemo: press Left at (\d+),(\d+)", log)        # (the tablet's rounding: a pixel)
     result(bool(m) and abs(int(m.group(1)) - FROM[0]) <= 1 and abs(int(m.group(2)) - FROM[1]) <= 1,
            f"rdemo: the press, where the drag began ({m.group(0) if m else 'no line'})")

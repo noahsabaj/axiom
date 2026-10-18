@@ -467,7 +467,9 @@ RO_FS_RENAME    equ 41                  ; handle, handle2 + a0: a file or a fold
                                         ; volume -> 0 (renamed, or moved, in place)
 RO_FS_SUB       equ 42                  ; handle, handle2 + a0: a folder, a1 =
                                         ; rights -> a handle to it alone
-RO_COUNT        equ 43
+RO_WIN_POINTER  equ 43                  ; handle = a window, a0 = PTRM_*: the
+                                        ; pointer over it, or held by it
+RO_COUNT        equ 44
 
 ; files (fscap.asm)
 FS_PATH         equ 256                 ; a path's field
@@ -723,6 +725,12 @@ WNF_FULL        equ 2                   ; as WNF_RESIZE, and zoomed to begin wit
                                         ; the screen between the bar and the dock
 WNF_KEYS        equ 4                   ; WE_KEYDOWN and WE_KEYUP too (games)
 WNF_HOVER       equ 8                   ; WE_MOVE without a button, and WE_LEAVE
+PTRM_ARROW      equ 0                   ; RO_WIN_POINTER: the arrow, as anywhere
+PTRM_HIDDEN     equ 1                   ; none over it (it draws its own)
+PTRM_GRAB       equ 2                   ; none, and held in its middle while it
+                                        ; has the keys: WE_MOVE (WNF_HOVER or
+                                        ; not) says how far the mouse moved;
+                                        ; ctrl+alt lets go until it is clicked
 WIN_MAX         equ 4096                ; a side, at most
 
 ; the desktop's themes (theme.asm), and the names of their colors

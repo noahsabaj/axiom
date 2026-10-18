@@ -13,6 +13,8 @@
 ;    RO_WIN_SHOW (a window, a0 = x, a1 = y, a2 = w | h << 32, 0 for all of
 ;      it): what was drawn there is put on the screen
 ;    RO_WIN_TITLE (a window, handle2 + a0: a1 bytes of UTF-8): its title
+;    RO_WIN_POINTER (a window, a0 = PTRM_*): the arrow over it, none, or
+;      none and the pointer held (ptr_mode)
 ;  Its size is the program's: it does not resize. The close button only asks
 ;  (WE_CLOSE); the window goes when its last handle does, and so when the
 ;  program ends, is killed (ctrl+C), or the shell it was run in closes.
@@ -35,7 +37,8 @@ WO_WNF          equ 108                 ; dword WNF_*: as it was asked for
 WO_TITLE        equ 112
 WO_PROG         equ WO_TITLE + WN_TITLE_MAX ; the program's name (the dock's)
 WO_PROG_MAX     equ 32
-WO_SIZE         equ WO_PROG + WO_PROG_MAX
+WO_PTRM         equ WO_PROG + WO_PROG_MAX ; dword PTRM_*: the pointer, as it asked
+WO_SIZE         equ WO_PTRM + 8
 
 WOF_OPEN        equ 1                   ; its window is to be opened
 WOF_TITLE       equ 2                   ; retitled
@@ -292,6 +295,37 @@ h_win_show:
     call op_done
     pop r14
     pop r13
+    pop r12
+    pop rbx
+    ret
+
+; h_win_pointer(EDI = a window, RSI = PTRM_*) -> RAX = 0 (needs
+; RT_WIN_DRAW): the pointer over it as it asks, from the main loop's next
+; turn (ptr_mode)
+h_win_pointer:
+    push rbx
+    push r12
+    mov r12, rsi
+    mov esi, OT_WINDOW
+    mov edx, RT_WIN_DRAW
+    call handle_get
+    cmp rax, E_ANY
+    jae .out
+    mov rbx, rax
+    mov rax, E_ARG
+    cmp r12, PTRM_GRAB
+    ja .put
+    mov [rbx + WO_PTRM], r12d
+    mov rdi, [main_thread]
+    call thread_unpark
+    xor eax, eax
+.put:
+    push rax
+    mov rdi, rbx
+    call obj_put
+    pop rax
+.out:
+    call op_done
     pop r12
     pop rbx
     ret
@@ -585,6 +619,8 @@ prog_wheel:
 prog_move:
     cmp rbx, [press_win]                ; while a button is held in it
     je .post
+    cmp rbx, [grab_win]                 ; or it holds the pointer
+    je .post
     mov rax, [rbx + WN_DATA]            ; or always, if it asked
     test rax, rax
     jz .out
@@ -628,6 +664,17 @@ prog_left:
 ; win_key_event(EAX = a key down or up, from key_next): to the window with
 ; the keys, if it is a program's that asked (WNF_KEYS)
 win_key_event:
+    test eax, 1 << 8                    ; ctrl and alt down together: a pointer
+    jz .tell                            ; held is let go (until clicked)
+    mov ecx, eax
+    shr ecx, 16
+    and ecx, WM_CTRL | WM_ALT
+    cmp ecx, WM_CTRL | WM_ALT
+    jne .tell
+    cmp qword [grab_win], 0
+    je .tell
+    mov byte [grab_off], 1
+.tell:
     push rbx
     mov rbx, [desk_focus]
     test rbx, rbx

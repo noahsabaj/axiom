@@ -117,6 +117,12 @@ for one run).
     is over the window, and `Leave` when it goes. `dx`, `dy` are how far
     the mouse moved, in its own counts: not sped up, not stopped at the
     screen's edge.
+  - `set_pointer(Pointer::Grab)`, for mouse-look: no pointer drawn, and it
+    held in the window's middle while the window has the keys, so it never
+    leaves; `Move` comes with `dx`, `dy` (with `Window::HOVER` or not).
+    The user takes it back with ctrl+alt, until they click in the window
+    again. `Pointer::Hidden`: none drawn over the window (it draws its
+    own); `Pointer::Arrow` as before.
   - `axiom::Look::get()`: the desktop's scale (`px(points)`), dark or light,
     accent, theme colours, the screen's size.
 - **`axiom::Files`**: `get()` (the program's), `read(path)`,
@@ -139,7 +145,7 @@ for one run).
 ## Limits, for now
 
 - One thread: the ring is held while a call waits.
-- No window without a frame: `Window::FULL` is a zoomed window. The
-  pointer is not held or hidden for a game to look around with.
+- No window without a frame: `Window::FULL` is a zoomed window.
+- No sound yet.
 - An .AXE is 16 MiB at most, its zeroes included.
 - `std::process::exit` aborts: return from `main`, or call `axiom::exit`.

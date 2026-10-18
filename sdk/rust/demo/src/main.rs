@@ -2,8 +2,9 @@
 //! draws it each frame (about 60 a second): a plain ground, a bar sweeping
 //! across the top, and a square where the mouse last pressed or dragged.
 //! Says each key (as text, and down and up), press, resize, the pointer
-//! over it and leaving, on the console ("rdemo: ..."); q, Esc or the close
-//! button end it, with a count of what happened.
+//! over it and leaving, on the console ("rdemo: ..."); g holds the pointer
+//! (a game's mouse-look) or lets it go; q, Esc or the close button end it,
+//! with a count of what happened.
 //!
 //!   rdemo [--full] [title]
 
@@ -12,7 +13,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use axiom::{Event, Instant, Key, Window};
+use axiom::{Event, Instant, Key, Pointer, Window};
 
 #[global_allocator]
 static HEAP: axiom::Heap = axiom::Heap::new();
@@ -39,6 +40,7 @@ fn main() -> Result<(), axiom::Error> {
     let mut seen: HashMap<&'static str, u32> = HashMap::new();
     let mut mark = (100, 100);
     let mut held = 0u32;
+    let mut grab = false;
     let mut frames = 0u64;
     let start = Instant::now();
     loop {
@@ -49,6 +51,12 @@ fn main() -> Result<(), axiom::Error> {
                     println!("rdemo: key {:?}{}", key, if mods.ctrl() { " ctrl" } else { "" });
                     if matches!(key, Key::Char('q') | Key::Escape) {
                         return bye(&seen, frames, start);
+                    }
+                    if key == Key::Char('g') {
+                        grab = !grab;
+                        let p = if grab { Pointer::Grab } else { Pointer::Arrow };
+                        w.set_pointer(p);
+                        println!("rdemo: pointer {:?}", p);
                     }
                     "key"
                 }

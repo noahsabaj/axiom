@@ -28,7 +28,10 @@
 //! key up. Window::HOVER: the pointer over it with no button held too, and
 //! Event::Leave when it goes. Every Event::Move says how far the pointer
 //! went (dx, dy: the mouse's own counts, before it is sped up or stopped at
-//! the screen's edge), for looking around.
+//! the screen's edge), for looking around. Window::set_pointer(Pointer::Grab)
+//! hides the pointer and holds it in the window's middle while the window
+//! has the keys, so that it never leaves: only Move's dx and dy change. The
+//! user takes it back with ctrl+alt, until they click in the window again.
 
 use core::sync::atomic::{AtomicPtr, Ordering};
 
@@ -280,6 +283,19 @@ pub mod usage {
     pub const META_RIGHT: u32 = 0xE7;
 }
 
+/// The pointer over a window (Window::set_pointer).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Pointer {
+    /// the arrow, as anywhere
+    Arrow = 0,
+    /// none drawn over it: it draws its own
+    Hidden = 1,
+    /// none, and held in its middle while it has the keys: Event::Move
+    /// comes with how far the mouse moved (dx, dy), Window::HOVER or not;
+    /// ctrl+alt lets go until the window is clicked again
+    Grab = 2,
+}
+
 /// A mouse button.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Button {
@@ -487,6 +503,13 @@ impl Window {
         e.handle2 = io;
         e.a1 = n as u64;
         let _ = r.call(&e);
+    }
+
+    /// The pointer over it, or held by it (RO_WIN_POINTER).
+    pub fn set_pointer(&self, pointer: Pointer) {
+        let mut e = Entry::new(RO_WIN_POINTER, self.win);
+        e.a0 = pointer as u64;
+        let _ = ring::call(&e);
     }
 
     /// The next thing that happened, if one did (it does not wait).

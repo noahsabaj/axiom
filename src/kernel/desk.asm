@@ -1128,6 +1128,14 @@ win_destroy:
     jne .no_hover
     mov qword [hover_win], 0
 .no_hover:
+    cmp rbx, [ptr_over]
+    jne .not_over
+    mov qword [ptr_over], 0
+.not_over:
+    cmp rbx, [grab_win]
+    jne .not_held
+    mov qword [grab_win], 0             ; (ptr_mode shows the arrow again)
+.not_held:
     cmp rbx, [desk_focus]
     jne .no_focus
     mov qword [desk_focus], 0
@@ -3240,6 +3248,7 @@ desk_press:
     jmp .done
 .client:
     mov [press_win], rbx
+    mov byte [grab_off], 0              ; a click: held again, if it holds it
     mov rdi, r8
     mov rsi, r9
     mov edx, r12d
@@ -3335,10 +3344,12 @@ desk_motion:
     cmp edx, P_CLIENT
     jne .none
     mov rbx, rax
+    mov [ptr_over], rbx
     call prog_left                      ; the one it was over, told
     jmp .tell
 .none:
     xor ebx, ebx
+    mov [ptr_over], rbx
     call prog_left
     pop rbx
     ret

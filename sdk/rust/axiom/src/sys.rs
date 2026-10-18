@@ -47,6 +47,7 @@ pub const RO_FS_MKDIR: u8 = 39;
 pub const RO_FS_REMOVE: u8 = 40;
 pub const RO_FS_RENAME: u8 = 41;
 pub const RO_FS_SUB: u8 = 42;
+pub const RO_WIN_POINTER: u8 = 43;
 
 pub const SQF_LINK: u8 = 1; // the next entry starts once this one succeeds
 

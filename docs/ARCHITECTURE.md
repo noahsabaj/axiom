@@ -1193,6 +1193,14 @@ text rows.
   them text (pause's E1 sequence is passed over). `WNF_HOVER` sends
   `WE_MOVE` while the pointer is over the window with no button held, and
   `WE_LEAVE` once it is not (`wo_hover`, `prog_left` from `desk_motion`).
+  `RO_WIN_POINTER` (`PTRM_*`, kept in `WO_PTRM`) asks for no arrow over
+  the window, or for the pointer held: `ptr_mode`, each turn of the main
+  loop, moves it to the middle of the window with the keys that grabs it
+  and keeps it there (`grab_win`: what the mouse reports only adds to
+  `ptr_dx`, `ptr_dy`, and `WE_MOVE` goes to it whatever its `WNF_*`), and
+  draws no cursor while it is held or over a window that hides it
+  (`cursor_off`, `ptr_over`). ctrl+alt down together lets it go
+  (`grab_off`, in `win_key_event`) until a click in a window.
 - **The look** (`look.asm`): one block of memory, made at boot, that
   programs map read only (`RO_DESK_LOOK`): the theme's colours by role, the
   accent, the scale, the screen's size, and the desktop's fonts with the
