@@ -153,16 +153,19 @@ main_loop:
     call iommu_service
     call shell_service                  ; the rest of a line, after a command
 .keys:
-    call key_next                       ; keys down and up
+    call key_next                       ; keys down and up, until a key code's turn
     jc .input
     call win_key_event                  ; to a program with the keys that asks
     jmp .keys
 .input:
-    call kbd_getc
+    call kbd_getc                       ; once the keys before it are out
     test eax, eax
-    jz .refresh
+    jz .typed
     call desk_key                       ; to the window with the keys
-    jmp .input
+    jmp .keys
+.typed:
+    call key_pending                    ; keys down and up since
+    jnz .keys
 .refresh:
     call desk_service                   ; windows closing go
     call term_service                   ; what was printed, drawn
@@ -195,6 +198,8 @@ main_loop:
 .sleep:
     cli
     call kbd_pending
+    jnz .awake
+    call key_pending                    ; a key let go, which types nothing
     jnz .awake
     call pointer_pending
     jnz .awake
