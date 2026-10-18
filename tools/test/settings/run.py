@@ -17,6 +17,8 @@ Two boots, one after the other, from the same USB stick:
     start), the keyboard laid out as Dvorak (keys pressed for 'jdpps' run
     hello), the power button doing what power.button says, and 'settings
     reset all' leaving SETTINGS.TXT without a setting.
+The look is the desktop's theme (theme.asm): the shell's 'theme' and the
+settings change the same thing, and each says what the other did.
 Outputs go to build/test/settings/.
 """
 import pathlib
@@ -36,12 +38,11 @@ FAILS = 0
 NL = "\\n"
 TABLET = "-device qemu-xhci,id=ux -device usb-tablet,bus=ux.0"
 SCR_W, SCR_H = 2560, 1600
-SHELL1_BTN = (307, 31)                          # 'shell 1' on the bar
+SHELL1 = (100, 1300)                            # in shell 1, left of where Settings opens
 WX, WY = 1200, 100                              # the Settings window's frame, once moved
-BORDER, TITLE = 1, 45
+BORDER, TITLE = 0, 28 * 2                       # its title bar, 28 points at 2 pixels
 LIGHT_SIDE, DARK_SIDE = (0xE5, 0xE5, 0xEA), (0x0A, 0x0D, 0x13)
-LIGHT_BAR, DARK_BAR = (0xFF, 0xFF, 0xFF), (0x10, 0x15, 0x1F)
-BAR_SPOT = (1500, 3)                            # an empty part of the bar
+BAR_SPOT = (1500, 3)                            # an empty part of the menu bar
 SIDE_SPOT = (20, 760)                           # the app's sidebar, under its categories
 SETTINGS_N = 18
 
@@ -126,6 +127,17 @@ FIRST = [
      "a switch"),
     ("settings set display.accent #ff9f0a", lambda l: values(l).get("display.accent") ==
      "orange", "a colour by #rrggbb, named when it is a swatch"),
+    ("theme accent green", lambda l: record(l).get("accent") == "green",
+     "theme accent: the desktop's theme"),
+    ("settings display.accent", lambda l: record(l).get("value") == "green",
+     "theme accent green: kept as display.accent"),
+    ("settings set desktop.wallpaper dusk", lambda l: values(l).get("desktop.wallpaper") ==
+     "dusk", "desktop.wallpaper: one of the theme's wallpapers"),
+    ("theme light", lambda l: record(l).get("look") == "light", "theme light"),
+    ("settings display.theme", lambda l: record(l).get("value") == "light",
+     "theme light: kept as display.theme"),
+    ("settings reset desktop.wallpaper", lambda l: values(l).get("desktop.wallpaper") ==
+     "aurora", "the theme's own wallpaper, by default"),
     ("settings set time.zone -05:00", lambda l: values(l).get("time.zone") == "UTC-05:00",
      "a zone"),
     ("settings set network.name my-box", lambda l: values(l).get("network.name") == "my-box",
@@ -162,7 +174,7 @@ def first_script():
     s += ["wait 0.5", f"shot {(OUT / 'light.png').as_posix()}",
           # the window, then the keys back to shell 1, and the window moved
           f"type run settings &{NL}", "until in the background", "wait 4",
-          f"abs {at(*SHELL1_BTN)} left", "wait 0.5",
+          f"abs {at(*SHELL1)} left", "wait 0.5",
           f"type win{NL}", f"type echo mark''{n}{NL}", f"until mark{n}",
           f"type win move 5 {WX} {WY}{NL}", "wait 1",
           f"shot {(OUT / 'app-light.png').as_posix()}",
@@ -182,7 +194,7 @@ def first_script():
           f"abs {app(1000, 160)} left", "wait 0.5",              # the name, typed into
           f"type -2{NL}", "wait 0.7",
           f"shot {(OUT / 'app.png').as_posix()}",
-          f"abs {at(*SHELL1_BTN)} left", "wait 0.5",
+          f"abs {at(*SHELL1)} left", "wait 0.5",
           f"type echo mark''{n + 1}{NL}", f"until mark{n + 1}",
           f"type settings{NL}", f"type echo mark''{n + 2}{NL}", f"until mark{n + 2}",
           f"type settings set display.text-size large{NL}",
@@ -245,6 +257,12 @@ def pixel(name, x, y):
         return None
 
 
+def bright(p):
+    """A pixel's brightness, 0..255 (the menu bar is glass: the wallpaper
+    shows through it)."""
+    return -1 if p is None else (p[0] * 299 + p[1] * 587 + p[2] * 114) // 1000
+
+
 def kept(img_path):
     """SETTINGS.TXT on a stick image -> its 'name = value' lines, and the
     FAT's problems."""
@@ -272,7 +290,7 @@ def main():
     got = outputs(log)
     print("-- the shell")
     check(FIRST, got)
-    result(pixel("light.png", *BAR_SPOT) == LIGHT_BAR,
+    result(bright(pixel("light.png", *BAR_SPOT)) > 200,
            f"display.theme light: the bar is light, at once ({pixel('light.png', *BAR_SPOT)})")
     print("-- the window")
     n = len(FIRST)
@@ -285,7 +303,8 @@ def main():
     result(pixel("app-dark.png", sx, sy) == DARK_SIDE,
            f"'settings set display.theme dark' in the shell: the window follows "
            f"({pixel('app-dark.png', sx, sy)})")
-    result(pixel("app-dark.png", *BAR_SPOT) == DARK_BAR, "and so does the bar")
+    result(bright(pixel("app-dark.png", *BAR_SPOT)) < 80,
+           f"and so does the bar ({pixel('app-dark.png', *BAR_SPOT)})")
     after = values(got.get(n + 2) or [])
     for k, v in AFTER_APP.items():
         if k != "display.theme":

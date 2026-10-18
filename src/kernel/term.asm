@@ -152,6 +152,7 @@ term_open:
     mov r8, r12
     mov r9, r13
     mov r10d, WF_CLOSE | WF_RESIZE
+    lea r11, [str_app_terminal]
     mov [term_making], rbx              ; for its first paint
     call win_new
     mov qword [term_making], 0
@@ -512,7 +513,7 @@ term_draw:
     xor edi, edi
     mov rdx, [rbx + WN_W]
     mov rcx, [rbx + WN_H]
-    mov r8d, [look_panel]
+    mov r8d, [th_c + TC_WINDOW]
     call gfx_fill
     mov [r12 + TW_SHOWN], r15
     mov r13, r15
@@ -626,7 +627,7 @@ term_line:
     mov rsi, r15
     mov rdx, [rbx + WN_W]
     mov rcx, [font_ch]
-    mov r8d, [look_panel]
+    mov r8d, [th_c + TC_WINDOW]
     call gfx_fill
     cmp r13, [r12 + TW_END]             ; written yet?
     jg .out
@@ -677,7 +678,7 @@ term_line:
     add rcx, rcx
     sub rsi, rcx
     mov rdx, [font_cw]
-    mov r8d, [look_accent]
+    mov r8d, [th_accent]
     call gfx_fill
 .out:
     pop r15
@@ -698,16 +699,19 @@ term_cell:
     mov rdi, rbx                        ; EDI = its color, ESI = the background
     shr rdi, CELL_FG
     and edi, 0xFFFFFF
-    mov esi, [look_panel]
+    mov esi, COL_PANEL
     test bh, CA_BG
     jz .bg
     mov rsi, rbx
     shr rsi, CELL_BG
+    and esi, 0xFFFFFF
 .bg:
-    call look_map                       ; the dark look's colours, as now
-    xchg edi, esi
-    call look_map
-    xchg edi, esi
+    mov eax, edi                        ; as this theme draws them
+    call theme_color
+    mov edi, eax
+    mov eax, esi
+    call theme_color
+    mov esi, eax
     test bh, CA_INVERSE
     jz .not_inverse
     xchg edi, esi
@@ -745,7 +749,7 @@ term_cell:
     call gfx_glyph
     jmp .lines
 .no_glyph:
-    cmp esi, [look_panel]                  ; no glyph: just its background
+    cmp esi, [th_c + TC_WINDOW]         ; no glyph: just its background
     je .lines
     mov r8d, esi
     mov rdi, r12

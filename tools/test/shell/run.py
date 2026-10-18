@@ -244,6 +244,7 @@ PROGRAMS_STEPS = [
      "a program by its name; it gets only what it wants: nothing", LINE),
     ("+net +desk hello", said("hello: given: net desk"), "+net +desk: granted, for that run",
      LINE),
+    ("+files hello", said("hello: given: files"), "+files: granted, for that run", LINE),
     ("+settings hello", said("hello: given: settings"), "+settings: granted, for that run",
      LINE),
     ("hello", said("hello: given: nothing"), "and only for that run", LINE),
@@ -252,10 +253,10 @@ PROGRAMS_STEPS = [
      LINE),
     ("run hello via run", said("hello: arguments: via run"), "run <program>, as its name", LINE),
     ("+bogus hello", said("'+bogus' is not something a program can be given; there are +net, "
-                          "+store, +desk and +settings"), "+bogus: not a capability"),
-    ("+net files", said("+net, +store, +desk and +settings are for programs; 'files' is a "
-                        "command"), "+net before a command: no"),
-    ("+net", said("+net, +store, +desk and +settings come before a program's name"),
+                          "+store, +desk, +files and +settings"), "+bogus: not a capability"),
+    ("+net files", said("+net, +store, +desk, +files and +settings are for programs; 'files' "
+                        "is a command"), "+net before a command: no"),
+    ("+net", said("+net, +store, +desk, +files and +settings come before a program's name"),
      "+net alone: no"),
     ("files &", said("'&' is for programs; 'files' is a command"), "& after a command: no"),
     ("hello | count &", said("a program in the background has no | or > after it"),

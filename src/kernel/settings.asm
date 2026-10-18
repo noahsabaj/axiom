@@ -73,7 +73,7 @@ align 8
 cfg_table:
     SETTING CFG_THEME, 'display.theme', SK_CHOICE, 0, 0, 0, 0, 0, cfg_themes, '', cfg_apply_look, \
         'the look of windows and the bar: dark or light'
-    SETTING CFG_ACCENT, 'display.accent', SK_COLOUR, 0, COL_ACCENT, 0, 0, 0, cfg_accents, '', cfg_apply_look, \
+    SETTING CFG_ACCENT, 'display.accent', SK_COLOUR, 0, 0x0A84FF, 0, 0, 0, cfg_accents, '', cfg_apply_look, \
         'the colour of the prompt, of headings and of what is chosen'
     SETTING CFG_TEXT_SIZE, 'display.text-size', SK_CHOICE, SIF_RESTART, 0, 0, 0, 0, cfg_sizes, '', 0, \
         'the size of text, and of the bar and the frames with it (auto: the largest that leaves 50 lines)'
@@ -133,7 +133,8 @@ cfg_sizes:      CNAME 'auto'
                 CNAME 'medium'
                 CNAME 'large'
                 dq 0
-cfg_walls:      CNAME 'plain'
+cfg_walls:      CNAME 'aurora'
+                CNAME 'plain'
                 CNAME 'dusk'
                 CNAME 'ocean'
                 CNAME 'graphite'
@@ -150,37 +151,16 @@ cfg_buttons:    CNAME 'off'
                 CNAME 'restart'
                 CNAME 'nothing'
                 dq 0
-cfg_accents:    SWATCH 'teal', COL_ACCENT
-                SWATCH 'blue', 0x0A84FF
-                SWATCH 'purple', 0xBF5AF2
+cfg_accents:    SWATCH 'blue', 0x0A84FF ; theme.asm's accents, in accent_colors'
+                SWATCH 'purple', 0xBF5AF2 ; order (their dark shades)
                 SWATCH 'pink', 0xFF375F
                 SWATCH 'red', 0xFF453A
                 SWATCH 'orange', 0xFF9F0A
                 SWATCH 'yellow', 0xFFD60A
-                SWATCH 'green', 0x32D74B
-                SWATCH 'graphite', 0x8E8E93
+                SWATCH 'green', 0x30D158
+                SWATCH 'graphite', 0x98989D
                 dq 0, 0
 
-; The look now, from look_set: in this order, LOOK_N of them (look_map)
-align 4
-look_bg:        dd COL_BG               ; behind the windows (plain wallpaper)
-look_panel:     dd COL_PANEL            ; a window, the bar
-look_panel2:    dd COL_PANEL2           ; a raised part: a title, a button
-look_line:      dd COL_LINE             ; a border
-look_text:      dd COL_TEXT
-look_dim:       dd COL_DIM              ; what matters less
-look_faint:     dd COL_FAINT            ; what matters least
-look_accent:    dd COL_ACCENT           ; display.accent
-
-section .rodata
-align 4
-look_dark:      dd COL_BG, COL_PANEL, COL_PANEL2, COL_LINE
-                dd COL_TEXT, COL_DIM, COL_FAINT, COL_ACCENT
-look_light:     dd 0xE5E5EA, 0xFFFFFF, 0xF2F2F7, 0xD1D1D6
-                dd 0x1D1D1F, 0x6E6E73, 0xAEAEB2
-look_walls:     dd 0x231C42, 0xC9736A   ; dusk: violet into coral
-                dd 0x0A2342, 0x2C8BA6   ; ocean: deep into shallow
-                dd 0x1C1C1E, 0x58585E   ; graphite
 
 CW_ANY_TEXT     equ 0
 CFG_LIST_MAX    equ 16                  ; choices or swatches, at most
@@ -245,8 +225,7 @@ cfg_init:
     pop r12
     mov byte [cfg_early], 1
     mov qword [cfg_touched], 0          ; (as if they had been the defaults)
-.looked:
-    call look_set                       ; the look, before anything is drawn
+.looked:                                ; (theme_init takes the look from them)
     pop rsi
     pop rdi
     pop rbx
@@ -1440,11 +1419,13 @@ cfg_save:
 ;  What a change does (SD_APPLY: RDI = the value, on the main thread)
 ; -----------------------------------------------------------------------------
 
-cfg_apply_look:
-    jmp look_apply
+cfg_apply_look:                         ; display.theme, .accent, desktop.wallpaper
+    call cfg_theme
+    jc theme_apply                      ; (not when theme.asm made the change)
+    ret
 
 cfg_apply_clock:
-    jmp ui_refresh                      ; the bar's status, at once
+    jmp desk_bar_damage                 ; the menu bar's clock, at once
 
 ; cfg_power_pressed: the power button, as power.button says
 cfg_power_pressed:
@@ -1673,121 +1654,60 @@ cfg_clock:
     ret
 
 ; -----------------------------------------------------------------------------
-;  The look: the colours the desk, the bar and the terminals draw with,
-;  from display.theme and display.accent. Whatever draws reads look_* (a
-;  dword each) rather than the COL_* constants. Text written before a change
-;  keeps the dark look's COL_* in its cells; look_map turns those into
-;  today's at drawing time, so a terminal changes with the rest.
+;  The look: theme.asm's, from display.theme, display.accent and
+;  desktop.wallpaper. The shell's 'theme' changes them through here too, so
+;  what it says is kept and every Settings window hears of it.
 ; -----------------------------------------------------------------------------
 
-LOOK_N          equ 8                   ; look_bg .. look_accent
-LOOK_BAND       equ 4                   ; a wallpaper's rows of one colour
-
-; look_set: look_* from the settings
-look_set:
-    push rax
-    push rcx
-    push rsi
-    lea rsi, [look_dark]
-    cmp qword [cfg_vals + CFG_THEME * 8], 1
-    jne .copy
-    lea rsi, [look_light]
-.copy:
-    xor ecx, ecx
-.word:
-    mov eax, [rsi + rcx * 4]
-    mov [look_bg + rcx * 4], eax
-    inc ecx
-    cmp ecx, LOOK_N - 1
-    jb .word
-    mov eax, [cfg_vals + CFG_ACCENT * 8]
-    mov [look_accent], eax
-    pop rsi
-    pop rcx
-    pop rax
-    ret
-
-; look_map(EDI = a colour) -> EDI: one of the dark look's, as the look has
-; it now; any other, as it is
-look_map:
-    push rcx
-    xor ecx, ecx
-.next:
-    cmp edi, [look_dark + rcx * 4]
-    je .found
-    inc ecx
-    cmp ecx, LOOK_N
-    jb .next
-    pop rcx
-    ret
-.found:
-    mov edi, [look_bg + rcx * 4]
-    pop rcx
-    ret
-
-; look_backdrop(RDI x, RSI y, RDX w, RCX h): the wallpaper there (the clip
-; set to it). Preserves all.
-look_backdrop:
+; cfg_theme: th_mode, th_accent_i and th_wall from the settings (an accent
+; that is no swatch: the nearest one) -> CF if any of them changed.
+; Preserves all.
+cfg_theme:
     push rax
     push rbx
     push rcx
     push rdx
     push rsi
     push rdi
-    push r8
-    push r9
-    push r10
-    push r11
-    mov rax, [cfg_vals + CFG_WALLPAPER * 8]
-    test rax, rax
-    jnz .gradient
-    mov r8d, [look_bg]
-    call gfx_fill
-    jmp .out
-.gradient:
-    lea r9, [look_walls - 8]
-    mov r10d, [r9 + rax * 8]            ; R10D = the top's colour
-    mov r11d, [r9 + rax * 8 + 4]        ; R11D = the bottom's
-    lea rbx, [rsi + rcx]                ; RBX = below the area
-    mov rax, rsi                        ; from the band the area starts in
-    xor edx, edx
-    mov ecx, LOOK_BAND
-    div rcx
-    imul rsi, rax, LOOK_BAND
-.band:
-    cmp rsi, rbx
-    jae .out
-    xor r8d, r8d                        ; each channel, top to bottom
-    mov ecx, 16
-.channel:
-    mov eax, r10d
-    shr eax, cl
-    and eax, 0xFF
-    mov edx, r11d
-    shr edx, cl
-    and edx, 0xFF
-    sub edx, eax
-    imul edx, esi
-    mov r9, rax
-    movsxd rax, edx
-    cqo
-    idiv qword [scr_h]
-    add rax, r9
-    shl eax, cl
-    or r8d, eax
-    sub ecx, 8
-    jns .channel
-    xor edi, edi
-    mov rdx, [scr_w]
-    mov ecx, LOOK_BAND
-    call gfx_fill
-    add rsi, LOOK_BAND
-    jmp .band
-.out:
-    pop r11
-    pop r10
-    pop r9
-    pop r8
+    xor ebx, ebx                        ; BL: something changed
+    mov eax, [cfg_vals + CFG_THEME * 8]
+    cmp al, [th_mode]
+    je .mode
+    mov [th_mode], al
+    mov bl, 1
+.mode:
+    mov edi, [cfg_vals + CFG_ACCENT * 8]
+    xor ecx, ecx                        ; ECX: this accent, ESI: the nearest,
+    xor esi, esi                        ; EDX: how far it was
+    mov edx, -1
+.accent:
+    lea rax, [accent_colors]
+    mov eax, [rax + rcx * 8]
+    push rcx
+    push rdx
+    call cfg_rgb_far
+    pop rdx
+    pop rcx
+    cmp eax, edx
+    jae .farther
+    mov edx, eax
+    mov esi, ecx
+.farther:
+    inc ecx
+    cmp ecx, ACCENTS
+    jb .accent
+    cmp sil, [th_accent_i]
+    je .accent_same
+    mov [th_accent_i], sil
+    mov bl, 1
+.accent_same:
+    mov eax, [cfg_vals + CFG_WALLPAPER * 8]
+    cmp al, [th_wall]
+    je .wall
+    mov [th_wall], al
+    mov bl, 1
+.wall:
+    neg bl                              ; CF if BL was 1
     pop rdi
     pop rsi
     pop rdx
@@ -1796,37 +1716,43 @@ look_backdrop:
     pop rax
     ret
 
-; look_apply: the look changed (display.*, desktop.wallpaper): every window
-; and the bar drawn again
-look_apply:
+; cfg_rgb_far(EAX, EDI = two 0xRRGGBB) -> EAX = how far apart they are,
+; channel by channel. Loses RCX, RDX.
+cfg_rgb_far:
     push rbx
-    push r12
-    call look_set
-    xor r12d, r12d
-.next:
-    cmp r12d, DESK_MAX
-    jae .done
-    lea rax, [desk_wins]
-    mov rbx, [rax + r12 * 8]
-    inc r12d
-    test rbx, rbx
-    jz .next
-    test dword [rbx + WN_FLAGS], WF_PROGRAM | WF_CLOSING
-    jnz .next
-    mov rax, [rbx + WN_OPS]
-    mov rax, [rax + OP_PAINT]
-    test rax, rax
-    jz .next
-    call rax
-    jmp .next
-.done:
-    xor edi, edi
-    xor esi, esi
-    mov rdx, [scr_w]
-    mov rcx, [scr_h]
-    call desk_damage
-    pop r12
+    push rsi
+    mov esi, eax
+    xor ebx, ebx
+    mov ecx, 16
+.channel:
+    mov eax, esi
+    shr eax, cl
+    and eax, 0xFF
+    mov edx, edi
+    shr edx, cl
+    and edx, 0xFF
+    sub eax, edx
+    jns .abs
+    neg eax
+.abs:
+    add ebx, eax
+    sub ecx, 8
+    jns .channel
+    mov eax, ebx
+    pop rsi
     pop rbx
+    ret
+
+; cfg_set_look(EDI = CFG_THEME, CFG_ACCENT or CFG_WALLPAPER, RSI = its
+; value): theme.asm changed it itself (the shell's 'theme'): kept, and
+; told to every settings object. Preserves all.
+cfg_set_look:
+    push rax
+    push rdx
+    xor edx, edx
+    call cfg_change
+    pop rdx
+    pop rax
     ret
 
 ; -----------------------------------------------------------------------------

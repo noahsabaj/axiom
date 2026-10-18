@@ -90,7 +90,8 @@ OT_SOCKET       equ 10                  ; a connection, or a port listened on (s
 OT_DESK         equ 11                  ; the desktop: windows can be opened on it (window.asm)
 OT_WINDOW       equ 12                  ; a program's window (window.asm)
 OT_SETTINGS     equ 13                  ; the machine's settings (settings.asm)
-OT_TYPES        equ 14                  ; with 0, none
+OT_FILES        equ 14                  ; files on FAT volumes, or in a folder (fscap.asm)
+OT_TYPES        equ 15                  ; with 0, none
 
 ; what a capability allows (RT_*): three for any object, the rest by type
 RT_DUP          equ 1 << 0              ; derive more from it
@@ -122,6 +123,8 @@ RT_SK_SEND      equ 1 << 8              ; a socket: send on it, shut it
 RT_SK_RECV      equ 1 << 9              ; receive from it, accept at it, wait to
 RT_DESK_WINDOW  equ 1 << 8              ; the desktop: open windows on it
 RT_WIN_DRAW     equ 1 << 8              ; a window: show what was drawn, title it
+RT_FS_READ      equ 1 << 8              ; files: list folders, read files
+RT_FS_WRITE     equ 1 << 9              ; write, make, rename, remove
 RT_SET_READ     equ 1 << 8              ; the settings: read them, wait for a change
 RT_SET_CHANGE   equ 1 << 9              ; change them
 RT_ALL          equ 0xFFFF
@@ -147,7 +150,10 @@ E_NONAME        equ -17                 ; no such name in the store
 E_IO            equ -18                 ; the drive failed
 E_NOSTORE       equ -19                 ; no store, or one that cannot be written
 E_NET           equ -20                 ; a socket failed: RO_NET_STATUS says why
-E_COUNT         equ 21                  ; with 0, none
+E_NOFILE        equ -21                 ; no such file, folder or volume
+E_READONLY      equ -22                 ; the volume is not to be written ('vol <n> rw')
+E_EXISTS        equ -23                 ; something has that name already
+E_COUNT         equ 24                  ; with 0, none
 E_ANY           equ -4096               ; what returns a pointer or an E_*: an
                                         ; error is RAX >= E_ANY, unsigned (the
                                         ; kernel's pointers are negative too)
@@ -453,7 +459,53 @@ RO_SET_CHANGE   equ 33                  ; handle, a0 = which (its record's place
                                         ; setting). RO_WAIT on the settings
                                         ; waits until one changed since the last
                                         ; RO_SET_LIST
-RO_COUNT        equ 34
+RO_DESK_LOOK    equ 34                  ; handle = the desktop -> a handle to the
+                                        ; look, memory to map and read (LK_*)
+; files (fscap.asm): handle = files, handle2 + a0: a path (an FS_PATH field,
+; NUL-ended: "vol<n>:/a/b" with a handle to every volume, else from its folder)
+RO_FS_VOLUMES   equ 35                  ; handle, into handle2 + a0, a1 bytes at
+                                        ; most: FV_* records -> how many volumes
+RO_FS_LIST      equ 36                  ; handle, handle2 + a0: a folder; into
+                                        ; handle2 + a1, a2 bytes at most: FE_*
+                                        ; records -> how many things it holds
+RO_FS_READ      equ 37                  ; handle, handle2 + a0: a file; into
+                                        ; handle2 + a1, a2 bytes at most -> its size
+RO_FS_WRITE     equ 38                  ; handle, handle2 + a0: a file; handle2 +
+                                        ; a1: a2 bytes, all it holds now -> 0
+RO_FS_MKDIR     equ 39                  ; handle, handle2 + a0: a folder -> 0, made
+RO_FS_REMOVE    equ 40                  ; handle, handle2 + a0: a file or an empty
+                                        ; folder -> 0, gone
+RO_FS_RENAME    equ 41                  ; handle, handle2 + a0: a file or a folder,
+                                        ; handle2 + a1: its new path, on the same
+                                        ; volume -> 0 (renamed, or moved, in place)
+RO_FS_SUB       equ 42                  ; handle, handle2 + a0: a folder, a1 =
+                                        ; rights -> a handle to it alone
+RO_COUNT        equ 43
+
+; files (fscap.asm)
+FS_PATH         equ 256                 ; a path's field
+FV_INDEX        equ 0                   ; a volume (RO_FS_VOLUMES): dword, its n in "vol<n>:"
+FV_FLAGS        equ 4                   ; dword FVF_*
+FV_BYTES        equ 8                   ; its size
+FV_LABEL        equ 16                  ; its name, NUL-ended
+FV_SIZE         equ 64
+FVF_WRITABLE    equ 1                   ; 'vol <n> rw' was said
+FVF_REMOVABLE   equ 2                   ; a stick, a card
+FVF_BOOT        equ 4                   ; the stick Axiom started from
+FE_LEN          equ 0                   ; a thing in a folder (RO_FS_LIST): dword, the record's bytes
+FE_ATTR         equ 4                   ; dword FEA_*
+FE_SIZE         equ 8                   ; bytes, 0 for a folder
+FE_YEAR         equ 16                  ; word: when it was last written (0: never said)
+FE_MONTH        equ 18                  ; byte, 1..12
+FE_DAY          equ 19
+FE_HOUR         equ 20
+FE_MIN          equ 21
+FE_SEC          equ 22
+FE_NAME         equ 24                  ; UTF-8, NUL-ended; the record is 8-aligned
+FEA_DIR         equ 1
+FEA_RO          equ 2
+FEA_HIDDEN      equ 4
+FEA_SYSTEM      equ 8
 
 ; a setting, as RO_SET_LIST gives it
 SI_NAME         equ 0                   ; 32 bytes, NUL-ended: display.theme ...
@@ -625,7 +677,8 @@ AW_NET          equ 1                   ; the network (SB_NET)
 AW_STORE        equ 2                   ; its own names in the store (SB_STORE)
 AW_DESK         equ 4                   ; the desktop, to open windows on (SB_DESK)
 AW_SETTINGS     equ 8                   ; the settings, to read and change (SB_SETTINGS)
-AW_ALL          equ 15
+AW_FILES        equ 16                  ; the files on every volume (SB_FILES)
+AW_ALL          equ 15 | AW_FILES
 
 ; the start block, at USER_START; the first thread starts with RDI = it
 SB_RING         equ 0                   ; dword: a handle to the task's ring
@@ -639,6 +692,12 @@ SB_STORE        equ 36                  ; dword: to the store under "name/", or 
 SB_NET          equ 40                  ; dword: to the network, or 0
 SB_DESK         equ 44                  ; dword: to the desktop, or 0
 SB_SETTINGS     equ 48                  ; dword: to the settings, or 0
+SB_FILES        equ 52                  ; dword: to the files, or 0
+SB_GIFT2        equ 56                  ; dword: a second thing it was given, or 0
+                                        ; (each given handle to a desktop, files,
+                                        ; the network, the store or the settings
+                                        ; is in its slot above too, if that was
+                                        ; empty)
 SB_ARGS         equ 64                  ; the arguments it was run with, NUL-ended
 SB_ARGS_MAX     equ 4096 - SB_ARGS - 1
 
@@ -654,19 +713,21 @@ SYS_THREAD_NEW  equ 6                   ; (entry, RSP, RDI) -> a thread, started
 SYS_YIELD       equ 7
 SYS_UNMAP       equ 8                   ; (memory): its mapping goes
 SYS_SPAWN       equ 9                   ; (memory, offset, bytes of "program args",
-                                        ; a handle to give it or 0) -> RAX = the
-                                        ; task, RDX = its first thread
+                                        ; a handle to give it or 0, a second or 0)
+                                        ; -> RAX = the task, RDX = its first thread
 SYS_CHANNEL_NEW equ 10                  ; -> RAX, RDX = the two ends of a channel
 SYS_WINDOW_NEW  equ 11                  ; (desktop, width, height, a channel's end,
-                                        ; which the window takes) -> RAX = the
-                                        ; window, RDX = its pixels: memory, B,G,R,x
-                                        ; at width * 4 bytes a row
+                                        ; which the window takes, WNF_*) -> RAX =
+                                        ; the window, RDX = its pixels: memory,
+                                        ; B,G,R,x at width * 4 bytes a row (with
+                                        ; WNF_RESIZE or WNF_FULL: the screen's
+                                        ; width * 4 a row, its height of rows)
 SYS_COUNT       equ 12
 
 ; what a window says, from the channel end it was given: a message of WE_SIZE
 ; bytes to its peer for each
 WE_KIND         equ 0                   ; dword: WE_KEY ...
-WE_CODE         equ 4                   ; dword: the key; the button (1 left, 2
+WE_CODE         equ 4                   ; dword: the key (WE_X: WM_*); the button (1 left, 2
                                         ; right, 3 middle); the wheel's notches
                                         ; (up positive)
 WE_X            equ 8                   ; dword, signed: the pointer, in the window
@@ -678,7 +739,116 @@ WE_RELEASE      equ 3                   ; and let go (anywhere)
 WE_MOVE         equ 4                   ; the pointer moved, a button held
 WE_WHEEL        equ 5
 WE_CLOSE        equ 6                   ; its close button: it is asked to go
+WE_RESIZED      equ 7                   ; its size now: WE_X wide, WE_Y high (draw
+                                        ; it all again, then show it)
+WE_LOOK         equ 8                   ; the look changed (LK_SERIAL): draw again
+WE_FOCUS        equ 9                   ; WE_CODE = 1: it has the keys now; 0: not
+WM_SHIFT        equ 1                   ; WE_KEY's WE_X: the modifiers held
+WM_CTRL         equ 2
+WM_ALT          equ 4
+WM_META         equ 8
+WNF_RESIZE      equ 1                   ; SYS_WINDOW_NEW: the user may resize it
+WNF_FULL        equ 2                   ; no frame, the whole screen, over the bar
+                                        ; and the dock
 WIN_MAX         equ 4096                ; a side, at most
+
+; the desktop's themes (theme.asm), and the names of their colors
+TH_DARK         equ 0
+TH_LIGHT        equ 1
+
+; the theme's colors, dwords (0xRRGGBB, or an alpha 0..256)
+TC_WINDOW       equ 0                   ; a window's own background, a terminal's
+TC_TITLE        equ 4                   ; the title bar of the window with the keys
+TC_TITLE_OFF    equ 8                   ; of the others
+TC_SEP          equ 12                  ; the line under a title bar
+TC_EDGE         equ 16                  ; a window's outline
+TC_EDGE_A       equ 20
+TC_TEXT         equ 24                  ; text: the first, second and third
+TC_TEXT2        equ 28                  ; kinds (labels, notes, what is off)
+TC_TEXT3        equ 32
+TC_BAR          equ 36                  ; the menu bar's tint, over the blur
+TC_BAR_A        equ 40
+TC_DOCK         equ 44                  ; the dock's
+TC_DOCK_A       equ 48
+TC_DOCK_EDGE    equ 52
+TC_DOCK_EDGE_A  equ 56
+TC_SHADOW_A     equ 60                  ; the shadow of the window with the keys
+TC_SHADOW2_A    equ 64                  ; of the others
+TC_LIGHT_OFF    equ 68                  ; a window's buttons, without the keys
+TC_TIP          equ 72                  ; a tooltip, a menu
+TC_TIP_A        equ 76
+TC_TIP_TEXT     equ 80
+TC_PANEL        equ 84                  ; an area raised in a window (a card)
+TC_LINE         equ 88                  ; lines inside a window
+TC_T_DIM        equ 92                  ; a terminal's notes
+TC_T_FAINT      equ 96
+TC_T_GOOD       equ 100
+TC_T_WARN       equ 104
+TC_T_BAD        equ 108
+TC_T_BLUE       equ 112
+TC_T_PCORE      equ 116
+TC_T_ECORE      equ 120
+TC_T_WHITE      equ 124                 ; what xterm's white and bright white,
+TC_T_BRIGHT     equ 128                 ; yellows, are here
+TC_T_YELLOW     equ 132
+TC_T_YELLOW2    equ 136
+TC_HOVER        equ 140                 ; under the pointer: a tint
+TC_HOVER_A      equ 144
+TC_COUNT        equ 148
+
+; the look: how the desktop looks, in memory it shares with programs, read
+; only (RO_DESK_LOOK): the theme, the scale, the screen's size, and the
+; fonts the desktop draws in
+LK_SERIAL       equ 0                   ; dword: one more each time it changes
+                                        ; (and windows are sent WE_LOOK)
+LK_S4           equ 4                   ; dword: quarters of a pixel a point
+LK_MODE         equ 8                   ; dword: TH_*
+LK_ACCENT       equ 12                  ; dword: 0xRRGGBB
+LK_SCR_W        equ 16                  ; dwords: the screen, pixels
+LK_SCR_H        equ 20
+LK_UF           equ 24                  ; dword: where the desktop's font is,
+                                        ; from the look's start (UFB_*)
+LK_MONO         equ 28                  ; dword: and the monospaced one (MFB_*)
+LK_C            equ 64                  ; the theme's colors (TC_*)
+LK_HEAD         equ 256
+; the desktop's font (Noto Sans): UFB_WEIGHTS weights (0 regular, 1
+; semibold) by UFB_SIZES sizes
+UFB_WEIGHTS     equ 0                   ; dword
+UFB_SIZES       equ 4                   ; dword
+UFB_UNIS        equ 8                   ; dword: entries in the code point table
+UFB_UNI         equ 12                  ; dword: where it is, from the font's
+                                        ; start: dword code point, dword glyph,
+                                        ; by code point
+UFB_DATA        equ 16                  ; dword: where its glyph tables and
+                                        ; coverage are; LKF_GLYPHS and LG_DATA
+                                        ; count from there
+UFB_PX          equ 20                  ; 12 bytes: each size's, in pixels
+UFB_FONTS       equ 32                  ; a font's table (LKF_*) for each, by
+                                        ; weight, then size
+LKF_GLYPHS      equ 0                   ; qword: its glyphs (LG_*), by number
+LKF_ASCENT      equ 8                   ; dwords, pixels: above the baseline,
+LKF_DESCENT     equ 12                  ; below it,
+LKF_LINE        equ 16                  ; a line,
+LKF_CAP         equ 20                  ; a capital letter's height
+LKF_SIZE        equ 24
+LG_DATA         equ 0                   ; dword: its coverage, a byte a pixel
+LG_ADV          equ 4                   ; word: its advance, 1/64 pixels
+LG_W            equ 6                   ; bytes: its bitmap's size
+LG_H            equ 7
+LG_LEFT         equ 8                   ; signed bytes: from the pen to its
+LG_TOP          equ 9                   ; left; from the baseline up to its top
+LG_SIZE         equ 12
+; the monospaced font (Cascadia Mono), MFB_SIZES sizes of cell
+MFB_SIZES       equ 0                   ; dword
+MFB_UNIS        equ 4                   ; dword: entries in the code point table
+MFB_UNI         equ 8                   ; dword: where it is: dword code point,
+                                        ; dword glyph code, by code point
+MFB_DATA        equ 12                  ; dword: where the coverage begins
+MFB_FONTS       equ 16                  ; for each size: qword where its glyphs
+                                        ; are, from MFB_DATA; dwords: a cell's
+                                        ; width and height. A glyph code: 32 to
+                                        ; 126 the glyph code - 32, 128 and up
+                                        ; code - 128 + 95; w * h bytes each
 
 ; UEFI memory types
 MT_RESERVED     equ 0

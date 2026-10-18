@@ -2445,14 +2445,19 @@ vt_osc_end:
     mov eax, 4
     jmp vt_color_reply
 .fg:
-    mov ecx, [look_text]
+    mov ecx, COL_TEXT
     jmp .asked
 .bg:
-    mov ecx, [look_panel]
+    mov ecx, COL_PANEL
     jmp .asked
 .cursor:
-    mov ecx, [look_accent]
+    mov ecx, COL_ACCENT
 .asked:
+    push rax                            ; as this theme draws them
+    mov eax, ecx
+    call theme_color
+    mov ecx, eax
+    pop rax
     cmp byte [rsi], '?'
     jne .out
     mov r8d, -1

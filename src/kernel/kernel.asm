@@ -36,6 +36,7 @@ section .rodata
 %include "gen/font.inc"
 align 64
 font_data:      incbin "gen/font.bin"
+font_end:
 
 section .text
 %include "lib.asm"
@@ -105,6 +106,11 @@ section .text
 %include "mandel.asm"
 %include "ui.asm"
 %include "shell.asm"
+%include "theme.asm"
+%include "draw.asm"
+%include "icons.asm"
+%include "look.asm"
+%include "fscap.asm"
 %include "settings.asm"
 %include "desk.asm"
 %include "term.asm"

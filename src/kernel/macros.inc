@@ -70,3 +70,41 @@
     shl rdx, 32
     or rax, rdx
 %endmacro
+
+; MIX dst, src, a, ia, t1, t2 (32-bit registers): dst = src * a + dst * ia,
+; on each byte, a + ia = 256. src, a and ia are kept.
+%macro MIX 6
+    mov %5, %2
+    and %5, 0x00FF00FF
+    imul %5, %3
+    mov %6, %1
+    and %6, 0x00FF00FF
+    imul %6, %4
+    add %5, %6
+    shr %5, 8
+    and %5, 0x00FF00FF
+    shr %1, 8
+    and %1, 0x00FF00FF
+    imul %1, %4
+    mov %6, %2
+    shr %6, 8
+    and %6, 0x00FF00FF
+    imul %6, %3
+    add %1, %6
+    and %1, 0xFF00FF00
+    or %1, %5
+%endmacro
+
+; SCALE dst, ia, t (32-bit): dst = dst * ia / 256 on each byte
+%macro SCALE 3
+    mov %3, %1
+    and %3, 0x00FF00FF
+    imul %3, %2
+    shr %3, 8
+    and %3, 0x00FF00FF
+    shr %1, 8
+    and %1, 0x00FF00FF
+    imul %1, %2
+    and %1, 0xFF00FF00
+    or %1, %3
+%endmacro

@@ -1135,7 +1135,7 @@ sh_head:
     mov r13, rsi
     mov r15d, edx
     mov dword [sh_grants], 0
-.grant:                                 ; +net, +store, +desk, +settings: for a program
+.grant:                                 ; +net, +store, +desk, +files, +settings: for a program
     mov rsi, [r13]
     cmp byte [rsi], '+'
     jne .granted
@@ -1146,7 +1146,7 @@ sh_head:
     add r13, 8
     dec r12d
     jnz .grant
-    KLOG "+net, +store, +desk and +settings come before a program's name"
+    KLOG "+net, +store, +desk, +files and +settings come before a program's name"
     stc
     jmp .out
 .granted:
@@ -1244,7 +1244,7 @@ sh_head:
     call user_start
     jmp .out
 .granted_command:
-    KLOG "+net, +store, +desk and +settings are for programs; '%s' is a command", rax
+    KLOG "+net, +store, +desk, +files and +settings are for programs; '%s' is a command", rax
     stc
     jmp .out
 .background_command:
@@ -1287,7 +1287,7 @@ sh_grant:
     clc
     jmp .out
 .none:
-    KLOG "'+%s' is not something a program can be given; there are +net, +store, +desk and +settings", rsi
+    KLOG "'+%s' is not something a program can be given; there are +net, +store, +desk, +files and +settings", rsi
     stc
 .out:
     pop rdi
@@ -1917,10 +1917,11 @@ str_sh_core:    db 'core', 0
 str_sh_net:     db 'net', 0
 str_sh_store:   db 'store', 0
 str_sh_desk:    db 'desk', 0
+str_sh_files:   db 'files', 0
 str_sh_settings: db 'settings', 0
 align 8
 sh_grants_names: dq str_sh_net, AW_NET, str_sh_store, AW_STORE, str_sh_desk, AW_DESK
-                dq str_sh_settings, AW_SETTINGS, 0, 0
+                dq str_sh_files, AW_FILES, str_sh_settings, AW_SETTINGS, 0, 0
 sh_escapable:   db ' "$|>;&\', 0x27, 0   ; what a \ takes as it is
 sh_tok_pipe:    db '|', 0
 sh_tok_gt:      db '>', 0
@@ -1976,7 +1977,8 @@ commands:
     VERB    'set',      cmd_set,      'set [name [value...]]: every variable ($name), one removed, or one set'
     COMMAND 'shell',    cmd_shell,    'a new shell, in a window of its own'
     COMMAND 'screen',   cmd_screen,   "what this shell's window shows, as text, to the serial log"
-    COMMAND 'win',      cmd_win,      'win [move <n> <x> <y> | size <n> <w> <h> | raise <n> | min <n> | close <n>]: the windows'
+    COMMAND 'win',      cmd_win,      'win [move <n> <x> <y> | size <n> <w> <h> | raise <n> | min <n> | zoom <n> | close <n>]: the windows'
+    THING   'theme',    themes_actions, 'how the desktop looks: light or dark, its accent, its scale'
     COMMAND 'info',     cmd_info,     'what this machine is'
     VERB    'cpus',     cmd_cpus,     'each logical CPU: kind, core, clock, heat, work'
     THING   'mem',      mem_actions,  'memory: what uses it, by firmware type, what an address is; a self-test'
@@ -2089,7 +2091,7 @@ sh_stage:       resd SH_STAGES          ; where each stage begins in sh_argv
 sh_status:      resb 1                  ; 1: the last command failed
 sh_bg:          resb 1                  ; 1: the command came with '&'
 alignb 4
-sh_grants:      resd 1                  ; what +net, +store, +desk granted (AW_*)
+sh_grants:      resd 1                  ; what +net, +store, +desk, +files granted (AW_*)
 sh_redir:       resb 1                  ; 0, 1 for >, 2 for >>
 shell_pending:  resb 1                  ; a terminal has the rest of a line to run
 alignb 8

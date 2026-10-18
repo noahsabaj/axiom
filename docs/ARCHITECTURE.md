@@ -64,7 +64,7 @@ loader reads: magic `AXIOMKRN`, entry point, file size, memory size.
 | 2 | `serial.asm`, `lib.asm`, `log.asm` | COM1 log, TSC time base, `sprintf`, `KLOG`; the clock and the boot volume into the log |
 | 3 | `cpu.asm` | CPUID features and brand, hybrid core types, PAT, NX, SSE/AVX through XSETBV, HWP, telemetry MSRs |
 | 4 | `pmm.asm`, `vmm.asm`, `heap.asm` | Bitmap page allocator from the UEFI memory map; the kernel's own page tables (no identity map, W^X), the vm region, the heap |
-| 5 | `gfx.asm`, `desk.asm`, `term.asm`, `window.asm`, `ui.asm` | Framebuffer, surfaces, alpha-blended glyphs; the desktop and the first shell's window (the others once the machine is up) |
+| 5 | `gfx.asm`, `theme.asm`, `draw.asm`, `icons.asm`, `desk.asm`, `term.asm`, `window.asm`, `ui.asm` | Framebuffer, surfaces, alpha-blended glyphs; the look, round shapes, shadows, blur and the desktop's font; the desktop and the first shell's window (the others once the machine is up) |
 | 6 | TSS, IST | Guarded stacks: the BSP moves onto its own, the loader's goes back; #DF, NMI and #MC each get one too |
 | 7 | `acpi.asm`, `smbios.asm` | MADT (CPUs, I/O APICs, overrides), MCFG, FADT, `_S5_`; board, BIOS and memory strings; OEM strings (`axiom.demo=off`: no zoom at boot) |
 | 8 | `pmm.asm` | Reclaim boot-services memory |
@@ -609,7 +609,11 @@ into) on screen and serial.
   ends by flushing both caches, updating FSInfo's next-free hint and telling
   the drive to flush. Replacing a file empties its entry before freeing the
   old clusters, so an interrupted write leaves an empty file, not a dangling
-  chain.
+  chain. `fat_rename` writes a thing's entries again under its new name, in
+  the same folder or another, its clusters left where they are (a folder
+  moved has its `..` pointed at its new parent); it puts the old entries
+  back if the new ones cannot be made, and refuses to move a folder into
+  itself or to move the shell's current folder or one it is in.
 - Shell: `disks`, `vol`, and the `files` thing (`files show`, `copy`,
   `move`, `new`, `write`, `remove`, `find`), `go`, `here`.
   File times come from the CMOS clock (`rtc.asm`, also `date`).
@@ -713,12 +717,12 @@ off. `log` shows the state; `log save`, `log on`, `log off`.
   later, and every settings object told (`cfg_notify`: `SG_CHANGED` set,
   its queue woken). `cfg_service`, from the main loop, runs each pending
   setting's apply (`SD_APPLY`) on the main thread, and saves.
-- **What reads them:** the look (`look_set`: `look_bg` .. `look_accent`
-  from `display.theme` and `display.accent`, read by the desk, the bar, the
-  frames and the terminals; text already written keeps the dark look's
-  `COL_*` in its cells, and `look_map` turns those into the look's at
-  drawing time), `look_backdrop` (the wallpaper: plain, or a gradient in
-  bands), `cfg_clock` (the bar's clock, from the CMOS clock), `cfg_font`
+- **What reads them:** the desktop's theme (`theme.asm`: `cfg_theme` makes
+  `display.theme`, `display.accent` and `desktop.wallpaper` its `th_mode`,
+  `th_accent_i`, the nearest of its eight accents, and `th_wall`, then
+  `theme_apply`; the shell's `theme` changes the same settings through
+  `cfg_set_look`, so each says what the other did), `cfg_clock` (the menu
+  bar's clock, from the CMOS clock: 24-hour, 12-hour or none), `cfg_font`
   (`gfx_init`'s font: `display.text-size`), `cfg_repeat_delay` and
   `cfg_repeat_every` (USB key repeat), `cfg_key` (Dvorak and Colemak, by
   character, on USB and PS/2), `cfg_pointer` and `cfg_wheel`, `cfg_host`
@@ -858,7 +862,7 @@ off. `log` shows the state; `log save`, `log on`, `log off`.
   meanwhile is forgotten. If it closes just as it is used, before anything
   comes back, the request goes again, once, on a new connection.
   `http_hangup` lets a client close as soon as it has what it wants.
-  `http <host[:port][/path]> [file]` is its own client: a GET. Up to 1 MiB
+  `http <host[:port][/path]> [file]` is its own client: a GET. Up to 4 MiB
   of the answer is kept; then the status line, `Content-Type`, `Location`
   and `Transfer-Encoding`, and the first 20 lines of the body, or the body
   goes to a file on the current volume. `https://` goes over `tls.asm`
@@ -1150,49 +1154,93 @@ text rows.
 
 ## The desktop: `desk.asm`
 
+- **The look** (`theme.asm`): light or dark, an accent, and a scale
+  (`ui_s4`, quarters of a pixel a point: 2560×1600 is two pixels a point).
+  `th_c` holds the colours by role (`TC_WINDOW`, `TC_TEXT`, `TC_PANEL`,
+  ...); `theme_color` maps the terminal's palette into them. `theme_apply`
+  loads one and `desk_restyle` remakes what was drawn from it: the
+  wallpaper, the bar, the shadows, the icons, the cursor, every window. The
+  `theme` thing in the shell shows and changes it. Light or dark, the accent
+  and the wallpaper (the theme's own aurora, plain, dusk, ocean, graphite:
+  `walls`, a gradient and soft lights each) are settings, kept on the stick.
+- **Drawing** (`draw.asm`): rounded rectangles walked as spans with an
+  anti-aliased edge (`rr_walk`), soft shadows made once per radius and
+  margin (`shadow_build`, `gfx_shadow`: corners, edges fading inside and
+  out, the inside where the window leaves it showing), box blur for the
+  frosted glass, and the desktop's font (`uf_text`, Noto Sans regular and
+  semibold, from `gen/uifont.*`). Images are premultiplied ARGB.
+- **Icons** (`icons.asm`): each app's icon is a small program of shapes
+  (gradients, round rectangles, circles, polygons, a letter) in thousandths
+  of its size, drawn at the scale and given a shadow; a program's window
+  without one gets a letter on a colour from its name. The cursor is drawn
+  the same way.
 - **Windows** (`WN_*`): where the frame is, the client's size, its surface,
-  flags (`WF_SHOWN`, `WF_CLOSE`, `WF_RESIZE`, `WF_CLOSING`, `WF_PROGRAM`), an
-  id, a title, and an ops table: paint, key, click (press and release, at a
-  point in the client), wheel, close, move. `win_new` makes one, cascaded
-  unless told where; `win_move`, `win_resize` (`win_fit`: at least its
-  minimum, at most the screen, repainted), `win_focus` (raised, with the
-  keys), `win_minimise`, `win_close` (destroyed by the main loop, after its
-  own close op).
-- **Stacking:** `desk_z` bottom to top, `desk_wins` by slot (the bar's
-  order), `desk_focus` the window with the keys. A title bar always stays
-  on the screen, under the bar.
+  flags (`WF_SHOWN`, `WF_CLOSE`, `WF_RESIZE`, `WF_CLOSING`, `WF_PROGRAM`,
+  `WF_ZOOMED`), an id, a title, the app it belongs to, and an ops table:
+  paint, key, click (press and release, at a point in the client), wheel,
+  close, move. `win_new` makes one, cascaded unless told where; `win_move`,
+  `win_resize` (`win_fit`: at least its minimum, at most the screen,
+  repainted), `win_focus` (raised, with the keys), `win_minimise` (a
+  picture of it kept for the dock), `win_zoom` (to fill the space between
+  the bar and the dock, and back), `win_close` (destroyed by the main loop,
+  after its own close op).
+- **Stacking:** `desk_z` bottom to top, `desk_wins` by slot,
+  `desk_focus` the window with the keys. A title bar always stays on the
+  screen, under the bar.
 - **Damage:** `win_damage` (any thread) adds a rectangle of the screen to a
   list of 16 under a lock (once it is full, one rectangle around them
   all).
   `desk_update`, on the main thread, composes each one into the back buffer
-  (the background, the windows bottom to top, each frame then its client
-  copied in, the bar last) and copies it to the screen.
-- **The frame:** a border, a title bar with a minimise button (and a close
-  button if the window can close), and a grip in the client's corner if it
-  resizes. **The bar** across the top: AXIOM, `+ shell`, a button per window
-  (a click shows, raises or minimises it), the status at the right end.
+  (the wallpaper, the windows bottom to top, each its shadow, its frame
+  then its client copied in, the bar and the dock last, the dock's glass
+  blurred from what is under it) and copies it to the screen.
+- **The frame:** round corners, a shadow (deeper for the window with the
+  keys), and three buttons at the left of the title bar: close (if the
+  window can close), minimise and zoom, coloured while the window has the
+  keys or the pointer is over them. A window that resizes does so from any
+  edge.
+- **The menu bar** across the top: the mark, the name of the app in front,
+  and at the right the status and the time (`desk_tick` redraws it each
+  minute).
+- **The dock** at the bottom, frosted glass: the apps (Terminal, Files,
+  Notes, Browse, Paint, Settings, System) with a dot under each running
+  one, then programs' windows that are none of them, then past a line the
+  minimised windows' pictures. A click on an app brings its windows forward
+  or starts it; on Terminal, while a shell has the keys, it opens another;
+  on a picture, it shows the window again. Its name shows over it.
 - **The pointer** (`desk_press`, `desk_release`, `desk_motion`,
   `desk_wheel`): a press raises and focuses what is under it; on a title
-  bar it drags, on the grip it resizes, on a button it waits for the release
-  over the same button; in a client it goes to the window's click op, and so
-  does the release. The wheel goes to the client under the pointer.
+  bar it drags (a double click zooms), on an edge it resizes, on a button
+  or the dock it waits for the release over the same one; in a client it
+  goes to the window's click op, and so does the release. The wheel goes
+  to the client under the pointer.
 - `win` lists the windows (a shell's with its lines and how far it is
-  scrolled back); `win move|size|raise|min|close <n>` acts on one.
+  scrolled back); `win move|size|raise|min|zoom|close <n>` acts on one.
 
 ## Program windows: `window.asm`
 
 - A program that wants the desktop (`AW_DESK`, or `+desk`) gets a handle to it (`OT_DESK`,
   `SB_DESK`, right `RT_DESK_WINDOW`). `SYS_WINDOW_NEW(desktop, width,
-  height, a channel's end)` opens a window (`OT_WINDOW`, `WO_*`) and returns
-  it and its pixels: a block of memory the program maps, B,G,R,x at width ×
-  4 bytes a row, which the desktop copies from as it composes. Its size is
-  fixed (no grip); its title starts as the program's name.
+  height, a channel's end, WNF_*)` opens a window (`OT_WINDOW`, `WO_*`) and
+  returns it and its pixels: a block of memory the program maps, B,G,R,x at
+  width × 4 bytes a row, which the desktop copies from as it composes. Its
+  title starts as the program's name. With `WNF_RESIZE` the user may resize
+  it: the pixels are as large as the screen, and `WE_RESIZED` says how much
+  of them the window shows now; `WNF_FULL` is the whole screen, without a
+  frame.
 - **What happens to it** goes to the program as messages of `WE_SIZE`
   bytes, sent from the end it was given (`ch_post`, the kernel's own send)
   so they arrive at the end the program kept: `WE_KEY` while it has the
   keys, `WE_PRESS` and `WE_RELEASE` (the button, where), `WE_MOVE` while a
-  button is held in it, `WE_WHEEL`, and `WE_CLOSE` from its close button or
-  `win close`, which only ask (`OP_ASK`).
+  button is held in it, `WE_WHEEL`, `WE_CLOSE` from its close button or
+  `win close`, which only ask (`OP_ASK`), `WE_RESIZED`, `WE_FOCUS` (it has
+  the keys, or not) and `WE_LOOK`.
+- **The look** (`look.asm`): one block of memory, made at boot, that
+  programs map read only (`RO_DESK_LOOK`): the theme's colours by role, the
+  accent, the scale, the screen's size, and the desktop's fonts with the
+  tables that find a glyph (Noto Sans, `UFB_*`, and Cascadia Mono,
+  `MFB_*`). When the theme changes, `look_update` writes it again, counts
+  `LK_SERIAL` up and sends every program's window `WE_LOOK`.
 - **On its ring:** `RO_WIN_SHOW` (a rectangle, or all of it) puts what was
   drawn on the screen; `RO_WIN_TITLE` retitles it. Both need `RT_WIN_DRAW`.
 - The program's side runs on any CPU and never touches the desktop's own
@@ -1201,6 +1249,95 @@ text rows.
   `wo_service` (from `desk_service`) opens, retitles and closes. Showing only
   adds damage, which any thread may. The window closes when its last handle
   goes (`wo_orphan`): the program ended, was killed, or its shell closed.
+  The keys then go back to the window that had them before.
+
+## Files for programs: `fscap.asm`
+
+- A program run with `AW_FILES` (or `+files`) gets a handle to every FAT
+  volume (`OT_FILES`, `SB_FILES`). `RO_FS_SUB` makes one that reaches a
+  single folder and what is under it, to hand to another program. A path is
+  `FS_PATH` bytes, NUL-ended: with a handle to every volume
+  `vol<n>:/folder/file`; with one to a folder, from that folder. No `.` or
+  `..`.
+- On the ring: `RO_FS_VOLUMES`, `RO_FS_LIST`, `RO_FS_READ`, `RO_FS_WRITE`
+  (a whole file, made or replaced), `RO_FS_MKDIR`, `RO_FS_REMOVE`,
+  `RO_FS_RENAME` (a file or a folder, renamed or moved to another folder
+  of its volume, in place), `RO_FS_SUB`. What a volume allows still holds: a program
+  never makes one writable, only the user's `vol <n> rw` does, and until
+  then a write is `E_READONLY`.
+- The FAT code is the main thread's alone: the program's thread queues what
+  it asks for (`fs_call`) and waits; `fs_service`, from the main loop, does
+  it, through kernel buffers the program's thread copies to and from.
+- `src/user/fstest.asm` checks it all, on a read-only volume and a
+  writable one, in the user suite.
+
+## Programs' controls: `src/user/kit.inc`
+
+- What a program's window is made of, in the desktop's look: `kit_open`
+  (the window, the look mapped, the fonts found), `kit_next` (the next
+  event, or a deadline), drawing into the pixels at the user's scale
+  (`kit_pt`: points to pixels) inside a clip (fills, round rectangles,
+  frames, soft shadows, anti-aliased strokes), text in Noto Sans at the
+  nearest size (`kit_font`, `kit_text`, `kit_text_w`) and in Cascadia Mono
+  (`kit_mono`, `kit_mtext`), and the controls drawn the desktop's way:
+  buttons (`KB_*`: the default one in the accent, held, off), one-line fields with a caret,
+  choosing by keys and the mouse and the clipboard (`kit_edraw`,
+  `kit_ekey`, `kit_eclick`; `KE_INDENT` leaves room for an icon before
+  the text), and scrollers. Memory comes from `kit_alloc` (a mapped block,
+  by handle); `kit_close` lets the window go before the program ends.
+
+## Notes: `src/user/notes.asm`, `src/user/notes/`
+
+- A text editor in a window of the desktop's look, the keys a Mac's
+  editors have with ctrl for cmd. Each tab is a document (`D_*`,
+  `doc.inc`): its text in one block of memory with the path before it (so a
+  read or a write is one call on the files handle), a table of where each
+  line starts, and an undo log of inserts and deletes (`U_*`) in groups, so
+  a run of typing undoes at once, and so does replacing all.
+- **Colours** (`lex.inc`): a lexer per language (assembly, C and its kin,
+  Python, shell and settings, JSON, Markdown) classes each byte of a line
+  (`T_*`), carrying a state from line to line (block comments, triple
+  quotes, fences) that is cached for the lines above what is drawn.
+- **Drawing** (`view.inc`): the tabs, the bar, the lines (the current one
+  marked, what is chosen, what was found), the line numbers, the caret
+  (blinking, only the changed rows redrawn) and the status line, in the
+  theme's colours with a palette like Xcode's.
+- **Finding** (`find.inc`): find, replace (one, or all as one undo) and
+  go to a line, in a bar over the text, live as the field changes.
+- **Sheets** (`panel.inc`): Open and Save As browse the volumes (folders
+  first, sorted, type to select), make folders and ask before replacing;
+  closing what was not saved asks Save, Don't Save or Cancel.
+
+## Files: `src/user/files.asm`, `src/user/files/`
+
+- A file browser in the desktop's look, laid out as Finder's: the sidebar,
+  the toolbar, what the folder holds, the path bar. Each part is drawn
+  again only when it changed (`N_*`), and only it is shown.
+- **The model** (`model.inc`): a folder is listed whole (`RO_FS_LIST`) into
+  one block; what is shown at all (not hidden, not a system file, no name
+  starting with `.`) is kept by index, then what the search leaves, sorted
+  folders first by name (as people read them: "file 2" before "file 10"),
+  date, size or kind, either way. Back and forward are stacks of paths; the
+  folder left is chosen in the one gone back or up to.
+- **Icons** (`icons.inc`): a kind for each ending (`KD_*`: its name, whether
+  it is text, a badge's colour), drawn at any size from round rectangles and
+  anti-aliased strokes: folders, pages with a folded corner and lines or a
+  badge, program tiles, drives, a lock, chevrons, a lens.
+- **The view** (`view.inc`): icons in a grid with names in up to two lines,
+  or a list with headings that sort it; a menu, an alert or Quick Look over
+  the window (a file's text in Cascadia Mono, scrolled, or what it is).
+  Presses find what they hit in tables made as each part is drawn.
+- **Doing** (`ops.inc`): a folder opens in place; text (by its ending, or no
+  NUL in its first page) opens in Notes, spawned with two handles: one to
+  that folder alone (`RO_FS_SUB`) and one to the desktop (`RO_DUP`), so it
+  reaches nothing else. Files keeps each Notes' thread and, closing, lets
+  its window go and waits for them (a program's children end with it).
+  Renames and moves are `RO_FS_RENAME`; a copy is read and written whole;
+  a folder is deleted with what it holds, deepest first. Every write is
+  checked against the volume first: a read-only one is said, with the
+  `vol <n> rw` that would allow it.
+- The user suite makes a folder with Files, names it, and checks the stick
+  from the host.
 
 ## The browser: `src/user/browse.asm`, `src/user/web/`
 
@@ -1452,7 +1589,7 @@ text rows.
   (a glyph, its attributes, a foreground and a background colour of 24
   bits each), the cursor, the scroll-back, its own input line and history
   (`TW_SH_*`, `shell.asm`), and whether a command is still running in it.
-  `+ shell` or `shell` opens one; its close button closes it. `screen`
+  Terminal in the dock or `shell` opens one; its close button closes it. `screen`
   writes what the window shows to the serial log, as text (for tests).
 - **xterm** (`vt.asm`): what a Linux program writes is read as xterm
   would: UTF-8 (wide characters take two cells, combining ones none, a

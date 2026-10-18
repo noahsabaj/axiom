@@ -17,16 +17,44 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   sensor) and package power (RAPL).
 - A Mandelbrot zoom in AVX2 + FMA running on all cores at once, with a
   one-core-versus-all benchmark.
-- **A desktop of windows**: System, Processors, the Mandelbrot and each
-  shell are overlapping windows, dragged by their title bars, resized from
-  the corner, raised and given the keys by a click, minimised and closed by
-  their buttons; a bar across the top lists them. `+ shell` on the bar (or
-  `shell`) opens another shell, each with its own output, scroll-back (the
-  wheel), history and commands running; what a command prints later goes to
-  the shell it was typed in. `win` lists the windows and moves, sizes,
-  raises, minimises or closes one. **Programs open windows of their own**,
+- **A desktop of windows**, light or dark (`theme`), with an accent colour
+  and a scale: a menu bar with the app in front, the time and what the
+  machine is doing; a frosted dock of apps, their running dots, and
+  pictures of minimised windows; windows with round corners and soft
+  shadows, in Noto Sans. System, Processors, the Mandelbrot and each shell
+  are windows, dragged by their title bars, resized from any edge, raised
+  and given the keys by a click, closed, minimised into the dock and zoomed
+  by their three buttons (or a double click on the title bar). Terminal in
+  the dock (or `shell`) opens another shell, each with its own output,
+  scroll-back (the wheel), history and commands running; what a command
+  prints later goes to the shell it was typed in. `win` lists the windows
+  and moves, sizes, raises, minimises, zooms or closes one. **Programs open
+  windows of their own**,
   by capability: pixels they draw into, keys, clicks, drags and the wheel
   as messages over a channel, and a title; `paint` is one to draw in.
+  Their windows can resize, and draw in the desktop's own look: its
+  colours, its scale and its fonts, shared with them (`src/user/kit.inc`).
+- **Notes**, `notes [file ...]`: a text and code editor in tabs. Line
+  numbers, the current line marked, colours for assembly, C and its kin,
+  Python, shell and settings files, JSON and Markdown; find and replace in a
+  bar, go to a line, undo and redo, the clipboard, indenting, comments on
+  and off, lines moved and copied, the text larger or smaller; Open and
+  Save As sheets that browse the volumes and make folders, and asking
+  before closing what was not saved. Files come by capability: a program
+  given `AW_FILES` (or `+files`) reaches the FAT volumes through a handle,
+  or one folder of them through a handle made from it, and writes only a
+  volume the user made writable.
+- **Files**, `files [folder]` (or Files in the dock): the volumes laid out
+  as Finder lays them out. The volumes at the left; back, forward, the
+  folder's name, icons or a list and a search at the top; icons for
+  folders, pages with a badge of what they hold and program tiles, or a
+  list with when each was written, its size and its kind, sorted by any of
+  them; the path at the bottom, each part a way back. A folder opens in
+  place; a text file opens in Notes, which is handed that folder alone and
+  nothing more; space looks at a file without opening it. Things are made,
+  renamed, duplicated, copied, moved and deleted (a folder and all it
+  holds, once asked) with Finder's keys or a right click, and only on a
+  volume the user made writable: Files says how, never does it itself.
 - **A web browser**, `browse [url]`: HTML and plain text over HTTP and
   HTTPS in a window of its own, laid out and drawn with anti-aliased
   DejaVu text (headings, bold, italic, monospace, lists, quotes, tables,
@@ -164,7 +192,7 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   killing one (ctrl+C, or a program killing its child) ends every program
   it started too. Several run at once (`&`, `tasks stop <program>`), and
   each gets only the capabilities it declares (the network, the store, the
-  desktop, the settings) or is granted for that run (`+net hello`). `hello`, `test`, `child`, `fault`, `spin`, `stash`, `paint`, `browse`, `settings` and `compose` come with it
+  desktop, the files, the settings) or is granted for that run (`+net hello`). `hello`, `test`, `child`, `fault`, `spin`, `stash`, `paint`, `browse`, `notes`, `files`, `fstest`, `settings` and `compose` come with it
   (`src/user/`); `user test` runs them all, with a fault of every kind.
 - **Linux programs, unchanged**: `linux <program> [arguments]` runs an
   x86-64 Linux program from a root on the boot stick (`tools/mkroot.py`
@@ -439,6 +467,7 @@ tools/test/             host-side tests for self-contained modules (tls: the
                         runs them
                         all at once, and qemu.py boots side by side
 tools/mkfont.py         rasterize the console font into src/kernel/gen/
+tools/mkuifont.py       rasterize the desktop's font into src/kernel/gen/
 docs/                   vision and architecture
 ```
 
@@ -448,6 +477,11 @@ The console font is rasterized from **Cascadia Mono**, © Microsoft Corporation,
 licensed under the [SIL Open Font License 1.1](https://openfontlicense.org).
 The bitmaps in `src/kernel/gen/` are a derivative of it and carry the same
 license. `tools/mkfont.py` regenerates them from any TrueType font you prefer.
+
+The desktop's font (`uifont.*` in `src/kernel/gen/`) is rasterized from
+**Noto Sans**, © Google LLC, under the [SIL Open Font License 1.1](https://openfontlicense.org),
+with a few symbols from **DejaVu Sans** (Bitstream Vera license, and public
+domain changes). `tools/mkuifont.py` regenerates it.
 
 The trusted roots in `src/kernel/gen/roots.asm` are the public keys and names
 of the certificate authorities in Mozilla's root store, taken from

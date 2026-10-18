@@ -29,8 +29,11 @@ WO_CH           equ 88                  ; the channel end it speaks from, a refe
 WO_W            equ 96                  ; dword: its size
 WO_H            equ 100                 ; dword
 WO_FLAGS        equ 104                 ; dword WOF_*: for the main loop to do
+WO_WNF          equ 108                 ; dword WNF_*: as it was asked for
 WO_TITLE        equ 112
-WO_SIZE         equ WO_TITLE + WN_TITLE_MAX
+WO_PROG         equ WO_TITLE + WN_TITLE_MAX ; the program's name (the dock's)
+WO_PROG_MAX     equ 32
+WO_SIZE         equ WO_PROG + WO_PROG_MAX
 
 WOF_OPEN        equ 1                   ; its window is to be opened
 WOF_TITLE       equ 2                   ; retitled
@@ -87,14 +90,18 @@ desk_program:
     ret
 
 ; sys_window_new(EDI = the desktop, ESI = width, EDX = height, ECX = a
-; channel's end) -> RAX = a handle to the window, RDX = to its pixels. The
-; program keeps its handle to the end: closing it cuts what the window says.
+; channel's end, R8D = WNF_*) -> RAX = a handle to the window, RDX = to its
+; pixels. The program keeps its handle to the end: closing it cuts what the
+; window says. One the user may resize has pixels for the whole screen, a
+; row of them the screen's width.
 sys_window_new:
     push rbx
     push r12
     push r13
     push r14
     push r15
+    and r8d, WNF_RESIZE
+    push r8                             ; [RSP]: WNF_*
     mov r12d, esi
     mov r13d, edx
     mov r14d, ecx
@@ -127,10 +134,21 @@ sys_window_new:
     jz .no_object
     mov rbx, rax                        ; RBX = the window, its first reference
     mov [rbx + WO_CH], r15
-    mov [rbx + WO_W], r12d
-    mov [rbx + WO_H], r13d
+    mov eax, [rsp]
+    mov [rbx + WO_WNF], eax
     mov edi, r12d
     imul rdi, r13
+    test eax, WNF_RESIZE
+    jz .pixels
+    cmp r12, [scr_w]                    ; within the screen, which its pixels
+    cmova r12, [scr_w]                  ; cover
+    cmp r13, [scr_h]
+    cmova r13, [scr_h]
+    mov rdi, [scr_w]
+    imul rdi, [scr_h]
+.pixels:
+    mov [rbx + WO_W], r12d
+    mov [rbx + WO_H], r13d
     shl rdi, 2
     lea rsi, [str_win_pixels]
     call mem_new
@@ -149,6 +167,18 @@ sys_window_new:
     dec ecx
     jnz .name
 .named:
+    mov byte [rdi], 0
+    lea rsi, [rbx + WO_TITLE]           ; and so is whose it is
+    lea rdi, [rbx + WO_PROG]
+    mov ecx, WO_PROG_MAX - 1
+.prog:
+    lodsb
+    test al, al
+    jz .progged
+    stosb
+    dec ecx
+    jnz .prog
+.progged:
     mov byte [rdi], 0
     mov dword [rbx + WO_FLAGS], WOF_OPEN
     mov rdi, [rbx + WO_MEM]             ; the program's handles: its pixels,
@@ -194,6 +224,7 @@ sys_window_new:
     xor edx, edx
 .done:
     call op_done
+    pop r8
     pop r15
     pop r14
     pop r13
@@ -449,6 +480,11 @@ wo_open:
     mov r8, -1
     xor r9d, r9d
     mov r10d, WF_CLOSE | WF_PROGRAM
+    test dword [rbx + WO_WNF], WNF_RESIZE
+    jz .new
+    or r10d, WF_RESIZE
+.new:
+    lea r11, [rbx + WO_PROG]
     call win_new
     test rax, rax
     jz .full
@@ -459,6 +495,11 @@ wo_open:
     mov eax, [rbx + WO_W]
     mov [rdi + WN_SF + SF_W], rax
     shl rax, 2
+    test dword [rbx + WO_WNF], WNF_RESIZE
+    jz .pitch
+    mov rax, [scr_w]                    ; a row: the screen's width
+    shl rax, 2
+.pitch:
     mov [rdi + WN_SF + SF_PITCH], rax
     mov eax, [rbx + WO_H]
     mov [rdi + WN_SF + SF_H], rax
@@ -470,6 +511,15 @@ wo_open:
     WIN_LOCK
     mov [rbx + WO_WIN], rdi
     WIN_UNLOCK
+    test dword [rbx + WO_WNF], WNF_RESIZE
+    jz .focus
+    push rbx                            ; the size it was given, if the
+    push rdi                            ; screen took less
+    mov rbx, rdi
+    call prog_resized
+    pop rdi
+    pop rbx
+.focus:
     jmp win_focus
 .full:
     lea rax, [rsp + 8]
@@ -496,7 +546,7 @@ wo_post:
 prog_key:
     mov esi, eax
     mov edi, WE_KEY
-    xor edx, edx
+    movzx edx, byte [kbd_got]           ; with the modifiers it came with
     xor ecx, ecx
     jmp wo_post
 
@@ -536,6 +586,39 @@ prog_ask:
     xor edx, edx
     xor ecx, ecx
     jmp wo_post
+
+; prog_resized(RBX = its window on the desktop, its client now WN_W by
+; WN_H): its pixels shown that size, and the program told. Preserves RBX,
+; RBP, R12-R15.
+prog_resized:
+    mov rdi, [rbx + WN_DATA]
+    test rdi, rdi
+    jz .out                             ; not its yet (win_new)
+    mov rax, [rbx + WN_W]
+    mov rcx, [rbx + WN_H]
+    mov [rbx + WN_SF + SF_W], rax
+    mov [rbx + WN_SF + SF_H], rcx
+    WIN_LOCK
+    mov [rdi + WO_W], eax
+    mov [rdi + WO_H], ecx
+    WIN_UNLOCK
+    mov edx, eax
+    mov edi, WE_RESIZED
+    xor esi, esi
+    jmp wo_post
+.out:
+    ret
+
+; prog_focus(RBX = its window, ESI = 1: it has the keys now, 0: not)
+prog_focus:
+    cmp qword [rbx + WN_DATA], 0
+    je .out
+    mov edi, WE_FOCUS
+    xor edx, edx
+    xor ecx, ecx
+    jmp wo_post
+.out:
+    ret
 
 prog_close:
     mov rdi, [rbx + WN_DATA]
