@@ -18,6 +18,10 @@ the next one's, and checks what each printed:
     a quote not closed, '&' (not yet);
   - what prints, piped as lines ('echo hi | count'); cpus, mem, threads,
     tasks as records, and 'tasks stop' refusing the kernel's own task;
+  - programs by name, case aside, and by path; each given only what its
+    header wants, and what +net, +store, +desk grant for one run; '&' runs
+    one in the background, ctrl+C stops only the one in front, 'tasks stop'
+    takes a name; a program's exit code is what && and || see;
   - afterwards, the stick's FAT is checked from here: no damage, and the
     files the shell wrote hold what they should.
 Outputs go to build/test/shell/.
@@ -205,8 +209,8 @@ STEPS = [
     ("nonsense || echo or-ran", lambda l: l[-1:] == ["or-ran"], "|| after a failure"),
     ("echo ok || echo not-run", lambda l: l == ["ok"], "|| after a success: not run"),
     ("echo \"open", said("a quote is not closed"), "a quote not closed"),
-    ("uptime &", said("'&' (in the background) comes with programs by name; not yet"),
-     "&: not yet"),
+    ("uptime &", said("'&' is for programs; 'uptime' is a command"),
+     "& after a command that prints: no"),
     ("echo hi | count", lambda l: l[-1:] == ["1"], "what prints, piped: its lines"),
     ("cpus | count", lambda l: l == ["4"], "cpus | count: 4"),
     ("cpus | pick cpu kind | to json", lambda l: len(json.loads("\n".join(l))) == 4 and
@@ -231,6 +235,52 @@ STEPS = [
     ("files remove a.txt list.json", lambda l: l == ["removed 2 of 2"], "files remove two"),
 ]
 
+# programs: each typed with the mark on the same line (after ';'), which
+# runs once the program has ended, or with ctrl+C sent first
+LINE, CTRL_C = "line", "ctrl+c"
+PROGRAMS_STEPS = [
+    ("hello one two", lambda l: "Hello from ring 3!" in l and "hello: arguments: one two" in l
+     and "hello: given: nothing" in l and "run: HELLO exited with 0" in l,
+     "a program by its name; it gets only what it wants: nothing", LINE),
+    ("+net +desk hello", said("hello: given: net desk"), "+net +desk: granted, for that run",
+     LINE),
+    ("hello", said("hello: given: nothing"), "and only for that run", LINE),
+    ("HELLO", said("run: HELLO exited with 0"), "its name in any case", LINE),
+    ("/EFI/AXIOM/HELLO.AXE by path", said("hello: arguments: by path"), "a program by its path",
+     LINE),
+    ("run hello via run", said("hello: arguments: via run"), "run <program>, as its name", LINE),
+    ("+bogus hello", said("'+bogus' is not something a program can be given; there are +net, "
+                          "+store and +desk"), "+bogus: not a capability"),
+    ("+net files", said("+net, +store and +desk are for programs; 'files' is a command"),
+     "+net before a command: no"),
+    ("+net", said("+net, +store and +desk come before a program's name"), "+net alone: no"),
+    ("files &", said("'&' is for programs; 'files' is a command"), "& after a command: no"),
+    ("hello | count &", said("a program in the background has no | or > after it"),
+     "& after a pipeline: no"),
+    ("fault && echo not-after-fault", lambda l: said("run: FAULT exited with 1")(l) and
+     not said("not-after-fault")(l), "&& after a program that failed: not run", LINE),
+    ("fault || echo after-fault", said("after-fault"), "|| after a program that failed", LINE),
+    ("hello && echo after-hello", lambda l: l[-1:] == ["after-hello"],
+     "&& after a program that worked, once it ended", LINE),
+    ("spin &", lambda l: any(re.fullmatch(r"run: SPIN in the background, task \d+ \('tasks "
+                                          r"stop \d+' stops it\)", x) for x in l),
+     "spin &: in the background, the prompt back at once"),
+    ("spin 2 wait &", said("run: SPIN in the background"), "and another"),
+    ("tasks | where name = SPIN | count", lambda l: l == ["2"], "tasks: both running"),
+    ("user", said("running: SPIN, SPIN"), "user: both running"),
+    ("spin 3", lambda l: sum("run: SPIN stopped" in x for x in l) == 1,
+     "ctrl+C stops the program in front", CTRL_C),
+    ("tasks | where name = SPIN | count", lambda l: l == ["2"],
+     "and not those in the background"),
+    ("tasks stop spin", lambda l: sum(bool(re.fullmatch(r"tasks: \d+ \(SPIN\) stopped", x))
+                                      for x in l) == 2, "tasks stop spin: each of that name"),
+    ("tasks | where name = SPIN | count",       # their ends may be said meanwhile
+     lambda l: [x for x in l if x != "run: SPIN stopped"] == ["0"], "none left"),
+    ("tasks stop spin", said("tasks: no program called spin is running"),
+     "tasks stop spin again: none"),
+    ("user", said("running: none"), "user: nothing running"),
+]
+
 
 def jobs():
     OUT.mkdir(parents=True, exist_ok=True)
@@ -240,8 +290,16 @@ def jobs():
                     "--file", f"notes.txt={OUT / 'notes.txt'}"],
                    cwd=ROOT, check=True, capture_output=True)
     script = ["until log: kept in", "wait 0.5", f"type echo mark''-1{NL}", "until mark-1"]
-    for i, (typed, _, _) in enumerate(STEPS):
-        script += [f"type {typed}{NL}", f"type echo mark''{i}{NL}", f"until mark{i}"]
+    for i, (typed, _, _, *how) in enumerate(STEPS + PROGRAMS_STEPS):
+        if how == [LINE]:
+            script += [f"type {typed} {SEMI} echo mark''{i}{NL}", f"until mark{i}"]
+            continue
+        script += [f"type {typed}{NL}"]
+        if how == [CTRL_C]:
+            script += ["wait 1.5", "sendkey ctrl-c", "until stopped", "wait 0.3"]
+        script += [f"type echo mark''{i}{NL}", f"until mark{i}"]
+        if typed.startswith("tasks stop"):
+            script += ["wait 0.5"]                      # their ends said, after
     script += [f"type poweroff{NL}", "ended"]
     return {"shell": (script, ["--smp", "4", "--stick", stick.relative_to(ROOT).as_posix()],
                       60)}
@@ -282,7 +340,7 @@ def main():
     log, err = logs["shell"]
     got = outputs(log)
     print("-- the shell")
-    for i, (typed, check, what) in enumerate(STEPS):
+    for i, (typed, check, what, *_) in enumerate(STEPS + PROGRAMS_STEPS):
         lines = got.get(i)
         try:
             ok = lines is not None and bool(check(lines))

@@ -88,6 +88,7 @@ shell_resume:
     cmp byte [rax + TW_SH_REST], 0
     jne .rest
     mov byte [rax + TW_SH_WAIT], 0
+    mov byte [rax + TW_SH_FAILED], 0    ; (nothing after it to know)
     call shell_prompt
     jmp .out
 .rest:
@@ -144,7 +145,9 @@ shell_rest:
     rep movsb
     mov byte [rbx + TW_SH_REST], 0
     mov byte [fat_writing], 0
-    mov byte [sh_status], 0             ; what it waited for counts as done
+    xor eax, eax                        ; what it waited for: done, or a
+    xchg al, [rbx + TW_SH_FAILED]       ; program that failed
+    mov [sh_status], al
     call rec_init
     jc .prompt
     movzx edx, byte [rbx + TW_SH_RLINK]
@@ -383,8 +386,10 @@ sh_sequence:
     cmp byte [sh_status], 0
     je .after
 .run:
+    xor eax, eax                        ; '&': a program, in the background
     cmp r14d, SL_BG
-    je .background
+    sete al
+    mov [sh_bg], al
     mov rcx, rdx
     sub rcx, r12
     lea rdi, [sh_cmd]
@@ -414,10 +419,6 @@ sh_sequence:
     dec ecx
     jnz .keep
     mov byte [rdi], 0
-    jmp .out
-.background:
-    KLOG "'&' (in the background) comes with programs by name; not yet"
-    mov byte [sh_status], 1
     jmp .out
 .after:
     cmp r14d, SL_END
@@ -1133,10 +1134,35 @@ sh_head:
     mov r12d, edi
     mov r13, rsi
     mov r15d, edx
+    mov dword [sh_grants], 0
+.grant:                                 ; +net, +store, +desk: for a program
+    mov rsi, [r13]
+    cmp byte [rsi], '+'
+    jne .granted
+    inc rsi
+    call sh_grant
+    jc .out
+    or [sh_grants], eax
+    add r13, 8
+    dec r12d
+    jnz .grant
+    KLOG "+net, +store and +desk come before a program's name"
+    stc
+    jmp .out
+.granted:
     mov rsi, [r13]
     call sh_find
     jc .unknown
     mov rbx, rax
+    lea rax, [cmd_run]                  ; run takes them too
+    cmp [rbx + CE_RUN], rax
+    je .run
+    mov rax, [rbx + CE_NAME]
+    cmp dword [sh_grants], 0
+    jne .granted_command
+    cmp byte [sh_bg], 0
+    jne .background_command
+.run:
     mov r14, [rbx + CE_ACTIONS]
     test r14, r14
     jnz .thing
@@ -1192,12 +1218,41 @@ sh_head:
     stc
     jmp .out
 .unknown:
-    mov rdi, [r13]
+    mov rdi, [r13]                      ; a program, by its name or path
+    call user_found
+    jnc .program
     call rec_stage_of
     test rax, rax
     jnz .stage
     mov rax, [r13]
     KLOG "unknown command '%s' - try 'help'", rax
+    stc
+    jmp .out
+.program:
+    cmp byte [sh_bg], 0
+    je .start
+    test r15d, r15d
+    jnz .background_piped
+.start:
+    lea edi, [r12d - 1]
+    lea rsi, [r13 + 8]
+    call sh_join
+    mov rdi, [r13]
+    mov rsi, [sh_args]
+    mov edx, [sh_grants]
+    movzx ecx, byte [sh_bg]
+    call user_start
+    jmp .out
+.granted_command:
+    KLOG "+net, +store and +desk are for programs; '%s' is a command", rax
+    stc
+    jmp .out
+.background_command:
+    KLOG "'&' is for programs; '%s' is a command", rax
+    stc
+    jmp .out
+.background_piped:
+    KLOG "a program in the background has no | or > after it"
     stc
     jmp .out
 .stage:
@@ -1209,6 +1264,33 @@ sh_head:
     pop r14
     pop r13
     pop r12
+    pop rbx
+    ret
+
+; sh_grant(RSI = what follows a +) -> EAX = what it grants (AW_*); CF (said
+; why) if it is none of them. Preserves others.
+sh_grant:
+    push rbx
+    push rdi
+    lea rbx, [sh_grants_names]
+.next:
+    mov rdi, [rbx]
+    test rdi, rdi
+    jz .none
+    call rec_ieq
+    test eax, eax
+    jnz .found
+    add rbx, 16
+    jmp .next
+.found:
+    mov eax, [rbx + 8]
+    clc
+    jmp .out
+.none:
+    KLOG "'+%s' is not something a program can be given; there are +net, +store and +desk", rsi
+    stc
+.out:
+    pop rdi
     pop rbx
     ret
 
@@ -1832,6 +1914,11 @@ str_sh_where:   db 'where', 0
 str_sh_perf:    db 'perf', 0
 str_sh_eff:     db 'eff', 0
 str_sh_core:    db 'core', 0
+str_sh_net:     db 'net', 0
+str_sh_store:   db 'store', 0
+str_sh_desk:    db 'desk', 0
+align 8
+sh_grants_names: dq str_sh_net, AW_NET, str_sh_store, AW_STORE, str_sh_desk, AW_DESK, 0, 0
 sh_escapable:   db ' "$|>;&\', 0x27, 0   ; what a \ takes as it is
 sh_tok_pipe:    db '|', 0
 sh_tok_gt:      db '>', 0
@@ -1895,7 +1982,7 @@ commands:
     THING   'tasks',    tasks_actions, 'every task: its threads and handles; one stopped'
     COMMAND 'objects',  cmd_objects,  'objects [test | audit | <task id>]: objects and tasks, the handles a task holds, the audit ring, or a self-test of capabilities'
     COMMAND 'rings',    cmd_rings,    'rings [test]: each ring, its entries and completions, and the thread that finishes requests; or a self-test'
-    COMMAND 'run',      cmd_run,      'run <program> [arguments]: /EFI/AXIOM/<PROGRAM>.AXE in ring 3; ctrl+C stops it'
+    COMMAND 'run',      cmd_run,      'run <program> [arguments]: /EFI/AXIOM/<PROGRAM>.AXE in ring 3, as its name alone runs it (for one a command hides: run net)'
     COMMAND 'linux',    sh_linux,     'linux <program> [arguments]: a Linux program from the root in /LINUX on the boot stick; ctrl+C stops it'
     COMMAND 'user',     cmd_user,     'user [test]: programs run, their pages; or a self-test of ring 3'
     COMMAND 'pci',      cmd_pci,      'PCI Express functions'
@@ -1959,7 +2046,7 @@ threads_actions:
 
 tasks_actions:
     ACTION  '',       tasks_list,   '', 'every task: who made it, its threads, handles, operations, refusals'
-    ACTION  'stop',   tasks_stop,   '<id>', 'the task (a program) killed, and what it started'
+    ACTION  'stop',   tasks_stop,   '<id or program>...', 'programs stopped (by id, or each of that name), and what they started'
     dq 0, 0, 0, 0, 0
 
 mem_type_names:
@@ -1991,6 +2078,9 @@ sh_argc:        resd 1
 sh_nstages:     resd 1
 sh_stage:       resd SH_STAGES          ; where each stage begins in sh_argv
 sh_status:      resb 1                  ; 1: the last command failed
+sh_bg:          resb 1                  ; 1: the command came with '&'
+alignb 4
+sh_grants:      resd 1                  ; what +net, +store, +desk granted (AW_*)
 sh_redir:       resb 1                  ; 0, 1 for >, 2 for >>
 shell_pending:  resb 1                  ; a terminal has the rest of a line to run
 alignb 8

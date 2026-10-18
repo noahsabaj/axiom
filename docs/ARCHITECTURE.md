@@ -326,16 +326,19 @@ or idles.
 
 ## Ring 3: `user.asm`, `src/user/`
 
-- **A program is a task with page tables of its own.** `run` reads
-  `/EFI/AXIOM/<NAME>.AXE` from the boot stick (or the volume chosen): a flat
+- **A program is a task with page tables of its own.** Its name typed in
+  the shell (or `run <name>`) reads `/EFI/AXIOM/<NAME>.AXE` from the boot stick (or the volume chosen): a flat
   file assembled at `USER_IMAGE` (0x400000), its header first (`AXE_*`:
-  'AXIOMEX1', the entry, and where code, constants, data and zeroes end,
-  each section on pages of its own). The loader checks the header, makes a
+  'AXIOMEX2', the entry, where code, constants, data and zeroes end, each
+  section on pages of its own, and `AXE_WANTS`: the capabilities it wants,
+  `AW_NET`, `AW_STORE`, `AW_DESK`, said in its source by `WANTS`). The loader checks the header, makes a
   task and an address space, and maps the code read-only and executable,
   the constants read-only, the data and zeroes writable and not executable,
   a 64 KiB stack under `USER_STACK_TOP` with nothing below it, and a
   read-only start block at `USER_START` (`SB_*`: handles to the task's ring,
-  its memory, the console and the network, what the task that started it gave it, where
+  its memory and the console; to the store, the network and the desktop
+  only if it wants them or the shell grants them (`+store`, `+net`,
+  `+desk`), 0 otherwise; what the task that started it gave it, where
   the ring is, the TSC rate, the arguments). The first thread starts at the
   entry with RDI = the start block, every other register 0. A file larger
   than `fat_file` (64 KiB) is read whole into a buffer of its own, up to
@@ -389,8 +392,15 @@ or idles.
   is killed; once a killed task's last thread has gone, its handles are
   closed even while others hold handles to it, and when the last reference
   goes, its pages, page tables and mappings go too.
-- `run` runs in the background (a thread `run` waits for it, and the main
-  loop says how it ended); ctrl+C kills it. `user` counts programs and their
+- **Jobs:** a program run from the shell is a job (`user_jobs`, `JB_*`, 16
+  at most): its task, the terminal it was run from (`JB_CON`; the task's
+  `TK_CON`, inherited by every task it starts, is where its console lines
+  go), and a thread of its own (`user_waiter`) that waits for it. In front,
+  the prompt waits for it; ctrl+C kills it, not those in the background.
+  With `&` the prompt comes back at once. When one ends, the main loop
+  (`user_service`) says how in its terminal and, if it was in front, the
+  prompt comes back; an exit code other than 0 is a failure to `&&` and
+  `||` (`TW_SH_FAILED`). A terminal that closes kills its jobs. `user` counts programs and their
   pages. `user test` runs TEST.AXE (which checks the start block, its ring,
   registers kept across calls, refusals, events, a thread of its own, four
   more on a shared counter, a timeout, 64 KiB copied by the kernel, its own
@@ -644,8 +654,8 @@ into) on screen and serial.
   head. Nothing is ever lost, since every commit is still in the log.
 - **Programs reach the store by capability** (`OT_STORE`): an object with a
   prefix and a transaction of its own; rights `RT_ST_READ`, `RT_ST_WRITE`,
-  `RT_ST_COMMIT` and `RT_ST_ROLLBACK`. `run` gives each program one on
-  `<name>/` (`SB_STORE`; read-only when the store is), and its names are
+  `RT_ST_COMMIT` and `RT_ST_ROLLBACK`. A program that wants the store
+  (`AW_STORE`, or run with `+store`) gets one on `<name>/` (`SB_STORE`; read-only when the store is), and its names are
   seen without that prefix. Ring entries `RO_ST_PUT`, `RO_ST_GET`,
   `RO_ST_DEL`, `RO_ST_COMMIT` (why in a block of memory), `RO_ST_ABORT`,
   `RO_ST_SUB` (a capability on a narrower prefix, with fewer rights),
@@ -820,7 +830,8 @@ off. `log` shows the state; `log save`, `log on`, `log off`.
   connection is closed. Every request is logged: who, what, the status and
   the body's size.
 - **Sockets** (`socket.asm`): the network for ring 3, by capability. `run`
-  gives each program one on the whole network (`OT_NET`, `SB_NET`);
+  gives a program that wants it (`AW_NET`, or `+net`) one on the whole
+  network (`OT_NET`, `SB_NET`);
   `RO_NET_SUB` makes narrower ones, on a host, every host under a name
   (`*.example.com`) or one port, with fewer of the rights `RT_NET_CONNECT`
   (plain TCP), `RT_NET_TLS` (TLS, the certificate checked),
@@ -1116,7 +1127,7 @@ text rows.
 
 ## Program windows: `window.asm`
 
-- A program run from the console gets a handle to the desktop (`OT_DESK`,
+- A program that wants the desktop (`AW_DESK`, or `+desk`) gets a handle to it (`OT_DESK`,
   `SB_DESK`, right `RT_DESK_WINDOW`). `SYS_WINDOW_NEW(desktop, width,
   height, a channel's end)` opens a window (`OT_WINDOW`, `WO_*`) and returns
   it and its pixels: a block of memory the program maps, B,G,R,x at width ×
@@ -1417,12 +1428,19 @@ capabilities it says it needs.
   cpu, class, pinned, p-time, e-time, other-time, switches, moves;
   `threads cpus` (cpu, kind, waiting, busy, switches, stolen, handed),
   `threads test`, `threads spin`), `tasks` (id, name, parent, threads,
-  handles, ops, denied, program; `tasks stop <id>`, which refuses the
-  kernel's own tasks).
-- **Programs (S2)** run by name, several at once with `&`, ctrl+C stopping
-  the one in front. A program gets only the capabilities it declares in
-  its AXE header (paint: a window; browse: a window and the network);
-  `+net`, `+store` and `+desk` before its name grant more, for that run.
+  handles, ops, denied, program; `tasks stop <id or program>…`: a task by
+  its number, or every program running by that name; the kernel's own
+  tasks are not for stopping).
+- **Programs** run by name: a word that is not a command and names a file
+  `/EFI/AXIOM/<NAME>.AXE` (or a path to one) runs it, with the rest as its
+  arguments; `run <name>` does the same for a name a command hides (`run
+  net`). Several run at once: `&` at the end of a command runs it in the
+  background, the job's task number said, and `tasks` lists them. A
+  program gets only the capabilities it declares in its header (paint: the
+  desktop; browse: the desktop and the network; net: the network; stash:
+  the store; the rest nothing); `+net`, `+store` and `+desk` before its name
+  grant more, for that run (`+net hello`). Commands take neither grants nor
+  `&`, and a program in the background takes no `|` or `>`.
 - **Completion (S3):** Tab completes a command, an action, a field after a
   stage, or a path, and says what could come next.
 

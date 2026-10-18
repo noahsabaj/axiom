@@ -226,6 +226,8 @@ TK_ENDED        equ 112                 ; dword, bit 0: no thread and no handle
 TK_KILL         equ 116                 ; dword, bit 0: killed; bit 1: by a fault
 TK_AS           equ 120                 ; its address space (user.asm), 0 if none
 TK_LX           equ 128                 ; a Linux process: its state (linux.asm), or 0
+TK_CON          equ 136                 ; the terminal its console writes go to
+                                        ; (0: the first); its children's too
 TK_SIZE         equ 192
 
 ; a slot of a handle table; a handle is (HS_GEN << 16) | its index, never 0
@@ -566,13 +568,21 @@ USER_STACK_SIZE equ 0x10000
 USER_TOP        equ 0x800000000000      ; the end of the lower half
 
 ; a program's header, at USER_IMAGE (the start of its file)
-AXE_MAGIC       equ 0                   ; 'AXIOMEX1'
+AXE_MAGIC       equ 0                   ; 'AXIOMEX2'
 AXE_ENTRY       equ 8
 AXE_TEXT_END    equ 16                  ; code from USER_IMAGE to here
 AXE_RODATA_END  equ 24                  ; constants from there to here
 AXE_DATA_END    equ 32                  ; data from there to here: the end of the file
 AXE_BSS_END     equ 40                  ; and zeroes from there to here
-AXE_HDR         equ 48
+AXE_WANTS       equ 48                  ; what it needs to be given (AW_*), and no more
+AXE_HDR         equ 56
+
+; what a program can be given when it is run from the shell: declared in its
+; header (WANTS, axe.inc), or granted for one run (+net, +store, +desk)
+AW_NET          equ 1                   ; the network (SB_NET)
+AW_STORE        equ 2                   ; its own names in the store (SB_STORE)
+AW_DESK         equ 4                   ; the desktop, to open windows on (SB_DESK)
+AW_ALL          equ 7
 
 ; the start block, at USER_START; the first thread starts with RDI = it
 SB_RING         equ 0                   ; dword: a handle to the task's ring

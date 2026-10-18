@@ -19,6 +19,7 @@ TKR_OPS         equ 32
 TKR_DENIED      equ 40
 TKR_NAME        equ 48
 TKR_SIZE        equ 80
+TS_MAX          equ 32                  ; tasks stop: programs stopped by one name
 
 ; a line of a task's handles
 HR_HANDLE       equ 0
@@ -346,7 +347,7 @@ tasks_list:
     stc
     jmp .out
 .usage:
-    KLOG "usage: tasks [stop <id>]"
+    KLOG "usage: tasks [stop <id or program>...]"
     stc
 .out:
     pop r14
@@ -355,17 +356,30 @@ tasks_list:
     pop rbx
     ret
 
-; tasks stop <id>: a program's task killed, and the tasks it started; the
-; kernel's own are not for stopping
+; tasks stop <id or program>...: a program's task killed (by its id, or
+; every one of that name), and the tasks it started; the kernel's own are
+; not for stopping
 tasks_stop:
     push rbx
+    push rbp
     push r12
-    cmp edi, 1
-    jne .usage
-    mov rsi, [rsi]
+    push r13
+    push r14
+    push r15
+    sub rsp, TS_MAX * 8                 ; the tasks found by a name, at RBP
+    mov rbp, rsp                        ; (RSP moves under the lock)
+    mov r13d, edi
+    mov r14, rsi
+    xor r15d, r15d                      ; 1 once one failed
+    test r13d, r13d
+    jz .usage
+.arg:
+    test r13d, r13d
+    jz .done
+    mov rsi, [r14]
     call arg_uint
-    jc .usage
-    mov r12d, eax
+    jc .by_name
+    mov r12d, eax                       ; by id
     xor ebx, ebx
     pushfq
     cli
@@ -383,7 +397,7 @@ tasks_stop:
     mov rdi, rax
     call obj_tryget                     ; not one already on its way out
     jc .found
-    mov rbx, rax
+    mov rbx, rdi
 .found:
     lea rdi, [ty_task + TY_LOCK]
     call spin_unlock
@@ -393,29 +407,95 @@ tasks_stop:
     cmp qword [rbx + TK_AS], 0
     je .kernel
     mov rdi, rbx
-    call task_kill
-    lea rax, [rbx + OB_NAME]
-    KLOG "tasks: %u (%s) stopped", r12, rax
-    mov rdi, rbx
-    call obj_put
-    clc
-    jmp .out
+    call ts_kill
+    jmp .next
 .kernel:
     lea rax, [rbx + OB_NAME]
     KLOG "tasks: %u (%s) is the kernel's own, not a program: it is not for stopping", r12, rax
     mov rdi, rbx
     call obj_put
-    stc
-    jmp .out
+    mov r15d, 1
+    jmp .next
 .none:
     KLOG "tasks: there is no task %u", r12
-    stc
+    mov r15d, 1
+    jmp .next
+.by_name:                               ; every program of that name
+    xor r12d, r12d                      ; found
+    pushfq
+    cli
+    lea rdi, [ty_task + TY_LOCK]
+    call spin_lock
+    mov rbx, [ty_task + TY_LIST]
+.look:
+    test rbx, rbx
+    jz .looked
+    cmp r12d, TS_MAX
+    jae .looked
+    cmp qword [rbx + TK_AS], 0          ; programs alone
+    je .look_next
+    test dword [rbx + TK_KILL], 1       ; not one stopped already
+    jnz .look_next
+    lea rdi, [rbx + OB_NAME]
+    mov rsi, [r14]
+    call rec_ieq
+    test eax, eax
+    jz .look_next
+    mov rdi, rbx
+    call obj_tryget
+    jc .look_next
+    mov [rbp + r12 * 8], rbx
+    inc r12d
+.look_next:
+    mov rbx, [rbx + OB_NEXT]
+    jmp .look
+.looked:
+    lea rdi, [ty_task + TY_LOCK]
+    call spin_unlock
+    popfq
+    test r12d, r12d
+    jz .no_name
+.each:
+    dec r12d
+    mov rdi, [rbp + r12 * 8]
+    call ts_kill
+    test r12d, r12d
+    jnz .each
+    jmp .next
+.no_name:
+    mov rax, [r14]
+    KLOG "tasks: no program called %s is running", rax
+    mov r15d, 1
+.next:
+    add r14, 8
+    dec r13d
+    jmp .arg
+.done:
+    cmp r15d, 1                         ; CF if one failed
+    cmc
     jmp .out
 .usage:
-    KLOG "usage: tasks stop <id>"
+    KLOG "usage: tasks stop <id or program>..."
     stc
 .out:
+    lea rsp, [rsp + TS_MAX * 8]
+    pop r15
+    pop r14
+    pop r13
     pop r12
+    pop rbp
+    pop rbx
+    ret
+
+; ts_kill(RDI = a task, a reference we give up): killed, and said
+ts_kill:
+    push rbx
+    mov rbx, rdi
+    call task_kill
+    lea rax, [rbx + OB_NAME]
+    KLOG "tasks: %u (%s) stopped", qword [rbx + OB_ID], rax
+    mov rdi, rbx
+    call obj_put
     pop rbx
     ret
 

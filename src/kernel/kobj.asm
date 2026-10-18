@@ -64,6 +64,8 @@ task_new:
     jz .made
     mov rdi, r12
     call obj_get
+    mov rax, [r12 + TK_CON]             ; it writes where its parent does
+    mov [rbx + TK_CON], rax
 .made:
     mov rax, rbx
     jmp .out

@@ -26,13 +26,27 @@
 ;  Globals: ax_sb (the start block), ax_ring, ax_ring_va, ax_console, ax_io
 ;  and ax_io_va (a page of memory to write from), ax_tsc_us, ax_gift (what
 ;  the task that started it gave it, 0 if nothing), ax_store (its names in
-;  the store, under "name/", if it was run from the console and there is a
-;  store; else 0), ax_net (the network, all of it, if it was run from the
-;  console; else 0), ax_desk (the desktop, to open windows on, likewise).
+;  the store, under "name/", if there is a store), ax_net (the network, all
+;  of it), ax_desk (the desktop, to open windows on): each 0 unless it was
+;  run from the shell and wanted it, or the shell granted it for that run.
 ;  Each preserves RBX, RBP, R12-R15, as the kernel's functions do.
+;
+;  A program says what it needs, once, anywhere in it:
+;    WANTS AW_DESK | AW_NET      (AW_NET, AW_STORE, AW_DESK; or WANTS nothing)
+;  The shell gives it that and no more; '+net', '+store' and '+desk' before
+;  its name give more, for that run.
 ; =============================================================================
 
 %include "defs.inc"
+
+; WANTS <AW_* or-ed, or nothing>: what the program needs to be given
+%macro WANTS 1
+%ifidni %1, nothing
+axe_wants equ 0
+%else
+axe_wants equ %1
+%endif
+%endmacro
 
 bits 64
 default rel
@@ -46,12 +60,13 @@ sectalign off                           ; align and alignb leave these be
 
 section .text
 axe_header:
-    db 'AXIOMEX1'
+    db 'AXIOMEX2'
     dq ax_start
     dq section..rodata.start            ; the code ends where the constants begin
     dq section..data.start
     dq axe_data_end
     dq axe_bss_end
+    dq axe_wants                        ; what it needs (WANTS)
 
 ; RDI = the start block, RSP = USER_STACK_TOP
 ax_start:

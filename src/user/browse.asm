@@ -21,6 +21,7 @@
 ; =============================================================================
 
 %include "axe.inc"
+WANTS AW_DESK | AW_NET
 
 CHUNK           equ 4096                ; through the io page
 WAIT_US         equ 15000000            ; how long anything may take

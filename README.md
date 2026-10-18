@@ -26,8 +26,8 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   the shell it was typed in. `win` lists the windows and moves, sizes,
   raises, minimises or closes one. **Programs open windows of their own**,
   by capability: pixels they draw into, keys, clicks, drags and the wheel
-  as messages over a channel, and a title; `run paint` is one to draw in.
-- **A web browser**, `run browse [url]`: HTML and plain text over HTTP and
+  as messages over a channel, and a title; `paint` is one to draw in.
+- **A web browser**, `browse [url]`: HTML and plain text over HTTP and
   HTTPS in a window of its own, laid out and drawn with anti-aliased
   DejaVu text (headings, bold, italic, monospace, lists, quotes, tables,
   links), back, forward, reload and an address bar, scrolled by the wheel,
@@ -127,7 +127,7 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   happen. Entries can be linked into chains and canceled, and a full
   completion queue holds entries back rather than losing one. `rings` shows
   each ring and what waits; `rings test` checks it all.
-- **Programs in ring 3**: `run <program> [arguments]` loads
+- **Programs in ring 3**: a program's name (`hello`, `spin 3 &`) loads
   `/EFI/AXIOM/<PROGRAM>.AXE` from the boot stick into a task with page
   tables of its own (code read-only, data not executable, a guarded stack)
   and runs it on any CPU. A program reaches the kernel by `SYSCALL`, and
@@ -137,7 +137,9 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   when its handle is closed, revoked or given away. A fault in a program
   ends that program, says what it ran into, and nothing else notices;
   killing one (ctrl+C, or a program killing its child) ends every program
-  it started too. `hello`, `test`, `child`, `fault`, `spin`, `stash`, `paint` and `browse` come with it
+  it started too. Several run at once (`&`, `tasks stop <program>`), and
+  each gets only the capabilities it declares (the network, the store, the
+  desktop) or is granted for that run (`+net hello`). `hello`, `test`, `child`, `fault`, `spin`, `stash`, `paint` and `browse` come with it
   (`src/user/`); `user test` runs them all, with a fault of every kind.
 - **Linux programs, unchanged**: `linux <program> [arguments]` runs an
   x86-64 Linux program from a root on the boot stick (`tools/mkroot.py`

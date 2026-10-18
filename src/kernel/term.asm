@@ -50,6 +50,7 @@ TW_SH_LEN       equ 104                 ; dword: the line being typed: its lengt
 TW_SH_WAIT      equ 108                 ; byte: a command runs on; the prompt waits
                                         ; (2: it is done, the rest of its line is next)
 TW_SH_RLINK     equ 109                 ; byte: how the rest is joined to it (SL_*)
+TW_SH_FAILED    equ 110                 ; byte: and it failed (a program's exit code not 0)
 TW_SH_LINE      equ 112                 ; LINE_MAX + 8
 TW_SH_HIST      equ TW_SH_LINE + LINE_MAX + 8
 TW_SH_REST      equ TW_SH_HIST + LINE_MAX + 8   ; what is left of the line, for then
@@ -855,7 +856,7 @@ con_forget:
     call net_forget
     pop rdi
     call lx_forget                      ; (preserves RDI)
-    jmp user_forget
+    jmp user_close                      ; every program run there
 
 ; con_write(RDI = string). Under print_lock. Preserves all.
 con_write:
