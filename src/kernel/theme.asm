@@ -13,7 +13,13 @@
 ;  turns points into pixels. Measures in this file and desk.asm are points.
 ;
 ;  The wallpaper is made, not stored: a gradient and soft light over it,
-;  computed at a quarter of the size, then drawn smooth and dithered.
+;  computed at a quarter of the size, then drawn smooth and dithered. It is
+;  the theme's own (aurora: night or day), or one desktop.wallpaper names.
+;
+;  The look, the accent and the wallpaper are settings (settings.asm:
+;  display.theme, display.accent, desktop.wallpaper): kept on the stick,
+;  and changed from the shell's 'settings set' or a Settings window as from
+;  here (cfg_theme, cfg_set_look). The scale is this boot's.
 ;
 ;  In the shell, 'theme' is a thing: theme (as it is), theme dark, theme
 ;  light, theme accent <name>, theme scale <1..2 in quarters: 4..8>.
@@ -39,8 +45,8 @@ ACCENTS         equ 8
 
 section .text
 
-; theme_init: the scale for this screen, and the dark theme with the blue
-; accent. Before desk_init.
+; theme_init: the scale for this screen, and the look the settings say
+; (after cfg_init). Before desk_init.
 theme_init:
     push rax
     push rcx
@@ -59,8 +65,7 @@ theme_init:
     mov eax, 8
 .high:
     mov [ui_s4], eax
-    mov byte [th_mode], TH_DARK
-    mov byte [th_accent_i], 0
+    call cfg_theme                      ; th_mode, th_accent_i, th_wall
     call theme_load
     pop rdx
     pop rcx
@@ -171,10 +176,16 @@ wall_make:
     test rax, rax
     jz .out
     mov [wall_grid], rax
-    lea rbx, [wall_dark]
-    cmp byte [th_mode], TH_LIGHT
-    jne .params
-    lea rbx, [wall_light]
+    movzx eax, byte [th_wall]           ; desktop.wallpaper: its WL_*
+    cmp eax, WALLS
+    jb .wall
+    xor eax, eax
+.wall:
+    shl eax, 1
+    movzx ecx, byte [th_mode]
+    add eax, ecx
+    lea rbx, [walls]
+    mov rbx, [rbx + rax * 8]
 .params:
     cvtsi2ss xmm8, qword [scr_w]
     cvtsi2ss xmm9, qword [scr_h]
@@ -441,10 +452,14 @@ theme_show:
 
 theme_dark:
     mov byte [th_mode], TH_DARK
-    jmp theme_changed
+    jmp theme_mode_set
 
 theme_light:
     mov byte [th_mode], TH_LIGHT
+theme_mode_set:
+    mov edi, CFG_THEME                  ; kept, as display.theme
+    movzx esi, byte [th_mode]
+    call cfg_set_look
     jmp theme_changed
 
 ; theme accent <name>
@@ -469,6 +484,10 @@ theme_set_accent:
     jmp .find
 .found:
     mov [th_accent_i], cl
+    mov edi, CFG_ACCENT                 ; kept, as display.accent
+    lea rax, [accent_colors]
+    mov esi, [rax + rcx * 8]
+    call cfg_set_look
     jmp theme_changed
 .unknown:
     KLOG "theme: no accent '%s' (blue, purple, pink, red, orange, yellow, green, graphite)", rdi
@@ -584,8 +603,18 @@ str_ac_yellow:  db 'yellow', 0
 str_ac_green:   db 'green', 0
 str_ac_graphite: db 'graphite', 0
 
-; the wallpapers: night, a deep blue going violet, with lights of indigo,
-; teal and rose; day, a pale lilac going blue, with peach, sky and mint
+; the wallpapers, as desktop.wallpaper's choices have them (settings.asm,
+; cfg_walls): for each, the dark theme's and the light's
+WALLS           equ 5
+align 8
+walls:          dq wall_dark, wall_light            ; aurora
+                dq wall_plain_dark, wall_plain_light
+                dq wall_dusk, wall_dusk
+                dq wall_ocean, wall_ocean
+                dq wall_graphite, wall_graphite
+
+; aurora: night, a deep blue going violet, with lights of indigo, teal and
+; rose; day, a pale lilac going blue, with peach, sky and mint
 align 4
 wall_dark:
     dd 0x0B1030, 0x150A2A
@@ -601,6 +630,25 @@ wall_light:
     dd 560, 940, 560, 0xD8C7FF, 220
     dd 960, 960, 380, 0xC4F1E1, 200
     dd 420, 520, 320, 0xFFE7C2, 120
+wall_plain_dark:                        ; one colour, no lights
+    dd COL_BG, COL_BG
+    times WALL_BLOBS dd 0, 0, 1, 0, 0
+wall_plain_light:
+    dd 0xE5E5EA, 0xE5E5EA
+    times WALL_BLOBS dd 0, 0, 1, 0, 0
+wall_dusk:                              ; violet into coral, a warm light low
+    dd 0x231C42, 0xC9736A
+    dd 780, 900, 520, 0xF2A65A, 120
+    dd 200, 200, 420, 0x4B2A7B, 140
+    times WALL_BLOBS - 2 dd 0, 0, 1, 0, 0
+wall_ocean:                             ; deep into shallow, light from above
+    dd 0x0A2342, 0x2C8BA6
+    dd 500, 0, 620, 0x3FB8C9, 110
+    dd 150, 950, 480, 0x06304F, 160
+    times WALL_BLOBS - 2 dd 0, 0, 1, 0, 0
+wall_graphite:
+    dd 0x1C1C1E, 0x58585E
+    times WALL_BLOBS dd 0, 0, 1, 0, 0
 
 section .data
 align 8
@@ -617,6 +665,7 @@ alignb 8
 ui_s4:          resd 1                  ; quarters of a pixel a point
 th_mode:        resb 1                  ; TH_*
 th_accent_i:    resb 1                  ; which accent
+th_wall:        resb 1                  ; which wallpaper (walls)
 alignb 4
 th_accent:      resd 1                  ; its color in this theme
 th_c:           resd TC_COUNT / 4

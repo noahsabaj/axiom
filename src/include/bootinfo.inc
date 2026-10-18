@@ -47,4 +47,6 @@ BI_RESV_MAX     equ 16
 BI_FW_VENDOR    equ 416                 ; 64-byte ASCII firmware vendor
 BI_BOOT_SERIAL  equ 480                 ; dword FAT volume serial of the boot volume
 BI_BOOT_FS      equ 484                 ; dword: 32 FAT32, 16 FAT16, 0 unknown
+BI_SETTINGS     equ 488                 ; SETTINGS.TXT from that volume (physical), 0 if none
+BI_SETTINGS_LEN equ 496                 ; its bytes (at most 8 KiB)
 BI_SIZE         equ 512

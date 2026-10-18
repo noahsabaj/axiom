@@ -182,6 +182,7 @@ kbd_scancode:
     movzx edx, byte [rdx + rcx]
     test edx, edx
     jz .ignore
+    call cfg_key                        ; keyboard.layout
     mov eax, edx                        ; caps lock flips letters
     or eax, 0x20
     cmp eax, 'a'

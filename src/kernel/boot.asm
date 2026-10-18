@@ -39,6 +39,7 @@ kernel_main:
     call rtc_read
     KLOG "clock: %04u-%02u-%02u %02u:%02u:%02u", qword [rtc_year], qword [rtc_mon], qword [rtc_day], qword [rtc_hour], qword [rtc_min], qword [rtc_sec]
     call log_init
+    call cfg_init                       ; the settings: SETTINGS.TXT, or the defaults
     lea rax, [cpu_brand]
     KLOG "cpu: %s, TSC %u MHz", rax, qword [tsc_mhz]
 
@@ -147,6 +148,7 @@ main_loop:
     call usb_service
     call net_service
     call log_service
+    call cfg_service                    ; settings: the stick's, applied, kept
     call pointer_service
     call user_service
     call iommu_service
@@ -199,6 +201,8 @@ main_loop:
     cmp byte [user_pending], 0
     jne .awake
     cmp byte [shell_pending], 0
+    jne .awake
+    cmp qword [cfg_pending], 0          ; a program changed a setting
     jne .awake
     cmp byte [lx_pending], 0            ; a Linux process ended
     jne .awake

@@ -111,6 +111,7 @@ section .text
 %include "icons.asm"
 %include "look.asm"
 %include "fscap.asm"
+%include "settings.asm"
 %include "desk.asm"
 %include "term.asm"
 %include "vt.asm"

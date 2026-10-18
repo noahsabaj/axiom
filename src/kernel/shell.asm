@@ -1135,7 +1135,7 @@ sh_head:
     mov r13, rsi
     mov r15d, edx
     mov dword [sh_grants], 0
-.grant:                                 ; +net, +store, +desk, +files: for a program
+.grant:                                 ; +net, +store, +desk, +files, +settings: for a program
     mov rsi, [r13]
     cmp byte [rsi], '+'
     jne .granted
@@ -1146,7 +1146,7 @@ sh_head:
     add r13, 8
     dec r12d
     jnz .grant
-    KLOG "+net, +store, +desk and +files come before a program's name"
+    KLOG "+net, +store, +desk, +files and +settings come before a program's name"
     stc
     jmp .out
 .granted:
@@ -1244,7 +1244,7 @@ sh_head:
     call user_start
     jmp .out
 .granted_command:
-    KLOG "+net, +store, +desk and +files are for programs; '%s' is a command", rax
+    KLOG "+net, +store, +desk, +files and +settings are for programs; '%s' is a command", rax
     stc
     jmp .out
 .background_command:
@@ -1287,7 +1287,7 @@ sh_grant:
     clc
     jmp .out
 .none:
-    KLOG "'+%s' is not something a program can be given; there are +net, +store, +desk and +files", rsi
+    KLOG "'+%s' is not something a program can be given; there are +net, +store, +desk, +files and +settings", rsi
     stc
 .out:
     pop rdi
@@ -1918,9 +1918,10 @@ str_sh_net:     db 'net', 0
 str_sh_store:   db 'store', 0
 str_sh_desk:    db 'desk', 0
 str_sh_files:   db 'files', 0
+str_sh_settings: db 'settings', 0
 align 8
 sh_grants_names: dq str_sh_net, AW_NET, str_sh_store, AW_STORE, str_sh_desk, AW_DESK
-                dq str_sh_files, AW_FILES, 0, 0
+                dq str_sh_files, AW_FILES, str_sh_settings, AW_SETTINGS, 0, 0
 sh_escapable:   db ' "$|>;&\', 0x27, 0   ; what a \ takes as it is
 sh_tok_pipe:    db '|', 0
 sh_tok_gt:      db '>', 0
@@ -1983,6 +1984,7 @@ commands:
     THING   'mem',      mem_actions,  'memory: what uses it, by firmware type, what an address is; a self-test'
     THING   'threads',  threads_actions, 'every thread; each CPU; a self-test of the scheduler; load to watch'
     THING   'tasks',    tasks_actions, 'every task: its threads and handles; one stopped'
+    THING   'settings', settings_actions, "the machine's settings: the look, the keyboard, the pointer, the network...; one changed, or put back"
     COMMAND 'objects',  cmd_objects,  'objects [test | audit | <task id>]: objects and tasks, the handles a task holds, the audit ring, or a self-test of capabilities'
     COMMAND 'rings',    cmd_rings,    'rings [test]: each ring, its entries and completions, and the thread that finishes requests; or a self-test'
     COMMAND 'run',      cmd_run,      'run <program> [arguments]: /EFI/AXIOM/<PROGRAM>.AXE in ring 3, as its name alone runs it (for one a command hides: run net)'
@@ -2050,6 +2052,12 @@ threads_actions:
 tasks_actions:
     ACTION  '',       tasks_list,   '', 'every task: who made it, its threads, handles, operations, refusals'
     ACTION  'stop',   tasks_stop,   '<id or program>...', 'programs stopped (by id, or each of that name), and what they started'
+    dq 0, 0, 0, 0, 0
+
+settings_actions:
+    ACTION  '',       settings_list, '[name | pattern]', 'every setting: name, value, default, kind, about; or one, with what it takes'
+    ACTION  'set',    settings_set,  '<name> <value>', 'changed, now, and kept on the boot stick'
+    ACTION  'reset',  settings_reset, '<name | pattern | all>...', 'back to the default'
     dq 0, 0, 0, 0, 0
 
 mem_type_names:

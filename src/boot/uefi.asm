@@ -141,6 +141,7 @@ entry:                                      ; RCX = ImageHandle, RDX = SystemTab
     call setup_display
     call find_config_tables
     call find_boot_volume
+    call read_settings
     call calibrate_tsc
     call load_kernel
     call build_page_tables
@@ -455,6 +456,72 @@ find_boot_volume:
     mov edx, 1
     mov rax, [boot_services]
     call [rax + BS_FREE_PAGES]
+.out:
+    add rsp, 40
+    ret
+
+; -----------------------------------------------------------------------------
+;  read_settings - \SETTINGS.TXT from the volume this loader came from, for
+;  the kernel to take its settings from before it draws anything (the text
+;  size, the look). Read only. Never fatal: without it, the defaults.
+; -----------------------------------------------------------------------------
+SETTINGS_PAGES  equ 2                       ; the kernel keeps at most 8 KiB of it
+
+read_settings:
+    sub rsp, 40                             ; shadow space + a fifth argument
+    mov rcx, [image_handle]
+    lea rdx, [loaded_image_guid]
+    lea r8, [boot_proto]
+    mov rax, [boot_services]
+    call [rax + BS_HANDLE_PROTOCOL]
+    test rax, rax
+    jnz .out
+    mov rax, [boot_proto]
+    mov rcx, [rax + LI_DEVICE_HANDLE]
+    lea rdx, [simple_fs_guid]
+    lea r8, [boot_proto]
+    mov rax, [boot_services]
+    call [rax + BS_HANDLE_PROTOCOL]
+    test rax, rax
+    jnz .out
+    mov rcx, [boot_proto]                   ; OpenVolume(This, &root)
+    lea rdx, [settings_root]
+    call [rcx + SFS_OPEN_VOLUME]
+    test rax, rax
+    jnz .out
+    mov rcx, [settings_root]                ; Open(root, &file, name, read, 0)
+    lea rdx, [settings_file]
+    lea r8, [settings_name]
+    mov r9d, EFI_FILE_MODE_READ
+    mov qword [rsp + 32], 0
+    call [rcx + FP_OPEN]
+    test rax, rax
+    jnz .root
+    mov ecx, ALLOCATE_ANY_PAGES
+    mov edx, EFI_LOADER_DATA
+    mov r8d, SETTINGS_PAGES
+    lea r9, [settings_buf]
+    mov rax, [boot_services]
+    call [rax + BS_ALLOCATE_PAGES]
+    test rax, rax
+    jnz .file
+    mov qword [settings_size], SETTINGS_PAGES * 4096
+    mov rcx, [settings_file]                ; Read(file, &size, buffer)
+    lea rdx, [settings_size]
+    mov r8, [settings_buf]
+    call [rcx + FP_READ]
+    test rax, rax
+    jnz .file
+    mov rax, [settings_buf]
+    mov [bootinfo + BI_SETTINGS], rax
+    mov rax, [settings_size]
+    mov [bootinfo + BI_SETTINGS_LEN], rax
+.file:
+    mov rcx, [settings_file]
+    call [rcx + FP_CLOSE]
+.root:
+    mov rcx, [settings_root]
+    call [rcx + FP_CLOSE]
 .out:
     add rsp, 40
     ret
@@ -864,6 +931,10 @@ alloc_addr:         dq 0
 kernel_entry:       dq 0
 boot_proto:         dq 0
 boot_sector:        dq 0
+settings_root:      dq 0
+settings_file:      dq 0
+settings_buf:       dq 0
+settings_size:      dq 0
 kernel_phys:        dq 0
 kernel_pages:       dq 0
 stack_phys:         dq 0
@@ -915,11 +986,15 @@ loaded_image_guid:
 block_io_guid:  dd 0x964E5B21
                 dw 0x6459, 0x11D2
                 db 0x8E, 0x39, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B
+simple_fs_guid: dd 0x964E5B22
+                dw 0x6459, 0x11D2
+                db 0x8E, 0x39, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B
 smbios2_guid:   dd 0xEB9D2D31
                 dw 0x2D88, 0x11D3
                 db 0x9A, 0x16, 0x00, 0x90, 0x27, 0x3F, 0xC1, 0x4D
 
 msg_banner:     dw __utf16__(`Axiom loader\r\n`), 0
+settings_name:  dw __utf16__(`\\SETTINGS.TXT`), 0
 msg_launch:     dw __utf16__(`Entering the kernel.\r\n`), 0
 msg_fatal:      dw __utf16__(`\r\nAxiom cannot start: `), 0
 msg_no_gop:     dw __utf16__(`no graphics output protocol.\r\n`), 0

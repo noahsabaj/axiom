@@ -90,9 +90,11 @@ pointer_service:
 .relative:
     mov eax, r12d
     call pointer_accel
+    call cfg_pointer                    ; pointer.speed
     add [ptr_x], rax
     mov eax, r13d
     call pointer_accel
+    call cfg_pointer
     add [ptr_y], rax
 .moved:
     call pointer_clamp
@@ -135,6 +137,7 @@ pointer_service:
     movsx edx, r14w
     test edx, edx
     jz .next
+    call cfg_wheel                      ; pointer.natural-scrolling
     call desk_wheel
     jmp .next
 .drained:

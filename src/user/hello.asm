@@ -60,6 +60,12 @@ main:
     call ax_add
     inc ebx
 .no_files:
+    cmp dword [ax_settings], 0
+    je .no_settings
+    lea rsi, [s_settings]
+    call ax_add
+    inc ebx
+.no_settings:
     test ebx, ebx
     jnz .given
     lea rsi, [s_nothing]
@@ -81,6 +87,7 @@ s_net:          db ' net', 0
 s_store:        db ' store', 0
 s_desk:         db ' desk', 0
 s_files:        db ' files', 0
+s_settings:     db ' settings', 0
 s_nothing:      db ' nothing', 0
 
 AXE_END
