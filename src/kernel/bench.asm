@@ -104,8 +104,8 @@ bn_row:
     mov r15, rdx
     mov rbx, rcx
     test rbx, rbx
-    jnz .ticks
-    inc ebx
+    jg .ticks
+    mov ebx, 1                          ; none (or marks out of order): 1
 .ticks:
     test r15, r15
     jnz .count
@@ -178,7 +178,7 @@ bench_quick:
     ret
 
 bench_usage:
-    KLOG "usage: bench [boot | sched | mem | caps | gfx | fat [path] | mandel]"
+    KLOG "usage: bench [boot | sched | mem | caps | gfx | fat [path] | store | mandel]"
     stc
     ret
 
@@ -235,6 +235,19 @@ bench_fat:
     call bn_fat
     ret
 
+bench_store:
+    test edi, edi
+    jnz bench_usage
+    cmp qword [st_disk], 0
+    jne .some
+    KLOG "bench store: no store ('store format' makes one on QEMU's test drive)"
+    stc
+    ret
+.some:
+    call bench_cols
+    call bn_storebench
+    ret
+
 bench_mandel:
     test edi, edi
     jnz bench_usage
@@ -261,9 +274,9 @@ bn_boot:
 .loader:
     mov rax, [boot_info]
     lea rdx, [bn_loader_marks]
-    mov ecx, [rdx + rbx * 4]
+    mov ecx, [rdx + rbx * 8]            ; (later, earlier) pairs
     mov rcx, [rax + rcx]
-    mov r8d, [rdx + rbx * 4 + 4]
+    mov r8d, [rdx + rbx * 8 + 4]
     sub rcx, [rax + r8]
     lea rdi, [str_bn_boot]
     lea rax, [bn_loader_names]
@@ -888,6 +901,117 @@ bn_fat:                                 ; RDI = path -> CF
 
 BN_FAT_MAX      equ 16 * 1024 * 1024
 
+; -----------------------------------------------------------------------------
+;  store: commits (each to the drive, flushed) and reads, under bench/
+; -----------------------------------------------------------------------------
+BN_COMMITS      equ 100
+BN_GETS         equ 2000
+BN_BIG          equ 64 * 1024
+BN_BIGS         equ 20
+
+bn_storebench:                               ; -> CF (said why)
+    push rbx
+    push r12
+    push r13
+    BN_T0                               ; a small change, committed
+    mov ebx, BN_COMMITS
+.small:
+    mov edi, 64
+    mov esi, ebx
+    call bn_st_commit
+    jc .out
+    dec ebx
+    jnz .small
+    BN_ROW 'store', 'put 64 B + commit', BN_COMMITS, 64
+    BN_T0                               ; read back
+    mov ebx, BN_GETS
+.get:
+    xor edi, edi
+    lea rsi, [str_bn_st_name]
+    call store_get
+    cmp rax, -4096                      ; E_* (a pointer is negative too)
+    jae .refused
+    mov rdi, rax
+    call st_free
+    dec ebx
+    jnz .get
+    BN_ROW 'store', 'get 64 B', BN_GETS, 64
+    BN_T0                               ; a big change, committed
+    mov ebx, BN_BIGS
+.big:
+    mov edi, BN_BIG
+    mov esi, ebx
+    call bn_st_commit
+    jc .out
+    dec ebx
+    jnz .big
+    BN_ROW 'store', 'put 64 KiB + commit', BN_BIGS, BN_BIG
+    BN_T0                               ; the drive's flush alone (a commit
+    mov ebx, BN_BIGS                    ; waits for two)
+.flush:
+    call st_flush
+    dec ebx
+    jnz .flush
+    BN_ROW 'store', 'drive flush', BN_BIGS, 0
+    xor edi, edi                        ; and gone again
+    lea rsi, [str_bn_st_name]
+    call store_del
+    xor edi, edi
+    lea rsi, [str_bn_st_why]
+    mov ecx, RT_ALL
+    call store_commit
+    clc
+    jmp .out
+.refused:
+    KLOG "bench store: refused (%d)", rax
+    stc
+.out:
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+; bn_st_commit(EDI = bytes, ESI = what they start with) -> CF (said why):
+; bench/value set to them, committed
+bn_st_commit:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    mov ebx, edi
+    call kmalloc                        ; (the store owns it once put)
+    test rax, rax
+    jz .nomem
+    mov [rax], esi
+    xor edi, edi
+    lea rsi, [str_bn_st_name]
+    mov rdx, rax
+    mov ecx, ebx
+    call store_put
+    test rax, rax
+    jnz .refused
+    xor edi, edi
+    lea rsi, [str_bn_st_why]
+    mov ecx, RT_ALL
+    call store_commit
+    test rax, rax
+    js .refused
+    clc
+    jmp .out
+.nomem:
+    mov rax, E_NOMEM
+.refused:
+    KLOG "bench store: refused (%d)", rax
+    stc
+.out:
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
 ; bn_gfx_check: gfx_glyph 8 pixels at a time against one at a time: every
 ; character, opaque and blended over another glyph, whole and clipped on
 ; the right, in a few colours; said whether any pixel differs.
@@ -1029,6 +1153,8 @@ str_bn_ops:     db 'op/s', 0
 str_bn_boot:    db 'boot', 0
 str_bn_sched:   db 'sched', 0
 str_bn_fat:     db 'fat', 0
+str_bn_st_name: db 'bench/value', 0
+str_bn_st_why:  db 'bench store', 0
 str_bn_fat_read: db 'read file', 0
 str_bn_fat_ops: db 'disk reads in it', 0
 str_bn_fat_default: db '/EFI/AXIOM/BROWSE.AXE', 0
@@ -1047,7 +1173,7 @@ str_bn_bs_total: db 'power-on to prompt', 0
 str_bn_bs_cpu:  db 'serial, cpu, log', 0
 str_bn_bs_mem:  db 'memory', 0
 str_bn_bs_disp: db 'display', 0
-str_bn_bs_stacks: db 'stacks, tss', 0
+str_bn_bs_stacks: db 'first frame, stacks', 0
 str_bn_bs_acpi: db 'acpi', 0
 str_bn_bs_smbios: db 'smbios', 0
 str_bn_bs_reclaim: db 'boot memory reclaimed', 0
@@ -1093,5 +1219,6 @@ bench_actions:
     ACTION  'caps',   bench_caps,   '', 'handles, rings and channels'
     ACTION  'gfx',    bench_gfx,    '', 'fills, blits, glyphs, composing, a terminal drawn'
     ACTION  'fat',    bench_fat,    '[path]', 'a file read whole from the current volume, three times'
+    ACTION  'store',  bench_store,  '', "commits and reads in the store (QEMU's test drive)"
     ACTION  'mandel', bench_mandel, '', 'one core against all of them, on the Mandelbrot', 0
     dq 0, 0, 0, 0, 0
