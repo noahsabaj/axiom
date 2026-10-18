@@ -7,7 +7,10 @@
 ;  with a handle to every volume, "vol<n>:/folder/file"; with one to a
 ;  folder, from that folder ("" or "/" is the folder itself). No "." or "..":
 ;  a program works its paths out itself. What a volume allows still holds:
-;  it is written only after 'vol <n> rw' (E_READONLY until then).
+;  it is written only after 'vol <n> rw' (E_READONLY until then), but for
+;  the boot stick's /Home: what is in it may always be written (fs_home),
+;  so programs keep their files there; the folder itself, and the rest of
+;  the stick, wait for 'vol <n> rw' as any volume does.
 ;
 ;  The FAT code is the main thread's alone: the program's thread queues what
 ;  it asks for (fs_call) and waits, and fs_service, from the main loop, does
@@ -705,8 +708,15 @@ fs_run:
     mov byte [fat_hush], 1              ; what is missing is said by E_*
     mov byte [fat_ioerr], 0
     mov r14, [rbx + FQ_VOL]
+    call home_ensure
     call fs_do
     mov [rbx + FQ_RESULT], rax
+    mov rax, [home_lifted]              ; written in /Home: read-only again
+    test rax, rax
+    jz .kept
+    mov byte [rax + VO_WRITABLE], 0
+    mov qword [home_lifted], 0
+.kept:
     mov byte [fat_hush], 0
     mov byte [fat_writing], 0
     pop r14
@@ -732,16 +742,130 @@ fs_failed:
 .out:
     ret
 
-; fs_writable -> CF and RAX = E_READONLY if the volume is not to be written
+; fs_writable(RBX = a request, R14 = its volume) -> CF and RAX = E_READONLY
+; if it is not to be written. On a volume not made writable, what is in the
+; boot stick's /Home is: for this request only (fs_run puts it back).
 fs_writable:
     cmp byte [r14 + VO_WRITABLE], 0
-    je .no
+    je .home
+.yes:
     mov byte [fat_writing], 1
     clc
     ret
+.home:
+    call fs_home
+    jc .no
+    mov byte [r14 + VO_WRITABLE], 1
+    mov [home_lifted], r14
+    jmp .yes
 .no:
     mov rax, E_READONLY
     stc
+    ret
+
+; fs_home(RBX = a request, R14 = its volume) -> CF unless the volume is the
+; boot stick and what it writes is in its /Home (each path, for a rename).
+; Preserves all but RAX.
+fs_home:
+    push rcx
+    push rsi
+    push r14
+    mov rcx, r14
+    call log_volume                     ; (removable, and the one booted from)
+    jc .not
+    cmp rcx, r14
+    jne .not
+    lea rsi, [rbx + FQ_PATH]
+    call home_inside
+    jc .not
+    cmp dword [rbx + FQ_OP], FSQ_RENAME
+    jne .yes
+    lea rsi, [rbx + FQ_PATH2]
+    call home_inside
+    jc .not
+.yes:
+    clc
+    jmp .out
+.not:
+    stc
+.out:
+    pop r14
+    pop rsi
+    pop rcx
+    ret
+
+; home_inside(RSI = a path from the root, as fs_path made it: no "." or
+; "..") -> CF unless it is something in /Home, in any case as FAT matches
+; names. Preserves all but RAX.
+home_inside:
+    push rcx
+    push rdx
+    lea rdx, [str_home_in]
+    xor ecx, ecx
+.each:
+    mov al, [rdx + rcx]
+    test al, al
+    jz .rest
+    mov ah, [rsi + rcx]
+    cmp ah, 'A'
+    jb .same
+    cmp ah, 'Z'
+    ja .same
+    or ah, 0x20
+.same:
+    cmp ah, al
+    jne .not
+    inc ecx
+    jmp .each
+.rest:
+    cmp byte [rsi + rcx], 0             ; something in it, not it
+    je .not
+    clc
+    jmp .out
+.not:
+    stc
+.out:
+    pop rdx
+    pop rcx
+    ret
+
+; home_ensure(R14 = a volume): if it is the boot stick, its /Home made, once
+; a boot. The main thread's. Preserves all but RAX.
+home_ensure:
+    cmp byte [home_made], 0
+    jne .quick
+    push rcx
+    push rsi
+    push r14
+    mov rcx, r14
+    call log_volume
+    jc .out
+    cmp rcx, r14
+    jne .out
+    lea rsi, [str_home]
+    call fat_resolve
+    jc .make
+    test byte [fat_ent + 11], 0x10
+    jz .out                             ; a file of that name: left alone
+    jmp .made
+.make:
+    cmp byte [fat_ioerr], 0
+    jne .out
+    mov cl, [r14 + VO_WRITABLE]
+    mov byte [r14 + VO_WRITABLE], 1
+    call fat_mkdir
+    mov [r14 + VO_WRITABLE], cl
+    jc .out
+    movzx eax, byte [r14 + VO_INDEX]
+    KLOG "files: made vol%u:/Home, where programs may write", rax
+.made:
+    mov byte [home_made], 1
+.out:
+    mov byte [fat_ioerr], 0
+    pop r14
+    pop rsi
+    pop rcx
+.quick:
     ret
 
 fsq_volumes:
@@ -1091,9 +1215,13 @@ align 8
 fs_ops:         dq fsq_volumes, fsq_list, fsq_read, fsq_write, fsq_mkdir
                 dq fsq_remove, fsq_rename, fsq_folder
 str_ot_files:   db 'files', 0
+str_home:       db '/Home', 0
+str_home_in:    db '/home/', 0          ; (lower case: home_inside folds to it)
 
 section .bss
 alignb 8
 fs_list:        resq 1                  ; requests, first come first
 fs_tail:        resq 1
+home_lifted:    resq 1                  ; the stick, writable for one request in /Home
 fs_lock:        resd 1
+home_made:      resb 1                  ; the stick's /Home is there

@@ -7,10 +7,11 @@
 //! volume (files made, written, appended to, read back, sought in, listed,
 //! looked at, removed; a folder made and removed).
 //!
-//!   rstd [fs <folder> | ro <folder> | panic | exit | code]
+//!   rstd [fs <folder> | ro <folder> | home | panic | exit | code]
 //!
 //! fs needs a volume that can be written (vol <n> rw); ro checks that one
-//! that can't says so; panic: a thread panics, which ends the program;
+//! that can't says so; home: what is in the boot volume's /Home is written
+//! without it, and nothing else is; panic: a thread panics, which ends the program;
 //! exit: a thread ends it, 7, by std::process::exit; code: main returns
 //! ExitCode 3.
 
@@ -62,6 +63,7 @@ fn main() -> ExitCode {
         Some("code") => return ExitCode::from(3),
         Some("fs") => files(&args[1]),
         Some("ro") => read_only(&args[1]),
+        Some("home") => home(),
         _ => {
             threads();
             locks();
@@ -343,4 +345,29 @@ fn read_only(dir: &str) {
     let written = fs::write(format!("{}.txt", dir), "x").map_err(|e| e.to_string());
     let read = fs::read("EFI/AXIOM/RSTD.AXE").map(|v| v.len() > 0);
     println!("rstd: ro mkdir {:?}, write {:?}, read {:?}", made, written, read);
+}
+
+/// The boot volume's /Home: written without "vol <n> rw", and nothing
+/// outside it (nor the folder itself) is.
+fn home() {
+    let env = std::env::var("HOME");
+    let files = axiom::Files::get().expect("files");
+    let at = files.home().map_err(|e| format!("{:?}", e));
+    println!("rstd: home {:?}, HOME {:?}", at, env);
+    let made = fs::create_dir("/Home/rstd").is_ok();
+    let wrote = fs::write("/Home/rstd/a.txt", "kept").is_ok();
+    let back = fs::read_to_string("/Home/rstd/a.txt").map(|s| s == "kept").unwrap_or(false);
+    let mut f = fs::OpenOptions::new().append(true).open("/Home/rstd/a.txt").expect("append");
+    let _ = f.write_all(b", twice");
+    drop(f);
+    let appended = fs::read_to_string("/Home/rstd/a.txt").map(|s| s == "kept, twice").unwrap_or(false);
+    let home = at.unwrap_or_default();
+    let renamed = files.rename(&format!("{}/rstd/a.txt", home), &format!("{}/rstd/b.txt", home)).is_ok();
+    println!("rstd: home made {}, wrote {}, read back {}, appended {}, renamed {}", made, wrote, back, appended, renamed);
+    let outside = fs::write("/rstdhome.txt", "x").map_err(|e| e.to_string());
+    let out = files.rename(&format!("{}/rstd/b.txt", home), "vol0:/b.txt").map_err(|e| format!("{:?}", e));
+    let itself = fs::remove_dir("/Home").map_err(|e| e.to_string());
+    println!("rstd: home outside {:?}, moved out {:?}, removed {:?}", outside, out, itself);
+    let gone = fs::remove_file("/Home/rstd/b.txt").is_ok() && fs::remove_dir("/Home/rstd").is_ok();
+    println!("rstd: home cleaned {}, there {}", gone, fs::metadata("/Home").map(|m| m.is_dir()).unwrap_or(false));
 }

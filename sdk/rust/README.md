@@ -70,8 +70,9 @@ What std has on Axiom:
   volume Axiom booted from; `.` and `..` are taken out. A file is read
   whole when opened and written whole when closed (16 MiB at most), so
   close it (drop it) to write it. A volume the user hasn't made writable
-  is `Read-only file system`, when the file is opened. The program wants
-  `wants::FILES`.
+  is `Read-only file system`, when the file is opened, except in `/Home`
+  on the boot volume, which programs may always write: keep a program's
+  files there (`HOME` is `/Home`). The program wants `wants::FILES`.
 - **`std::process::exit`** ends the program, every thread, with its code.
   A panic aborts: the program ends, 134. There is no unwinding.
 
@@ -165,10 +166,11 @@ fn main() -> axiom::Result<()> { /* ... */ Ok(()) }
     accent, theme colours, the screen's size.
 - **`axiom::Files`**: `get()` (the program's), `read(path)`,
   `read_into(path, buf)`, `size`, `write(path, data)`, `mkdir`, `remove`,
-  `rename`, `list(path)`, `volumes()`, `sub(folder, rights)`. Paths are
-  `vol<n>:/a/b`. A read or a write is 16 MiB at most; a volume is written
-  only after the user says `vol <n> rw` in the shell (`Error::READONLY`
-  until then).
+  `rename`, `list(path)`, `volumes()`, `sub(folder, rights)`, `home()`.
+  Paths are `vol<n>:/a/b`. A read or a write is 16 MiB at most; a volume
+  is written only after the user says `vol <n> rw` in the shell
+  (`Error::READONLY` until then), but for what is in `home()`, the boot
+  volume's `/Home`, which may always be written.
 - **`axiom::Stream`** (`axiom::sound`), with `wants::SOUND`: `open(frames)`
   (a ring of that many, a power of two from 1024 to 65536), `room()`,
   `write(&[Frame])` and `write_with(n, |i| frame)` (as many as fit, ->

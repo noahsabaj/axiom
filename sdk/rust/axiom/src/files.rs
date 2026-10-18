@@ -3,8 +3,10 @@
 //! A path is "vol<n>:/a/b" with the files on every volume, or from the folder
 //! with a handle to one folder (Files::sub, or what another program gave).
 //! A volume is written only after the user said "vol <n> rw" in the shell:
-//! until then, writing is Error::READONLY. A read or a write is 16 MiB at
-//! most; a file is read and written whole.
+//! until then, writing is Error::READONLY. What is in the boot volume's
+//! /Home (Files::home) may always be written: a program's own files go
+//! there. A read or a write is 16 MiB at most; a file is read and written
+//! whole.
 
 #[cfg(feature = "alloc")]
 use alloc::{string::String, vec::Vec};
@@ -271,5 +273,15 @@ impl Files {
                 }
             })
             .collect())
+    }
+
+    /// "vol<n>:/Home" on the volume Axiom started from: what is in it may
+    /// be written without "vol <n> rw" (the folder itself, and the rest of
+    /// the volume, wait for it). Error::ABSENT if no volume is the boot one.
+    #[cfg(feature = "alloc")]
+    pub fn home(self) -> Result<String> {
+        let vols = self.volumes()?;
+        let boot = vols.iter().find(|v| v.flags & VOL_BOOT != 0).ok_or(Error::ABSENT)?;
+        Ok(alloc::format!("vol{}:/Home", boot.index))
     }
 }

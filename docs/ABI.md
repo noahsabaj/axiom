@@ -511,6 +511,12 @@ With `AW_FILES`:
 - **Read only by default**: every write is `E_READONLY` until the user
   types `vol <n> rw` in the shell. A program can't make a volume writable.
   `FV_FLAGS` says whether it is (`FVF_WRITABLE`).
+- **But `/Home`**: on the volume Axiom started from (`FVF_BOOT`), what is
+  in `/Home` may always be written: files and folders made, written,
+  renamed within it, removed. That is where a program keeps its files.
+  `/Home` itself, and the rest of the volume, wait for `vol <n> rw`; a
+  rename out of it or into it is `E_READONLY` too. Axiom makes `/Home`
+  the first time a program uses that volume's files.
 - **Writes**: `RO_FS_WRITE` replaces the whole file. A read or a write is at
   most `FS_ROOM_MAX` (16 MiB).
 

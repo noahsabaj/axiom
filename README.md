@@ -69,7 +69,8 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   interrupt (`nvme`, `nvme test`), and **USB sticks** (hot-plug too), GPT and
   MBR partitions, and
   **FAT32** with long names: read, write, copy, make directories, remove.
-  Every volume is read-only until you unlock it with `vol <n> rw`.
+  Every volume is read-only until you unlock it with `vol <n> rw`, but for
+  `/Home` on the one Axiom started from, which programs may always write.
 - **DMA confined by VT-d**: each driver's devices reach only the memory that
   driver mapped for them (an NVMe command's buffer only while it is out), and
   a device no driver claims reaches none (`iommu`, `iommu test`).
@@ -383,11 +384,12 @@ Tested target: HP Victus 15L (i7-14700F, 64 GB, RTX 4060 Ti), AMI UEFI.
 
 Axiom reads the boot stick and the NVMe drive (`disks`, `files`, `files show`) and
 starts on the stick's volume, but writes nothing until you unlock a volume
-with `vol <n> rw`, with one exception: its log, `AXIOM.LOG` in the root of
-the stick it booted from, saved every 10 seconds while it grows, before
-`reboot` or `poweroff`, and after a crash. Back in Windows, open it from the
-stick. `log off` stops that; no other volume and no other file is ever
-touched by it. Unlock the **stick's** volume (`disks` shows which one is
+with `vol <n> rw`, with two exceptions on the stick it booted from: its log,
+`AXIOM.LOG` in the root, saved every 10 seconds while it grows, before
+`reboot` or `poweroff`, and after a crash (back in Windows, open it from the
+stick; `log off` stops that), and `/Home`, a folder Axiom makes for programs'
+own files, where they may write without `vol <n> rw`. No other volume and no
+other file is ever touched by them. Unlock the **stick's** volume (`disks` shows which one is
 `USB`) to save files there. On the Victus the NVMe drive holds Windows: its
 EFI partition is FAT32, and Windows needs the files on it to boot, so leave
 it read-only. Run `vol` before writing to see which volume is current, and

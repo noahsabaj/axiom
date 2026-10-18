@@ -125,6 +125,7 @@ def script_std():
         "until log: kept in", "wait 1",
         "type rstd one two\\n", "until run: RSTD exited", "wait 0.3",
         "type rstd ro rstdro\\n", "until run: RSTD exited", "wait 0.3",
+        "type rstd home\\n", "until run: RSTD exited", "wait 0.3",  # (before vol 0 rw)
         "type vol 0 rw\\n", "wait 0.5",                     # (a test copy of the stick)
         "type rstd fs rstdtest\\n", "until run: RSTD exited", "wait 0.3",
         "type rstd panic\\n", "until run: RSTD exited", "wait 0.3",
@@ -203,6 +204,14 @@ def check_std(log):
     ro = 'rstd: ro mkdir Err("Read-only file system (os error 30)"), ' \
          'write Err("Read-only file system (os error 30)"), read Ok(true)'
     result(has(ro), "rstd ro: a read-only volume says so; reading works")
+    result(has('rstd: home Ok("vol0:/Home"), HOME Ok("/Home")'), "rstd home: Files::home, and HOME")
+    result(has("rstd: home made true, wrote true, read back true, appended true, renamed true"),
+           "rstd home: in /Home, written without vol 0 rw: made, written, appended to, renamed")
+    result(has('rstd: home outside Err("Read-only file system (os error 30)"), moved out '
+               'Err("Error(-22: read-only (vol <n> rw in the shell allows writing))"), removed Err("Read-only file system (os error 30)")'),
+           "rstd home: nothing outside it, nor moved out of it, nor the folder itself")
+    result(has("rstd: home cleaned true, there true"), "rstd home: removed again, /Home still there")
+    result(has("files: made vol0:/Home, where programs may write"), "rstd home: the kernel made /Home on the stick")
     for line, what in [
         ("rstd: fs made rstdtest", "create_dir"),
         ("rstd: fs wrote and read back true", "write, read_to_string"),

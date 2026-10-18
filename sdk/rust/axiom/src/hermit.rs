@@ -489,10 +489,16 @@ fn is_root(path: &str) -> bool {
     path.ends_with(":/")
 }
 
+/// Whether a write there would be taken: the volume made writable, or
+/// something in the boot volume's /Home (as the kernel judges it).
 fn volume_writable(files: Files, path: &str) -> bool {
-    let n: Option<u32> = path.strip_prefix("vol").and_then(|r| r.split(':').next()).and_then(|n| n.parse().ok());
+    let Some((vol, rest)) = path.split_once(':') else { return true };
+    let n: Option<u32> = vol.strip_prefix("vol").and_then(|n| n.parse().ok());
+    let in_home = rest.len() > 6 && rest[..6].eq_ignore_ascii_case("/home/");
     match (n, files.volumes()) {
-        (Some(n), Ok(vols)) => vols.iter().any(|v| v.index == n && v.flags & files::VOL_WRITABLE != 0),
+        (Some(n), Ok(vols)) => vols.iter().any(|v| {
+            v.index == n && (v.flags & files::VOL_WRITABLE != 0 || (in_home && v.flags & files::VOL_BOOT != 0))
+        }),
         _ => true, // (the write says, then)
     }
 }

@@ -156,8 +156,8 @@ pub unsafe extern "C" fn start_std(sb: *mut u8, stack: usize, entry: StdEntry) -
     let argc = argv.len() as i32;
     argv.push(core::ptr::null());
     let argv = argv.leak().as_ptr();
-    static NO_ENV: [usize; 1] = [0];
-    let envp = NO_ENV.as_ptr() as *const *const u8;
+    // HOME: the boot volume's /Home (std's paths without a volume are on it)
+    let envp = alloc::vec![b"HOME=/Home\0".as_ptr(), core::ptr::null()].leak().as_ptr();
     let Some(top) = stack_top(stack) else {
         unsafe { entry(argc, argv, envp) }
     };
