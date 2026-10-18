@@ -128,7 +128,7 @@ pub struct Slide {
 }
 
 /// Everything about the table that isn't the engine's.
-#[derive(bevy::prelude::Resource)]
+#[derive(hearth::prelude::Resource)]
 pub struct Chess {
     pub game: Game,
     pub mode: Mode,

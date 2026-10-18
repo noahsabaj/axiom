@@ -4,14 +4,14 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-bevy = { git = "https://github.com/noahsabaj/hearth", branch = "main", default-features = false, features = ["2d"] }
+hearth = { git = "https://github.com/noahsabaj/hearth", branch = "main", default-features = false, features = ["2d"] }
 ab_glyph = "0.2"
 
 [features]
 default = ["remote"]
-# Lets the `hearth` CLI inspect and drive the app while it runs, over the Bevy Remote Protocol.
+# Lets the `hearth` CLI inspect and drive the app while it runs, over the Hearth Remote Protocol.
 # Leave it out of releases you ship with `--no-default-features`.
-remote = ["bevy/bevy_remote"]
+remote = ["hearth/hearth_remote"]
 
 # Compile your code with some optimization, so the game runs smoothly while you work on it.
 [profile.dev]

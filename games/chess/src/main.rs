@@ -8,13 +8,13 @@ mod canvas;
 mod pieces;
 mod ui;
 
-use bevy::asset::RenderAssetUsages;
-use bevy::input::keyboard::{Key, KeyboardInput};
-use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
-use bevy::prelude::*;
-use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
-use bevy::platform::time::Instant;
-use bevy::window::{PrimaryWindow, WindowResizeConstraints};
+use hearth::asset::RenderAssetUsages;
+use hearth::input::keyboard::{Key, KeyboardInput};
+use hearth::input::mouse::{MouseScrollUnit, MouseWheel};
+use hearth::prelude::*;
+use hearth::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use hearth::platform::time::Instant;
+use hearth::window::{PrimaryWindow, WindowResizeConstraints};
 use canvas::{Canvas, Fonts};
 use chess::ai::{Found, LEVELS, Search};
 use std::sync::Arc;
@@ -57,21 +57,21 @@ fn main() {
     // Lets the `hearth` CLI inspect and drive the app while it runs.
     #[cfg(feature = "remote")]
     app.add_plugins((
-        bevy::remote::RemotePlugin::default(),
-        bevy::remote::http::RemoteHttpPlugin::default().with_port(remote_port()),
+        hearth::remote::RemotePlugin::default(),
+        hearth::remote::http::RemoteHttpPlugin::default().with_port(remote_port()),
     ));
 
     app.run();
 }
 
-/// The port the app answers the Bevy Remote Protocol on: `HEARTH_REMOTE_PORT`, which `hearth run`
+/// The port the app answers the Hearth Remote Protocol on: `HEARTH_REMOTE_PORT`, which `hearth run`
 /// sets, else the default.
 #[cfg(feature = "remote")]
 fn remote_port() -> u16 {
     std::env::var("HEARTH_REMOTE_PORT")
         .ok()
         .and_then(|port| port.parse().ok())
-        .unwrap_or(bevy::remote::http::DEFAULT_PORT)
+        .unwrap_or(hearth::remote::http::DEFAULT_PORT)
 }
 
 /// The table to start with: `--fen <FEN>` sets up a position, `--two` seats two players.
@@ -96,8 +96,8 @@ fn chess_from_args() -> Chess {
     chess
 }
 
-fn to_color(c: canvas::Rgba) -> bevy::prelude::Color {
-    bevy::prelude::Color::srgb_u8(c.r, c.g, c.b)
+fn to_color(c: canvas::Rgba) -> hearth::prelude::Color {
+    hearth::prelude::Color::srgb_u8(c.r, c.g, c.b)
 }
 
 /// The font and the pieces, rendered for the board's current size.
