@@ -28,17 +28,21 @@ BM_ENTRY        equ 0                   ; kernel_main's first instruction
 BM_CPU          equ 1
 BM_MEMORY       equ 2
 BM_DISPLAY      equ 3
-BM_FIRMWARE     equ 4
-BM_SCHED        equ 5
-BM_SMP          equ 6
-BM_PCI          equ 7
-BM_USB          equ 8
-BM_DISKS        equ 9
-BM_CRYPTO       equ 10
-BM_NET          equ 11
-BM_SHELL        equ 12
-BM_STORE        equ 13
-BM_COUNT        equ 14
+BM_STACKS       equ 4
+BM_ACPI         equ 5
+BM_SMBIOS       equ 6
+BM_FIRMWARE     equ 7                   ; boot services memory reclaimed
+BM_SCHED        equ 8
+BM_SMP          equ 9
+BM_PCI          equ 10
+BM_IOMMU        equ 11
+BM_USB          equ 12
+BM_DISKS        equ 13
+BM_CRYPTO       equ 14
+BM_NET          equ 15
+BM_SHELL        equ 16
+BM_STORE        equ 17
+BM_COUNT        equ 18
 
 %macro BOOTMARK 1
     push rax
@@ -253,14 +257,23 @@ bn_boot:
     mov edx, 1
     xor r8d, r8d
     call bn_row
-    mov rax, [boot_info]                ; the loader
-    mov rcx, [rax + BI_TSC_EXIT]
-    sub rcx, [rax + BI_TSC_ENTRY]
+    xor ebx, ebx                        ; the loader's steps
+.loader:
+    mov rax, [boot_info]
+    lea rdx, [bn_loader_marks]
+    mov ecx, [rdx + rbx * 4]
+    mov rcx, [rax + rcx]
+    mov r8d, [rdx + rbx * 4 + 4]
+    sub rcx, [rax + r8]
     lea rdi, [str_bn_boot]
-    lea rsi, [str_bn_bs_loader]
+    lea rax, [bn_loader_names]
+    mov rsi, [rax + rbx * 8]
     mov edx, 1
     xor r8d, r8d
     call bn_row
+    inc ebx
+    cmp ebx, 4
+    jb .loader
     mov rax, [boot_info]                ; ExitBootServices to the kernel
     mov rcx, [boot_marks + BM_ENTRY * 8]
     sub rcx, [rax + BI_TSC_EXIT]
@@ -662,6 +675,7 @@ bn_gfx:
     push r13
     push r14
     call gfx_target_back
+    call bn_gfx_check
     BN_T0                               ; the whole back buffer filled
     mov ebx, BN_FILLS
 .fill:
@@ -815,6 +829,8 @@ bn_fat:                                 ; RDI = path -> CF
     mov r15, rax
     mov ebx, 3
 .read:
+    mov rax, [disk_ops]
+    mov [bn_ops0], rax
     BN_T0
     mov rsi, r12
     mov rdi, r15
@@ -824,10 +840,29 @@ bn_fat:                                 ; RDI = path -> CF
     mov r8, rax
     RDTSC64
     sub rax, r13
+    push rax
+    push r8
     mov rcx, rax
     lea rdi, [str_bn_fat]
     lea rsi, [str_bn_fat_read]
     mov edx, 1
+    call bn_row
+    pop r8                              ; and each read asked of the driver
+    pop rcx
+    mov rax, r8
+    mov rdx, [disk_ops]
+    sub rdx, [bn_ops0]
+    xor r8d, r8d
+    test rdx, rdx
+    jz .counted
+    push rdx
+    xor edx, edx
+    div qword [rsp]
+    mov r8, rax                         ; bytes each
+    pop rdx
+.counted:
+    lea rdi, [str_bn_fat]
+    lea rsi, [str_bn_fat_ops]
     call bn_row
     dec ebx
     jnz .read
@@ -853,13 +888,149 @@ bn_fat:                                 ; RDI = path -> CF
 
 BN_FAT_MAX      equ 16 * 1024 * 1024
 
+; bn_gfx_check: gfx_glyph 8 pixels at a time against one at a time: every
+; character, opaque and blended over another glyph, whole and clipped on
+; the right, in a few colours; said whether any pixel differs.
+bn_gfx_check:
+    cmp byte [gfx_avx2], 0
+    jne .check
+    ret
+.check:
+    push rbx
+    push rbp
+    push r12
+    push r13
+    push r14
+    push r15
+    mov rdi, [font_cw]
+    imul rdi, [font_ch]
+    shl rdi, 3                          ; two cells
+    call kmalloc
+    test rax, rax
+    jz .out
+    mov r15, rax                        ; R15 = the cell drawn each way
+    xor ebp, ebp                        ; RBP = pixels that differ
+    xor r12d, r12d                      ; R12 = the case
+.case:
+    mov ebx, 32                         ; EBX = the character
+.char:
+    xor r14d, r14d                      ; R14 = 0: 8 at a time, 1: one by one
+.way:
+    mov byte [gfx_avx2], 0              ; under it, another glyph
+    mov edi, 0x80C0FF
+    mov esi, 0x402010
+    call gfx_color
+    call .where
+    lea edx, [ebx + 5]
+    call gfx_glyph
+    xor eax, eax
+    test r14d, r14d
+    sete al
+    mov [gfx_avx2], al
+    mov eax, r12d                       ; the colours: case >> 3
+    shr eax, 3
+    lea rcx, [bn_check_colours]
+    mov edi, [rcx + rax * 8]
+    mov esi, [rcx + rax * 8 + 4]
+    test r12d, 4
+    jz .opaque
+    mov esi, GFX_CLEAR
+.opaque:
+    call gfx_color
+    call .where
+    mov edx, ebx
+    call gfx_glyph
+    mov rax, [font_cw]                  ; kept: R13 columns of each row
+    imul rax, [font_ch]
+    shl rax, 2
+    imul rax, r14
+    lea rdi, [r15 + rax]
+    xor esi, esi                        ; (y = 0)
+    mov rax, [scr_w]
+    sub rax, [font_cw]
+    add rax, r10
+    shl rax, 2
+    add rsi, rax
+    add rsi, [bb_ptr]
+    mov rdx, [font_ch]
+.copy:
+    push rsi
+    mov rcx, r13
+    rep movsd
+    pop rsi
+    add rsi, [scr_pitch]
+    dec rdx
+    jnz .copy
+    inc r14d
+    cmp r14d, 2
+    jb .way
+    mov rcx, r13                        ; the two compared
+    imul rcx, [font_ch]
+    mov rsi, r15
+    mov rdi, [font_cw]
+    imul rdi, [font_ch]
+    lea rdi, [r15 + rdi * 4]
+.compare:
+    mov eax, [rsi]
+    cmp eax, [rdi]
+    je .same
+    inc rbp
+.same:
+    add rsi, 4
+    add rdi, 4
+    dec rcx
+    jnz .compare
+    inc ebx
+    cmp ebx, 256
+    jb .char
+    inc r12d
+    cmp r12d, BN_CHECK_COLOURS * 8
+    jb .case
+    mov byte [gfx_avx2], 1
+    mov rdi, r15
+    call kfree
+    test rbp, rbp
+    jnz .differ
+    KLOG "bench: glyphs 8 pixels at a time are the same as one at a time"
+    jmp .out
+.differ:
+    KLOG "bench: glyphs 8 pixels at a time differ from one at a time in %u pixels", rbp
+.out:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbp
+    pop rbx
+    ret
+; .where -> RDI = x, RSI = 0 for the case's clip (0, 3, 7 or 0 columns off
+; the right edge), R10 = those columns, R13 = the columns left
+.where:
+    mov eax, r12d
+    and eax, 3
+    lea rcx, [bn_check_clips]
+    movzx r10d, byte [rcx + rax]
+    mov r13, [font_cw]
+    sub r13, r10
+    mov rdi, [scr_w]
+    sub rdi, [font_cw]
+    add rdi, r10
+    xor esi, esi
+    ret
+
 section .rodata
+bn_check_clips: db 0, 3, 7, 1
+BN_CHECK_COLOURS equ 4
+align 8
+bn_check_colours: dd 0xE0E0E0, 0x202020, 0xFF00FF, 0x00FF00, 0x123456, 0xFEDCBA
+                dd 0xFFFFFF, 0x000000
 str_bn_mbs:     db 'MB/s', 0
 str_bn_ops:     db 'op/s', 0
 str_bn_boot:    db 'boot', 0
 str_bn_sched:   db 'sched', 0
 str_bn_fat:     db 'fat', 0
 str_bn_fat_read: db 'read file', 0
+str_bn_fat_ops: db 'disk reads in it', 0
 str_bn_fat_default: db '/EFI/AXIOM/BROWSE.AXE', 0
 str_bn_switch:  db 'switch (one cpu)', 0
 str_bn_wake:    db 'wake-up (two cpus)', 0
@@ -867,16 +1038,23 @@ str_bn_thread:  db 'bench', 0
 str_bn_ping:    db 'bench ping', 0
 str_bn_pong:    db 'bench pong', 0
 str_bn_bs_fw:   db 'firmware', 0
-str_bn_bs_loader: db 'loader', 0
+str_bn_bs_ldisp: db 'loader: display mode', 0
+str_bn_bs_lcalib: db 'loader: volume, tsc', 0
+str_bn_bs_lkernel: db 'loader: kernel, tables', 0
+str_bn_bs_lexit: db 'loader: exit boot services', 0
 str_bn_bs_exit: db 'exit to kernel', 0
 str_bn_bs_total: db 'power-on to prompt', 0
 str_bn_bs_cpu:  db 'serial, cpu, log', 0
 str_bn_bs_mem:  db 'memory', 0
 str_bn_bs_disp: db 'display', 0
-str_bn_bs_acpi: db 'acpi, smbios', 0
+str_bn_bs_stacks: db 'stacks, tss', 0
+str_bn_bs_acpi: db 'acpi', 0
+str_bn_bs_smbios: db 'smbios', 0
+str_bn_bs_reclaim: db 'boot memory reclaimed', 0
 str_bn_bs_sched: db 'apic, scheduler', 0
 str_bn_bs_smp:  db 'other cpus', 0
-str_bn_bs_pci:  db 'pci, iommu', 0
+str_bn_bs_pci:  db 'pci', 0
+str_bn_bs_iommu: db 'iommu', 0
 str_bn_bs_usb:  db 'keyboard, usb', 0
 str_bn_bs_disks: db 'disks', 0
 str_bn_bs_crypto: db 'crypto self-test', 0
@@ -884,11 +1062,15 @@ str_bn_bs_net:  db 'network', 0
 str_bn_bs_shell: db 'demo, shell', 0
 str_bn_bs_store: db 'store', 0
 align 8
+bn_loader_names: dq str_bn_bs_ldisp, str_bn_bs_lcalib, str_bn_bs_lkernel, str_bn_bs_lexit
+bn_loader_marks: dd BI_TSC_DISPLAY, BI_TSC_ENTRY, BI_TSC_CALIB, BI_TSC_DISPLAY
+                dd BI_TSC_TABLES, BI_TSC_CALIB, BI_TSC_EXIT, BI_TSC_TABLES
 bn_stage_names: dq 0, str_bn_bs_cpu, str_bn_bs_mem, str_bn_bs_disp
-                dq str_bn_bs_acpi, str_bn_bs_sched, str_bn_bs_smp
-                dq str_bn_bs_pci, str_bn_bs_usb, str_bn_bs_disks
-                dq str_bn_bs_crypto, str_bn_bs_net, str_bn_bs_shell
-                dq str_bn_bs_store
+                dq str_bn_bs_stacks, str_bn_bs_acpi, str_bn_bs_smbios
+                dq str_bn_bs_reclaim, str_bn_bs_sched, str_bn_bs_smp
+                dq str_bn_bs_pci, str_bn_bs_iommu, str_bn_bs_usb
+                dq str_bn_bs_disks, str_bn_bs_crypto, str_bn_bs_net
+                dq str_bn_bs_shell, str_bn_bs_store
 
 section .bss
 alignb 8
@@ -896,6 +1078,8 @@ boot_marks:     resq BM_COUNT
 bp_a:           resq 1
 bp_b:           resq 1
 bp_turn:        resd 1
+alignb 8
+bn_ops0:        resq 1
 alignb 8
 bn_ring:        resb RC_SIZE
 

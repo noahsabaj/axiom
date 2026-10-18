@@ -82,13 +82,16 @@ kernel_main:
     call pmm_free
     call tss_install
     call idt_use_ist
+    BOOTMARK BM_STACKS
 
     call acpi_init
+    BOOTMARK BM_ACPI
     mov eax, [cpu_count]
     mov ecx, [acpi_table_count]
     mov edx, [ioapic_count]
     KLOG "acpi: %u tables, %u processors in the MADT, %u I/O APIC(s)", rcx, rax, rdx
     call smbios_init
+    BOOTMARK BM_SMBIOS
     call pmm_release_boot_services
     BOOTMARK BM_FIRMWARE
     mov rax, [pmm_free_pages]
@@ -112,8 +115,9 @@ kernel_main:
     mov ecx, [cpu_count]
     KLOG "smp: %u of %u threads online in %u us", rax, rcx, qword [smp_us]
     call pci_init
-    call iommu_init                     ; before any driver lets a device do DMA
     BOOTMARK BM_PCI
+    call iommu_init                     ; before any driver lets a device do DMA
+    BOOTMARK BM_IOMMU
     mov eax, [pci_count]
     KLOG "pci: %u functions", rax
     call kbd_init
