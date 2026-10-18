@@ -105,6 +105,7 @@ section .text
 %include "mandel.asm"
 %include "ui.asm"
 %include "shell.asm"
+%include "settings.asm"
 %include "desk.asm"
 %include "term.asm"
 %include "vt.asm"

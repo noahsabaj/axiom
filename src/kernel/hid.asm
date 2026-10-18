@@ -1052,7 +1052,7 @@ hid_keys:
     mov [hid_repeat_src], rdx
     push rax
     push rdi
-    mov edi, 500
+    call cfg_repeat_delay               ; keyboard.repeat-delay
     call usb_deadline
     mov [hid_repeat_at], rax
     pop rdi
@@ -1112,7 +1112,7 @@ hid_key_repeat:
     call usb_expired
     jnc .done
     push rdi
-    mov edi, 33
+    call cfg_repeat_every               ; keyboard.repeat-rate
     call usb_deadline
     mov [hid_repeat_at], rax
     pop rdi
@@ -1161,7 +1161,13 @@ hid_press:
     lea rdx, [hid_map_shift]
 .lookup:
     movzx edx, byte [rdx + rax - 4]
-    cmp eax, 0x1D                       ; letters: caps lock and ctrl
+    call cfg_key                        ; keyboard.layout
+    push rax                            ; letters: caps lock and ctrl
+    mov eax, edx
+    or eax, 0x20
+    sub eax, 'a'
+    cmp eax, 'z' - 'a'
+    pop rax
     ja .other
     cmp byte [hid_caps], 0
     je .ctrl

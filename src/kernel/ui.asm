@@ -80,7 +80,7 @@ ui_panel:
     mov r14, rdx
     mov r15, rcx
     mov rbx, r8
-    mov r8d, COL_LINE                   ; border
+    mov r8d, [look_line]                   ; border
     call gfx_fill
     mov rax, [ui_line]
     lea rdi, [r12 + rax]
@@ -91,7 +91,7 @@ ui_panel:
     mov rcx, r15
     sub rcx, rax
     sub rcx, rax
-    mov r8d, COL_PANEL
+    mov r8d, [look_panel]
     call gfx_fill
     test rbx, rbx
     jz .done
@@ -102,7 +102,7 @@ ui_panel:
     mov rdx, [ui_line]
     imul rdx, rdx, 3
     mov rcx, [font_ch]
-    mov r8d, COL_ACCENT
+    mov r8d, [look_accent]
     call gfx_fill
     mov rdi, [font_cw]
     add rdi, r12
@@ -110,8 +110,8 @@ ui_panel:
     shr rsi, 2
     add rsi, r13
     mov rdx, rbx
-    mov ecx, COL_DIM
-    mov r8d, COL_PANEL
+    mov ecx, [look_dim]
+    mov r8d, [look_panel]
     call ui_text
 .done:
     pop r15
@@ -551,7 +551,7 @@ sys_paint:
     xor esi, esi
     mov rdx, [rbx + WN_W]
     mov rcx, [rbx + WN_H]
-    mov r8d, COL_PANEL
+    mov r8d, [look_panel]
     call gfx_fill
     xor r12d, r12d
 .line:
@@ -564,8 +564,8 @@ sys_paint:
     mov rsi, r13
     lea rdx, [info_labels]
     mov rdx, [rdx + r12 * 8]
-    mov ecx, COL_DIM
-    mov r8d, COL_PANEL
+    mov ecx, [look_dim]
+    mov r8d, [look_panel]
     call ui_text
     mov rdi, [font_cw]                  ; values start at column 11
     imul rdi, rdi, 11
@@ -573,8 +573,8 @@ sys_paint:
     imul rdx, r12, INFO_LEN
     lea rax, [info_lines]
     add rdx, rax
-    mov ecx, COL_TEXT
-    mov r8d, COL_PANEL
+    mov ecx, [look_text]
+    mov r8d, [look_panel]
     call ui_text
     inc r12
     cmp r12, SYS_LINES
@@ -593,7 +593,7 @@ cpu_paint:
     xor esi, esi
     mov rdx, [rbx + WN_W]
     mov rcx, [rbx + WN_H]
-    mov r8d, COL_PANEL
+    mov r8d, [look_panel]
     call gfx_fill
     mov rax, [rbx + WN_W]               ; columns that fit
     mov rcx, [font_cw]
@@ -691,13 +691,13 @@ ui_draw_tiles:
 .colored:
     cmp qword [rbx + PC_ONLINE], 0
     jne .lit
-    mov r15d, COL_FAINT
+    mov r15d, [look_faint]
 .lit:
     mov rdi, r13
     mov rsi, r14
     mov rdx, [tile_w]
     mov rcx, [tile_h]
-    mov r8d, COL_PANEL2
+    mov r8d, [look_panel2]
     call gfx_fill
     mov rdi, r13
     mov rsi, r14
@@ -715,7 +715,7 @@ ui_draw_tiles:
     add rsi, r14
     lea rdx, [ui_buf]
     mov ecx, r15d
-    mov r8d, COL_PANEL2
+    mov r8d, [look_panel2]
     call ui_text
     lea rdi, [ui_buf]
     mov rax, [rbx + PC_MHZ]
@@ -733,12 +733,12 @@ ui_draw_tiles:
     shr rsi, 3
     add rsi, r14
     lea rdx, [ui_buf]
-    mov ecx, COL_TEXT
+    mov ecx, [look_text]
     cmp qword [rbx + PC_MHZ], 0
     jne .mhz_color
-    mov ecx, COL_FAINT
+    mov ecx, [look_faint]
 .mhz_color:
-    mov r8d, COL_PANEL2
+    mov r8d, [look_panel2]
     call ui_text_right
 
     lea rdi, [ui_buf]                   ; line 2: temperature, right
@@ -759,7 +759,7 @@ ui_draw_tiles:
     add rsi, rax
     add rsi, r14
     lea rdx, [ui_buf]
-    mov ecx, COL_FAINT
+    mov ecx, [look_faint]
     mov rax, [rbx + PC_TEMP]
     test rax, rax
     jz .temp_color
@@ -771,7 +771,7 @@ ui_draw_tiles:
     jb .temp_color
     mov ecx, COL_BAD
 .temp_color:
-    mov r8d, COL_PANEL2
+    mov r8d, [look_panel2]
     call ui_text_right
     mov [tile_bar_end], rax
 
@@ -788,7 +788,7 @@ ui_draw_tiles:
     jle .next_tile
     mov rcx, [font_ch]
     shr rcx, 2
-    mov r8d, COL_LINE
+    mov r8d, [look_line]
     call gfx_fill
     mov rax, [rbx + PC_JOB_ITEMS]
     imul rax, rdx
@@ -914,6 +914,13 @@ ui_refresh:
     add rdi, rax
 .no_power:
     SPRINTF rdi, "up %u:%02u:%02u", r10, r9, r8
+    add rdi, rax                        ; and the time: desktop.clock
+    cmp qword [cfg_vals + CFG_CLOCK * 8], 2
+    je .no_wall
+    SPRINTF rdi, {" ", G_MIDDOT, " "}
+    add rdi, rax
+    call cfg_clock
+.no_wall:
 
     lea rsi, [ui_buf]                   ; at the right of the bar
     call desk_status

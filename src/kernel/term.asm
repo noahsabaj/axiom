@@ -512,7 +512,7 @@ term_draw:
     xor edi, edi
     mov rdx, [rbx + WN_W]
     mov rcx, [rbx + WN_H]
-    mov r8d, COL_PANEL
+    mov r8d, [look_panel]
     call gfx_fill
     mov [r12 + TW_SHOWN], r15
     mov r13, r15
@@ -626,7 +626,7 @@ term_line:
     mov rsi, r15
     mov rdx, [rbx + WN_W]
     mov rcx, [font_ch]
-    mov r8d, COL_PANEL
+    mov r8d, [look_panel]
     call gfx_fill
     cmp r13, [r12 + TW_END]             ; written yet?
     jg .out
@@ -677,7 +677,7 @@ term_line:
     add rcx, rcx
     sub rsi, rcx
     mov rdx, [font_cw]
-    mov r8d, COL_ACCENT
+    mov r8d, [look_accent]
     call gfx_fill
 .out:
     pop r15
@@ -698,12 +698,16 @@ term_cell:
     mov rdi, rbx                        ; EDI = its color, ESI = the background
     shr rdi, CELL_FG
     and edi, 0xFFFFFF
-    mov esi, COL_PANEL
+    mov esi, [look_panel]
     test bh, CA_BG
     jz .bg
     mov rsi, rbx
     shr rsi, CELL_BG
 .bg:
+    call look_map                       ; the dark look's colours, as now
+    xchg edi, esi
+    call look_map
+    xchg edi, esi
     test bh, CA_INVERSE
     jz .not_inverse
     xchg edi, esi
@@ -741,7 +745,7 @@ term_cell:
     call gfx_glyph
     jmp .lines
 .no_glyph:
-    cmp esi, COL_PANEL                  ; no glyph: just its background
+    cmp esi, [look_panel]                  ; no glyph: just its background
     je .lines
     mov r8d, esi
     mov rdi, r12

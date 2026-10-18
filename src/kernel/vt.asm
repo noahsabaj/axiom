@@ -2445,13 +2445,13 @@ vt_osc_end:
     mov eax, 4
     jmp vt_color_reply
 .fg:
-    mov ecx, COL_TEXT
+    mov ecx, [look_text]
     jmp .asked
 .bg:
-    mov ecx, COL_PANEL
+    mov ecx, [look_panel]
     jmp .asked
 .cursor:
-    mov ecx, COL_ACCENT
+    mov ecx, [look_accent]
 .asked:
     cmp byte [rsi], '?'
     jne .out
