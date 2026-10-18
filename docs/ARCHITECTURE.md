@@ -1161,16 +1161,26 @@ text rows.
 
 - A program that wants the desktop (`AW_DESK`, or `+desk`) gets a handle to it (`OT_DESK`,
   `SB_DESK`, right `RT_DESK_WINDOW`). `SYS_WINDOW_NEW(desktop, width,
-  height, a channel's end)` opens a window (`OT_WINDOW`, `WO_*`) and returns
-  it and its pixels: a block of memory the program maps, B,G,R,x at width ×
-  4 bytes a row, which the desktop copies from as it composes. Its size is
-  fixed (no grip); its title starts as the program's name.
+  height, a channel's end, WNF_*)` opens a window (`OT_WINDOW`, `WO_*`) and
+  returns it and its pixels: a block of memory the program maps, B,G,R,x at
+  width × 4 bytes a row, which the desktop copies from as it composes. Its
+  title starts as the program's name. With `WNF_RESIZE` the user may resize
+  it: the pixels are as large as the screen, and `WE_RESIZED` says how much
+  of them the window shows now; `WNF_FULL` is the whole screen, without a
+  frame.
 - **What happens to it** goes to the program as messages of `WE_SIZE`
   bytes, sent from the end it was given (`ch_post`, the kernel's own send)
   so they arrive at the end the program kept: `WE_KEY` while it has the
   keys, `WE_PRESS` and `WE_RELEASE` (the button, where), `WE_MOVE` while a
-  button is held in it, `WE_WHEEL`, and `WE_CLOSE` from its close button or
-  `win close`, which only ask (`OP_ASK`).
+  button is held in it, `WE_WHEEL`, `WE_CLOSE` from its close button or
+  `win close`, which only ask (`OP_ASK`), `WE_RESIZED`, `WE_FOCUS` (it has
+  the keys, or not) and `WE_LOOK`.
+- **The look** (`look.asm`): one block of memory, made at boot, that
+  programs map read only (`RO_DESK_LOOK`): the theme's colours by role, the
+  accent, the scale, the screen's size, and the desktop's fonts with the
+  tables that find a glyph (Noto Sans, `UFB_*`, and Cascadia Mono,
+  `MFB_*`). When the theme changes, `look_update` writes it again, counts
+  `LK_SERIAL` up and sends every program's window `WE_LOOK`.
 - **On its ring:** `RO_WIN_SHOW` (a rectangle, or all of it) puts what was
   drawn on the screen; `RO_WIN_TITLE` retitles it. Both need `RT_WIN_DRAW`.
 - The program's side runs on any CPU and never touches the desktop's own
@@ -1179,6 +1189,62 @@ text rows.
   `wo_service` (from `desk_service`) opens, retitles and closes. Showing only
   adds damage, which any thread may. The window closes when its last handle
   goes (`wo_orphan`): the program ended, was killed, or its shell closed.
+  The keys then go back to the window that had them before.
+
+## Files for programs: `fscap.asm`
+
+- A program run with `AW_FILES` (or `+files`) gets a handle to every FAT
+  volume (`OT_FILES`, `SB_FILES`). `RO_FS_SUB` makes one that reaches a
+  single folder and what is under it, to hand to another program. A path is
+  `FS_PATH` bytes, NUL-ended: with a handle to every volume
+  `vol<n>:/folder/file`; with one to a folder, from that folder. No `.` or
+  `..`.
+- On the ring: `RO_FS_VOLUMES`, `RO_FS_LIST`, `RO_FS_READ`, `RO_FS_WRITE`
+  (a whole file, made or replaced), `RO_FS_MKDIR`, `RO_FS_REMOVE`,
+  `RO_FS_RENAME`, `RO_FS_SUB`. What a volume allows still holds: a program
+  never makes one writable, only the user's `vol <n> rw` does, and until
+  then a write is `E_READONLY`.
+- The FAT code is the main thread's alone: the program's thread queues what
+  it asks for (`fs_call`) and waits; `fs_service`, from the main loop, does
+  it, through kernel buffers the program's thread copies to and from.
+- `src/user/fstest.asm` checks it all, on a read-only volume and a
+  writable one, in the user suite.
+
+## Programs' controls: `src/user/kit.inc`
+
+- What a program's window is made of, in the desktop's look: `kit_open`
+  (the window, the look mapped, the fonts found), `kit_next` (the next
+  event, or a deadline), drawing into the pixels at the user's scale
+  (`kit_pt`: points to pixels) inside a clip (fills, round rectangles,
+  frames, soft shadows, anti-aliased strokes), text in Noto Sans at the
+  nearest size (`kit_font`, `kit_text`, `kit_text_w`) and in Cascadia Mono
+  (`kit_mono`, `kit_mtext`), and the controls drawn the desktop's way:
+  buttons (`KB_*`: the default one in the accent, held, off), one-line fields with a caret,
+  choosing by keys and the mouse and the clipboard (`kit_edraw`,
+  `kit_ekey`, `kit_eclick`), and scrollers. Memory comes from `kit_alloc`
+  (a mapped block, by handle).
+
+## Notes: `src/user/notes.asm`, `src/user/notes/`
+
+- A text editor in a window of the desktop's look, the keys a Mac's
+  editors have with ctrl for cmd. Each tab is a document (`D_*`,
+  `doc.inc`): its text in one block of memory with the path before it (so a
+  read or a write is one call on the files handle), a table of where each
+  line starts, and an undo log of inserts and deletes (`U_*`) in groups, so
+  a run of typing undoes at once, and so does replacing all.
+- **Colours** (`lex.inc`): a lexer per language (assembly, C and its kin,
+  Python, shell and settings, JSON, Markdown) classes each byte of a line
+  (`T_*`), carrying a state from line to line (block comments, triple
+  quotes, fences) that is cached for the lines above what is drawn.
+- **Drawing** (`view.inc`): the tabs, the bar, the lines (the current one
+  marked, what is chosen, what was found), the line numbers, the caret
+  (blinking, only the changed rows redrawn) and the status line, in the
+  theme's colours with a palette like Xcode's.
+- **Finding** (`find.inc`): find, replace (one, or all as one undo) and
+  go to a line, in a bar over the text, live as the field changes.
+- **Sheets** (`panel.inc`): Open and Save As browse the volumes (folders
+  first, sorted, type to select), make folders and ask before replacing;
+  closing what was not saved asks Save, Don't Save or Cancel.
 
 ## The browser: `src/user/browse.asm`, `src/user/web/`
 

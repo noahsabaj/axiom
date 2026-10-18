@@ -52,7 +52,8 @@ WN_ZX           equ WN_ICON + SF_SIZE   ; where it was before it zoomed
 WN_ZY           equ WN_ZX + 8
 WN_ZW           equ WN_ZX + 16
 WN_ZH           equ WN_ZX + 24
-WN_SIZE         equ WN_ZX + 32
+WN_FOCUSED      equ WN_ZX + 32          ; when it last took the keys (a count)
+WN_SIZE         equ WN_ZX + 40
 
 WF_SHOWN        equ 1 << 0              ; not minimised
 WF_CLOSE        equ 1 << 1              ; it has a close button
@@ -400,8 +401,10 @@ win_new:
 .app:
     mov rsi, r11
     call win_app_set
+    xor r12d, r12d
     cmp r8, -1                          ; cascade from the top left
     jne .placed
+    mov r12d, 1                         ; R12D: placed for it
     mov rax, [desk_next_id]
     and eax, 7
     imul rax, [fr_t]
@@ -423,6 +426,23 @@ win_new:
     mov rsi, r14
     mov rdx, r15
     call win_fit                        ; size, place, paint
+    test r12d, r12d
+    jz .seen
+    mov rax, [rbx + WN_Y]               ; placed for it: above the dock, as
+    add rax, [rbx + WN_H]               ; far as it fits under the bar
+    add rax, [fr_t]
+    sub rax, [m_work_y1]
+    jle .seen
+    mov rdx, [rbx + WN_Y]
+    sub rdx, rax
+    mov rcx, [m_bar_h]
+    add rcx, [m_gap]
+    cmp rdx, rcx
+    jge .up
+    mov rdx, rcx
+.up:
+    mov [rbx + WN_Y], rdx
+.seen:
     mov rdi, rbx
     call win_damage_whole
     call desk_bar_damage
@@ -878,6 +898,9 @@ win_focus:
     mov [desk_focus], rdi
     test rdi, rdi
     jz .done
+    inc qword [desk_focus_n]
+    mov rax, [desk_focus_n]
+    mov [rdi + WN_FOCUSED], rax
     test dword [rdi + WN_FLAGS], WF_SHOWN
     jnz .shown
     or dword [rdi + WN_FLAGS], WF_SHOWN
@@ -937,7 +960,7 @@ win_minimise:
     cmp rdi, [desk_focus]
     jne .bar
     push rdi
-    call desk_top_shown
+    call desk_last_focused
     mov rdi, rax
     call win_focus
     pop rdi
@@ -965,6 +988,42 @@ desk_top_shown:
 .none:
     xor eax, eax
 .out:
+    pop rdx
+    pop rcx
+    ret
+
+; desk_last_focused -> RAX = of the windows shown, the one that had the keys
+; last; else the topmost; or 0. Preserves others.
+desk_last_focused:
+    push rcx
+    push rdx
+    push rsi
+    push r8
+    xor eax, eax
+    xor esi, esi                        ; RSI: when it had them
+    mov rcx, [desk_zn]
+    lea rdx, [desk_z]
+.each:
+    test rcx, rcx
+    jz .seen
+    dec rcx
+    mov r8, [rdx + rcx * 8]
+    test dword [r8 + WN_FLAGS], WF_SHOWN
+    jz .each
+    test dword [r8 + WN_FLAGS], WF_CLOSING
+    jnz .each
+    cmp [r8 + WN_FOCUSED], rsi
+    jbe .each
+    mov rsi, [r8 + WN_FOCUSED]
+    mov rax, r8
+    jmp .each
+.seen:
+    test rax, rax
+    jnz .out
+    call desk_top_shown
+.out:
+    pop r8
+    pop rsi
     pop rdx
     pop rcx
     ret
@@ -1072,7 +1131,7 @@ win_destroy:
     cmp rbx, [desk_focus]
     jne .no_focus
     mov qword [desk_focus], 0
-    call desk_top_shown
+    call desk_last_focused              ; the keys back where they were
     mov rdi, rax
     call win_focus
 .no_focus:
@@ -3726,6 +3785,7 @@ desk_wins:      resq DESK_MAX           ; by slot
 desk_z:         resq DESK_MAX           ; bottom to top
 desk_zn:        resq 1
 desk_focus:     resq 1                  ; the window with the keys
+desk_focus_n:   resq 1                  ; how many times the keys have moved
 desk_next_id:   resq 1
 hover_win:      resq 1                  ; the window whose buttons the pointer is on
 drag_win:       resq 1

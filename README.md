@@ -32,6 +32,18 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   windows of their own**,
   by capability: pixels they draw into, keys, clicks, drags and the wheel
   as messages over a channel, and a title; `paint` is one to draw in.
+  Their windows can resize, and draw in the desktop's own look: its
+  colours, its scale and its fonts, shared with them (`src/user/kit.inc`).
+- **Notes**, `notes [file ...]`: a text and code editor in tabs. Line
+  numbers, the current line marked, colours for assembly, C and its kin,
+  Python, shell and settings files, JSON and Markdown; find and replace in a
+  bar, go to a line, undo and redo, the clipboard, indenting, comments on
+  and off, lines moved and copied, the text larger or smaller; Open and
+  Save As sheets that browse the volumes and make folders, and asking
+  before closing what was not saved. Files come by capability: a program
+  given `AW_FILES` (or `+files`) reaches the FAT volumes through a handle,
+  or one folder of them through a handle made from it, and writes only a
+  volume the user made writable.
 - **A web browser**, `browse [url]`: HTML and plain text over HTTP and
   HTTPS in a window of its own, laid out and drawn with anti-aliased
   DejaVu text (headings, bold, italic, monospace, lists, quotes, tables,
@@ -144,7 +156,7 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   killing one (ctrl+C, or a program killing its child) ends every program
   it started too. Several run at once (`&`, `tasks stop <program>`), and
   each gets only the capabilities it declares (the network, the store, the
-  desktop) or is granted for that run (`+net hello`). `hello`, `test`, `child`, `fault`, `spin`, `stash`, `paint` and `browse` come with it
+  desktop) or is granted for that run (`+net hello`). `hello`, `test`, `child`, `fault`, `spin`, `stash`, `paint`, `browse`, `notes` and `fstest` come with it
   (`src/user/`); `user test` runs them all, with a fault of every kind.
 - **Linux programs, unchanged**: `linux <program> [arguments]` runs an
   x86-64 Linux program from a root on the boot stick (`tools/mkroot.py`
