@@ -4,8 +4,9 @@
     python tools/test/threads/run.py [--quick]
 
 Boots build/esp (build it first) and checks the serial log:
-  - 8 CPUs: 'threads' (each CPU, and the threads every boot has: main,
-    an idle thread and a job worker on each CPU), 'threads test' (2000
+  - 8 CPUs: 'threads cpus' (each CPU), 'threads' (the threads every boot
+    has: main, an idle thread and a job worker on each CPU), 'threads |
+    count' (as many after the tests as before), 'threads test' (2000
     threads started and joined; switches on one CPU and wake-ups across
     two; 1 ms sleeps; fairness between spinning threads, with the main
     thread answering on time and SIMD registers kept across switches;
@@ -39,6 +40,7 @@ def result(ok, text):
 
 
 TEST = ["type threads test\\n", "until threads test: p", "wait 0.5"]
+COUNT = ["type threads | count | to json\\n", 'until "count"', "wait 0.3"]
 
 
 def check_test(log, cpus, label):
@@ -96,11 +98,15 @@ def jobs(opts):
     """Every boot, side by side."""
     jobs = {
         "eight": ([
-            "type threads\\n", "until ended since boot", "wait 0.5",
+            "type threads cpus\\n", "until handed", "wait 0.5",
+            "type threads\\n", "until moves", "wait 0.5",
+            *COUNT,
             *TEST,
             "type threads spin 16 any 2\\n", "until spin: 16", "wait 1",
-            "type threads\\n", "until ended since boot", "wait 2.5",
+            "type threads\\n", "until moves", "wait 0.5",
+            *COUNT, "wait 2",
             "type threads\\n", "wait 0.5",
+            *COUNT,
             "type poweroff\\n", "ended",
         ], ["--smp", "8"], 120),
         "one": ([*TEST, "type poweroff\\n", "ended"], ["--smp", "1"], 90),
@@ -116,9 +122,9 @@ def jobs(opts):
 def eight(logs):
     print("-- 8 CPUs")
     log, err = logs["eight"]
-    first = log[log.find("  CPU  kind"):]
-    rows = re.findall(r"^\s+(\d+)\s+\S+\s+\d+\s+\d+%", first.split("threads;")[0], re.M)
-    result(rows == [str(i) for i in range(8)], "'threads' lists 8 CPUs")
+    first = log[log.find("  cpu  kind"):]
+    rows = re.findall(r"^\s+(\d+)\s+\S+\s+\d+\s+\d+%", first.split("name")[0], re.M)
+    result(rows == [str(i) for i in range(8)], "'threads cpus' lists 8 CPUs")
     names = re.findall(r"^\s+\d+\s+(\S+)\s+(?:running|parked|ready)", first.split("threads test")[0],
                        re.M)
     want = {"main", "idle/0"} | {f"idle/{i}" for i in range(1, 8)} | \
@@ -133,7 +139,7 @@ def eight(logs):
     during = log[log.find("spin: 16 threads"):]
     result(re.search(r"^\s+\d+\s+spin\s+(?:running|ready)", during, re.M) is not None,
            "'threads' shows the spinners while they run")
-    counts = re.findall(r"(\d+) threads; \d+ ended since boot", log)
+    counts = re.findall(r'"count": (\d+)', log)
     result(len(counts) >= 3 and counts[0] == counts[-1],
            f"after them, {counts[-1] if counts else '?'} threads, as at boot")
     result("QEMU ended by itself" in err, "8 CPUs: powered off")

@@ -39,6 +39,7 @@ font_data:      incbin "gen/font.bin"
 
 section .text
 %include "lib.asm"
+%include "records.asm"
 %include "serial.asm"
 %include "cpu.asm"
 %include "gdt.asm"

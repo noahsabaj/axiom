@@ -1193,6 +1193,94 @@ text rows.
   (`mandel_set_view`) and only while it is shown; its title carries the
   live statistics.
 
+## The shell: `shell.asm`, `records.asm`
+
+Axiom's own command language: what a command gives is records, not text;
+a command names a thing, then what to do with it; a program gets only the
+capabilities it says it needs.
+
+- **A line** is commands joined by `;` (then), `&&` (then, if that worked)
+  and `||` (then, if it failed). A command is a pipeline: a head, stages
+  after `|`, and at the end at most one `> file` (written) or `>> file`
+  (added to). The line is split at `;`, `&&` and `||` first, outside quotes;
+  each command's words are made only as it runs, so `set n 5; files $n`
+  sees the 5.
+- **Words** are split at spaces. `"…"` keeps spaces and expands variables;
+  `'…'` keeps everything as it is. A `\` before a character the shell
+  would read (a space, a quote, `\`, `$`, `|`, `>`, `;`, `&`) takes it as
+  it is; before any other it stays, so `\n` reaches a program as typed.
+  `$name` and `${name}` are a variable's value (one word, never split
+  again); a word that was only an unset variable, unquoted, is dropped.
+  `set name value…` sets one, `set name` removes it, `set` lists them; the
+  variables are the machine's, shared by its shells. Wildcards (`*`, `?`)
+  are not expanded by the shell: the actions that take paths match them,
+  without regard to case, as FAT names are.
+- **Thing, then action.** A command's first word names a thing (`files`,
+  `cpus`, `tasks`, …) or a verb (`go`, `here`, `set`, `help`); case does
+  not matter. Alone, a thing shows itself. If the next word is one of its
+  actions, that action runs on the rest; otherwise the rest goes to its
+  default action (`files old/` lists `old/`). `help` lists every command,
+  `help <thing>` its actions, each with what it takes. A command that
+  fails (unknown, a bad argument, a stage that cannot apply, a file that is
+  not there) sets the status `&&` and `||` look at.
+- **Records** (`records.asm`): what a command gives is a table (`TB_*`): up
+  to 16 columns, each with a name and a type, and up to 8192 rows of
+  8-byte cells, their text in a heap after the rows. The types (`FT_*`):
+  text; a number, with decimals and a unit (`2400 MHz`); a size in bytes
+  (shown as `1.5 KiB`); a duration (`12 ms`); a time
+  (`2026-10-17 14:05`); hex; yes or no. A cell may hold no value (`--`).
+  The table is built in place by the head and changed in place by each
+  stage; the text it ends as is made only at the end.
+- **Stages:** `where <field> <op> <value>` keeps the rows that pass (`=`
+  `!=` `<` `>` `<=` `>=`, and `~` / `!~`: contains, or matches a pattern if
+  the value has `*` or `?`; the value is read as the field's type: `4K`,
+  `2M`, `10ms`, `2s`, `2026-10-17`, `yes`); `sort <field> [down]` (stable);
+  `pick <field>…` (those columns, in that order); `first <n>`, `last <n>`;
+  `count`; `to text` and `to json`, last, for what a file gets. Fields are
+  named as their columns are, one word each (`heap-size`, `other-time`), so
+  they never need quotes; a wrong one is named, with the ones there are.
+  In `where <field> > <value>` the `>` is the comparison, not a file: it
+  is one only there, as the third word of a `where`.
+- **At the end** the table is shown: the columns as wide as what they hold,
+  numbers to the right, the header in the accent colour, `(none)` when no
+  row passed. A thing with one record to say (`mem`) shows it as
+  `field  value` lines. A table of lines (`files show`, `here`) is shown as
+  the lines. `> file` writes it as text, or as JSON after `to json` (sizes
+  in bytes, durations in milliseconds, times as `2026-10-17T14:05`, no
+  value as `null`).
+- **Commands that print** (not yet records) still print; piped or sent to a
+  file, what they print on the main thread becomes a table of lines, one
+  column called `text` (`kprint` hands the lines to `rec_capture` while
+  `rec_capturing` is set, instead of to the terminal). A command that
+  answers later (`ping`, `http`, `ask`) cannot be piped: its answer goes to
+  the terminal. What follows it on the line runs once it is done
+  (`TW_SH_REST`, run from the main loop by `shell_service`).
+- **Files** are a thing: `files [folder | pattern]` (name, kind, size,
+  changed), `files show <file>` (its lines), `files copy <from>…  <to>`,
+  `files move <from>… <to>` (a copy, then the original removed; into a
+  folder if `<to>` is one), `files new <name>` (an empty file, or a folder
+  if the name ends in `/`), `files write <file> <text>…`, `files remove
+  <path or pattern>…`, `files find [pattern]` (everything below here, with
+  its path, folders breadth-first). `go [folder]` moves (to `/` alone);
+  `here` says where. The old short commands are gone.
+- **The first things:** `cpus` (cpu, kind, apic, core, thread, clock,
+  heat, jobs, mcycles), `mem` (one record: usable, free, kernel, code,
+  constants, data, tables, fw-tables, vm-maps, vm-size, shootdowns,
+  heap-objects, heap-size, slabs, large, large-size; `mem kinds` (kind,
+  size) by firmware type, `mem at <hex>` (address, what, mapped, physical,
+  access, runs, caching, page), `mem test`), `threads` (id, name, state,
+  cpu, class, pinned, p-time, e-time, other-time, switches, moves;
+  `threads cpus` (cpu, kind, waiting, busy, switches, stolen, handed),
+  `threads test`, `threads spin`), `tasks` (id, name, parent, threads,
+  handles, ops, denied, program; `tasks stop <id>`, which refuses the
+  kernel's own tasks).
+- **Programs (S2)** run by name, several at once with `&`, ctrl+C stopping
+  the one in front. A program gets only the capabilities it declares in
+  its AXE header (paint: a window; browse: a window and the network);
+  `+net`, `+store` and `+desk` before its name grant more, for that run.
+- **Completion (S3):** Tab completes a command, an action, a field after a
+  stage, or a path, and says what could come next.
+
 ## Telemetry: `cpu.asm`
 
 - **Clock:** the APERF/MPERF ratio over each 500 ms interval, times the TSC

@@ -145,6 +145,7 @@ main_loop:
     call pointer_service
     call user_service
     call iommu_service
+    call shell_service                  ; the rest of a line, after a command
 .input:
     call kbd_getc
     test eax, eax
@@ -190,6 +191,8 @@ main_loop:
     cmp byte [net_pending], 0
     jne .awake
     cmp byte [user_pending], 0
+    jne .awake
+    cmp byte [shell_pending], 0
     jne .awake
     cmp byte [term_dirty], 0            ; printed, from another CPU
     jne .awake

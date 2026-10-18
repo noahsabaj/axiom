@@ -74,10 +74,23 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   client handshake, and certificates: X.509, SHA-384/512, RSA (PKCS #1 v1.5
   and PSS) and ECDSA on P-256 and P-384. The crypto is checked against the published vectors at
   every boot; `crypto` repeats the check and times each.
-- A shell over a USB keyboard, a PS/2 keyboard or the serial port. Commands:
-  `help info cpus mem threads objects rings run user win shell pci acpi iommu usb disks nvme store vol ls cd cat cp
-  write mkdir rm date net ip ip6 dhcp ping host arp http httpd ask claude tcp crypto log demo bench
-  uptime echo clear panic reboot poweroff`.
+- **A shell of its own** over a USB keyboard, a PS/2 keyboard or the serial
+  port. A command is a thing, then an action: `files`, `files show
+  notes.txt`, `files copy a.txt b.txt`, `files move b.txt old/`, `files new
+  old/`, `files remove old`, `files find *.axe`, `go /`, `here`; `help files`
+  lists what a thing does. What a command gives is a table of records, not
+  text, and a `|` hands it to a stage that works on its fields: `where size
+  > 10K`, `sort size down`, `pick name size`, `first 3`, `last 3`, `count`,
+  `to text`, `to json`. `files /EFI/AXIOM | sort size down | first 3` and
+  `threads | where pinned = yes | count` mean what they say; text comes only
+  at the end, on the screen or into a file (`> list.txt`, `>> list.txt`).
+  Quotes, `*` and `?`, `$name` (from `set name value`), `;`, `&&` and `||`
+  work as written. `cpus`, `mem`, `threads` and `tasks` (`tasks stop <id>`)
+  are records too; the rest (`info objects rings run user win shell pci
+  acpi iommu usb disks nvme store vol date net ip ip6 dhcp ping host arp
+  http httpd ask claude tcp crypto log demo bench uptime echo clear panic
+  reboot poweroff`) print as before, and a `|` takes what they print as
+  lines.
 - **A log on the boot stick**: everything Axiom prints, the commands typed
   and any panic report go into `AXIOM.LOG` on the USB stick it booted from,
   readable from Windows afterwards.
@@ -96,7 +109,8 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   placement by class (perf threads on P-cores, eff threads on E-cores),
   with idle CPUs stealing work and threads moving to the right kind of core
   when one frees up. The main loop is the first thread, and a key still
-  answers at once with every CPU busy. `threads` shows each CPU and thread;
+  answers at once with every CPU busy. `threads` shows each thread and
+  `threads cpus` each CPU;
   `threads test` checks it all; `threads spin 16 perf` puts load on.
 - **Kernel objects and capabilities**: tasks, threads, events and blocks of
   memory are typed objects, and a task reaches them only through handles in
@@ -282,7 +296,7 @@ Tested target: HP Victus 15L (i7-14700F, 64 GB, RTX 4060 Ti), AMI UEFI.
    stick (the "UEFI" entry).
 5. The desktop should appear within a second. Type `help` on the keyboard.
 
-Axiom reads the boot stick and the NVMe drive (`disks`, `ls`, `cat`) and
+Axiom reads the boot stick and the NVMe drive (`disks`, `files`, `files show`) and
 starts on the stick's volume, but writes nothing until you unlock a volume
 with `vol <n> rw`, with one exception: its log, `AXIOM.LOG` in the root of
 the stick it booted from, saved every 10 seconds while it grows, before
@@ -299,7 +313,7 @@ Things worth knowing:
 
 - **The demo loads every core with AVX2.** Expect fans and package power to
   climb to the CPU's limits, as under any all-core benchmark. `demo` toggles it.
-- `threads` shows each CPU's kind and load and every thread.
+- `threads cpus` shows each CPU's kind and load, `threads` every thread.
   `threads spin 16 perf` runs 16 perf threads for 5 seconds, which should
   land on the 16 P-core threads; each reports, when it ends, how much of its
   time it had on P-cores. `threads spin 12 eff` does the same for E-cores.

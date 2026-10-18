@@ -32,9 +32,12 @@ TW_NEXT         equ 88                  ; every terminal
 TW_TOP          equ 96                  ; the first line of the view at the bottom (clear)
 TW_SH_LEN       equ 104                 ; dword: the line being typed: its length
 TW_SH_WAIT      equ 108                 ; byte: a command runs on; the prompt waits
+                                        ; (2: it is done, the rest of its line is next)
+TW_SH_RLINK     equ 109                 ; byte: how the rest is joined to it (SL_*)
 TW_SH_LINE      equ 112                 ; LINE_MAX + 8
 TW_SH_HIST      equ TW_SH_LINE + LINE_MAX + 8
-TW_SIZE         equ TW_SH_HIST + LINE_MAX + 8
+TW_SH_REST      equ TW_SH_HIST + LINE_MAX + 8   ; what is left of the line, for then
+TW_SIZE         equ TW_SH_REST + LINE_MAX + 8
 
 TH_CON          equ 304                 ; a thread's terminal to print to (0: the first)
 
