@@ -191,6 +191,10 @@ main_loop:
     jne .awake
     cmp byte [user_pending], 0
     jne .awake
+    cmp byte [lx_pending], 0            ; a Linux process ended
+    jne .awake
+    cmp qword [lx_load_list], 0         ; a file a Linux program waits for
+    jne .awake
     cmp byte [term_dirty], 0            ; printed, from another CPU
     jne .awake
     call desk_pending                   ; drawn, by a program

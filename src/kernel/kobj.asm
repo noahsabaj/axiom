@@ -81,10 +81,15 @@ task_destroy:
     push r12
     mov r12, rdi
     call cap_drop_all
-    mov rdi, [r12 + TK_AS]              ; its pages and page tables (user.asm)
+    mov rdi, [r12 + TK_LX]              ; a Linux process's state (linux.asm)
     test rdi, rdi
+    jz .no_lx
+    call lx_proc_free
+.no_lx:
+    mov rdi, [r12 + TK_AS]              ; its pages and page tables (user.asm),
+    test rdi, rdi                       ; unless another task shares them
     jz .no_as
-    call as_destroy
+    call as_release
 .no_as:
     mov rdi, [r12 + TK_SLOTS]
     call kfree

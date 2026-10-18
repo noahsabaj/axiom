@@ -539,6 +539,7 @@ commands:
     COMMAND 'objects',  cmd_objects,  'objects [test | audit | <task id>]: objects and tasks, the handles a task holds, the audit ring, or a self-test of capabilities'
     COMMAND 'rings',    cmd_rings,    'rings [test]: each ring, its entries and completions, and the thread that finishes requests; or a self-test'
     COMMAND 'run',      cmd_run,      'run <program> [arguments]: /EFI/AXIOM/<PROGRAM>.AXE in ring 3; ctrl+C stops it'
+    COMMAND 'linux',    cmd_linux,    'linux <program> [arguments]: a Linux program from the root in /LINUX on the boot stick; ctrl+C stops it'
     COMMAND 'user',     cmd_user,     'user [test]: programs run, their pages; or a self-test of ring 3'
     COMMAND 'pci',      cmd_pci,      'PCI Express functions'
     COMMAND 'acpi',     cmd_acpi,     'firmware ACPI tables'

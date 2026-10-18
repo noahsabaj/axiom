@@ -108,6 +108,9 @@ section .text
 %include "term.asm"
 %include "window.asm"
 %include "power.asm"
+%include "lxmm.asm"
+%include "lxfs.asm"
+%include "linux.asm"
 %include "boot.asm"
 
 section .data

@@ -70,7 +70,16 @@ AS_NMAPS        equ 20                  ; dword
 AS_NEXT         equ 24                  ; where the next mapping goes
 AS_MAPS         equ 32                  ; AS_MAX of AM_SIZE
 AS_MAX          equ 32
-AS_SIZE         equ AS_MAPS + AS_MAX * AM_SIZE
+AS_LX           equ AS_MAPS + AS_MAX * AM_SIZE ; a Linux program's memory (lxmm.asm):
+AS_VMAS         equ AS_LX + 0           ; its areas (VA_SIZE each, by address), or 0
+AS_NVMA         equ AS_LX + 8           ; dword: how many
+AS_VCAP         equ AS_LX + 12          ; dword: room for
+AS_MMLOCK       equ AS_LX + 16          ; dword: the areas and the pages under them
+AS_REFS         equ AS_LX + 20          ; dword: tasks sharing it, less one (vfork)
+AS_BRK0         equ AS_LX + 24          ; where its break started
+AS_BRK          equ AS_LX + 32          ; and where it is
+AS_VBYTES       equ AS_LX + 40          ; bytes of AS_VMAS mapped
+AS_SIZE         equ AS_LX + 64
 AM_OBJ          equ 0                   ; a mapping: the memory (a reference)
 AM_VA           equ 8                   ; where
 AM_LEN          equ 16                  ; bytes
@@ -152,6 +161,8 @@ user_setup_local:
     mov ecx, MSR_KGS_BASE               ; ring 3's GS base
     xor eax, eax
     wrmsr
+    mov ecx, MSR_FS_BASE                ; and FS's (PC_FSBASE says 0)
+    wrmsr
     pop rdx
     pop rcx
     pop rax
@@ -191,6 +202,9 @@ syscall_entry:
     mov rbp, rsp
     sti
     mov rcx, r10                        ; the fourth argument where the kernel has it
+    mov r11, [gs:PC_CURRENT]
+    test qword [r11 + TH_FLAGS], TF_LINUX
+    jnz lx_syscall                      ; a Linux program's (linux.asm)
     cmp rax, SYS_COUNT
     jae .unknown
     lea r11, [sys_table]
@@ -249,6 +263,9 @@ user_leave:
     jnz .killed
     ret
 .killed:
+    mov rax, [gs:PC_CURRENT]
+    test qword [rax + TH_FLAGS], TF_LINUX
+    jnz lx_killed                       ; its process is told (linux.asm)
     mov rdi, E_KILLED
     jmp thread_exit
 
@@ -296,10 +313,16 @@ user_begin:
     iretq
 
 ; user_fault(RDI = frame): an exception in ring 3, interrupts off. Says what
-; and where, kills the task, and ends this thread.
+; and where, kills the task, and ends this thread. A Linux program's goes to
+; lx_fault, which returns if it was a page to fill in.
 user_fault:
-    mov rbx, rdi
     mov r12, cr2
+    mov rax, [gs:PC_CURRENT]
+    test qword [rax + TH_FLAGS], TF_LINUX
+    jnz lx_fault
+; user_fault_said(RDI = frame, R12 = CR2 as it was)
+user_fault_said:
+    mov rbx, rdi
     sti
     mov r13, [gs:PC_CURRENT]
     mov r13, [r13 + TH_TASK]
@@ -339,6 +362,9 @@ user_fault:
     lock inc qword [user_faults]
     mov rdi, r13
     call task_kill
+    mov rax, [gs:PC_CURRENT]
+    test qword [rax + TH_FLAGS], TF_LINUX
+    jnz lx_thread_exit
     mov rdi, E_FAULT
     jmp thread_exit
 
@@ -970,6 +996,15 @@ as_new:
     pop rbx
     ret
 
+; as_release(RDI): a task is done with it: destroyed, if no other task
+; shares it (AS_REFS, a vfork)
+as_release:
+    lock dec dword [rdi + AS_REFS]
+    jns .shared
+    jmp as_destroy
+.shared:
+    ret
+
 ; as_destroy(RDI): no thread runs on it any more. Its mappings' references,
 ; its own pages, its page tables, and it.
 as_destroy:
@@ -1004,6 +1039,11 @@ as_destroy:
     mov esi, 1
     call pmm_free
     lock dec qword [user_tables]
+    mov rdi, [rbx + AS_VMAS]            ; a Linux program's areas
+    test rdi, rdi
+    jz .no_areas
+    call vm_free
+.no_areas:
     mov rdi, rbx
     call kfree
     pop r12
@@ -2023,6 +2063,7 @@ user_waiter:
 
 ; user_service: from the main loop. A program that ended is said, and goes.
 user_service:
+    call lx_service                     ; and Linux's (linux.asm)
     call spawn_service
     cmp byte [user_pending], 0
     je .out
@@ -2044,6 +2085,7 @@ user_service:
 ; user_forget(RDI = a terminal): the program run there is killed (ctrl+C
 ; there, or it closed)
 user_forget:
+    call lx_forget                      ; a Linux program too
     cmp rdi, [user_con]
     je user_cancel
     ret

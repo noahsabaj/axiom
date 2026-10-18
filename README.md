@@ -125,6 +125,16 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   killing one (ctrl+C, or a program killing its child) ends every program
   it started too. `hello`, `test`, `child`, `fault`, `spin`, `stash`, `paint` and `browse` come with it
   (`src/user/`); `user test` runs them all, with a fault of every kind.
+- **Linux programs, unchanged**: `linux <program> [arguments]` runs an
+  x86-64 Linux program from a root on the boot stick (`tools/mkroot.py`
+  copies programs and the libraries they need from WSL; `tools/mkstick.py
+  --linux build/linux` puts it at `/LINUX`): its ELF file and ld.so mapped
+  as Linux would, glibc's system calls answered by Axiom's own (memory
+  filled in on demand and shared with the file cache, a read-only view of
+  the root, the clocks, `uname`, the ids), and what it prints shown in the
+  shell. Ubuntu's `ls -la`, `cat`, `date`, `id`, `uname -a`, `sha256sum`
+  and others run; ctrl+C stops one. Threads, a real terminal, processes,
+  the network and Claude Code itself come next (see `docs/VISION.md`).
 - ACPI (MADT, MCFG, FADT, the DSDT's `_S5_`), SMBIOS, PCI Express enumeration,
   x2APIC (falling back to xAPIC), I/O APIC, TSC-deadline timer, and a panic
   screen that stops every other CPU.
@@ -333,7 +343,9 @@ src/include/            structures shared by the two
 tools/build.py          assemble everything
 tools/run.py            boot in QEMU; type keys, move the pointer, take screenshots
 tools/mkdisk.py         a GPT + FAT32 test disk (as an NVMe drive or a USB stick)
-tools/mkstick.py        a bootable stick image with build/esp on it
+tools/mkstick.py        a bootable stick image with build/esp on it (and,
+                        with --linux, a Linux root at /LINUX)
+tools/mkroot.py         a Linux root, build/linux, from WSL's programs
 tools/netpeer.py        an unreliable network peer, to test TCP against
 tools/httpsd.py         a local HTTPS server (TLS 1.3), to test https against
 tools/claudemock.py     a stand-in for the Claude Messages API, to test ask against
@@ -363,7 +375,9 @@ tools/test/             host-side tests for self-contained modules (tls: the
                         client against servers on the host, and httpd
                         against clients there; ip6: IPv6 on QEMU's
                         network, and between two guests on a hub that is
-                        their router); all.py runs them
+                        their router; linux: Linux programs from
+                        Ubuntu, from a stick with a root on it); all.py
+                        runs them
                         all at once, and qemu.py boots side by side
 tools/mkfont.py         rasterize the console font into src/kernel/gen/
 docs/                   vision and architecture

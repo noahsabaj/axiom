@@ -1173,6 +1173,68 @@ text rows.
   for the host, so a page can be laid out and drawn there; the QEMU suite,
   `tools/test/browse/run.py`, compares browse's window with that.
 
+## Linux programs: `linux.asm`, `lxmm.asm`, `lxfs.asm`
+
+- `linux <program> [arguments]` runs an unchanged Linux x86-64 program
+  from a root on the boot stick: `tools/mkroot.py` copies programs and
+  every library they need (DT_NEEDED, followed, with the links on the way)
+  from a WSL distribution into `build/linux/ROOT`, gives it an `/etc` of
+  Axiom's own, and writes `META`, a line per path with what FAT cannot
+  keep (kind, mode, size, a link's target); `mkstick.py --linux` puts both
+  at `/LINUX` with 4 KiB clusters. A name without a slash is looked for on
+  the Linux PATH. One runs at a time; ctrl+C in its shell stops it, and
+  the shell says how it ended (`exited with N`, `ended by signal N`,
+  `stopped`).
+- **A process** is a task (its own address space, as `run`'s) with a
+  Linux process's state in `TK_LX` (`LP_*`): its pid, descriptors,
+  directory, program and terminal. Its threads are user threads marked
+  `TF_LINUX`: `syscall_entry` hands their calls to `lx_syscall`, which
+  indexes `lx_table` by Linux's numbers and goes back by IRETQ with every
+  register but RAX as it was. A call not there yet is said once
+  (`system call N is not there yet`) and gets `-ENOSYS`. Each thread has
+  its own FS base (`arch_prctl`, `TH_FSBASE`), loaded by `sched_switch`.
+  It ends with its last thread: `exit_group`, a fault (said as `run`'s
+  are, and ending it as the signal would), or a kill.
+- **Loading** (`lx_elf_map`, `lx_exec_image`): the program's PT_LOAD
+  segments are mapped from its file in the cache, ET_EXEC where it was
+  linked and ET_DYN at 0x555555554000; its PT_INTERP (ld.so) highest below
+  0x7FFFF7FFF000. The first thread starts at the interpreter's entry on a
+  stack laid out as Linux's: argc, argv, envp, then the auxiliary vector
+  (AT_PHDR, AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_BASE, AT_ENTRY, the ids,
+  AT_HWCAP, AT_CLKTCK, AT_RANDOM, AT_PLATFORM, AT_EXECFN), with the
+  strings and 16 random bytes above it. The break starts after the
+  program's last segment.
+- **Memory** (`lxmm.asm`): each address space keeps a sorted array of
+  areas (start, end, protection, flags, the file and its offset), changed
+  under the space's lock by mmap, munmap, mprotect, mremap, madvise and
+  brk; mmap places areas down from below the stack and honours MAP_FIXED,
+  MAP_FIXED_NOREPLACE and MAP_32BIT. Nothing is mapped until it is
+  touched: a fault in an area fills that page in (zeroes, or the file's
+  own page from the cache, read-only, so programs share it), a write to a
+  file's page takes a private copy, and PROT_NONE keeps a page present but
+  out of ring 3's reach. The kernel reaches a program's memory by walking
+  its tables (SMAP stays on), filling pages in as a fault would.
+- **Files** (`lxfs.asm`): a read-only tree in RAM built from META, plus
+  `/dev/null`, `/dev/zero`, `/dev/random`, `/dev/urandom`, `/dev/tty`
+  (and `/dev/stdin`, `stdout`, `stderr` to it) and `/proc/self/exe`. A
+  file's bytes are read from the stick whole, once, by the main thread
+  (a program's thread queues it and waits); `open`, `openat`, `read`,
+  `pread64`, `readv`, `writev`, `lseek`, `close`, `dup`s, `fcntl`, the
+  `stat` family with `statx`, `getdents64`, `readlink`, `access`,
+  `getcwd`, `chdir` work on it, and writing is refused (`EROFS`). What a
+  program writes to its terminal is shown line by line in the shell it was
+  run in.
+- The rest of L1: `uname` (`Linux axiom 6.8.0-axiom`), the ids (root's),
+  `clock_gettime` and the other clocks (the CMOS clock at boot taken as
+  UTC, then the TSC), `nanosleep` and `clock_nanosleep` (cut short by a
+  kill), `getrandom`, `sysinfo`, `prlimit64`, `sched_getaffinity`,
+  `prctl`'s name, and signals' masks kept but none delivered yet.
+- `tools/test/linux/run.py` builds the root and a stick and runs, in QEMU,
+  `/test/hello` (`tools/test/linux/hello.asm`, a static program of our
+  own), then Ubuntu's `true`, `false`, `echo`, `cat`, `ls -la`, `uname
+  -a`, `id`, `date`, `sha256sum`, `env`, `wc` and `sleep`, checking what
+  each prints against the host, and ctrl+C on `sleep 60`.
+
 ## Terminals: `term.asm`
 
 - Each shell is a window with a terminal (`TW_*`): 1000 lines of 256 cells
