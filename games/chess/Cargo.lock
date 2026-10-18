@@ -802,6 +802,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
+name = "ctor"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83cf0d42651b16c6dfe68685716d18480d18a9c39c62d76e8cf3eb6ed5d8bcbf"
+dependencies = [
+ "dtor",
+]
+
+[[package]]
 name = "ctrlc"
 version = "3.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -911,6 +920,12 @@ name = "dpi"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
+
+[[package]]
+name = "dtor"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "edf234dd1594d6dd434a8fb8cada51ddbbc593e40e4a01556a0b31c62da2775b"
 
 [[package]]
 name = "either"
@@ -1421,7 +1436,7 @@ dependencies = [
 [[package]]
 name = "hearth"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "hearth_internal",
 ]
@@ -1429,7 +1444,7 @@ dependencies = [
 [[package]]
 name = "hearth_a11y"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "accesskit",
  "hearth_app",
@@ -1442,7 +1457,7 @@ dependencies = [
 [[package]]
 name = "hearth_android"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "android-activity",
 ]
@@ -1450,7 +1465,7 @@ dependencies = [
 [[package]]
 name = "hearth_animation"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "bitvec",
  "blake3",
@@ -1483,7 +1498,7 @@ dependencies = [
 [[package]]
 name = "hearth_animation_macros"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "hearth_macro_utils",
  "quote",
@@ -1493,7 +1508,7 @@ dependencies = [
 [[package]]
 name = "hearth_annotations"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "hearth_reflect",
 ]
@@ -1501,7 +1516,7 @@ dependencies = [
 [[package]]
 name = "hearth_anti_alias"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "hearth_app",
  "hearth_asset",
@@ -1523,7 +1538,7 @@ dependencies = [
 [[package]]
 name = "hearth_app"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "console_error_panic_hook",
  "ctrlc",
@@ -1544,7 +1559,7 @@ dependencies = [
 [[package]]
 name = "hearth_asset"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "async-broadcast",
  "async-channel",
@@ -1586,7 +1601,7 @@ dependencies = [
 [[package]]
 name = "hearth_asset_macros"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "hearth_macro_utils",
  "proc-macro2",
@@ -1597,7 +1612,7 @@ dependencies = [
 [[package]]
 name = "hearth_camera"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "derive_more",
  "downcast-rs 2.0.2",
@@ -1623,7 +1638,7 @@ dependencies = [
 [[package]]
 name = "hearth_clipboard"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "arboard",
  "hearth_app",
@@ -1638,7 +1653,7 @@ dependencies = [
 [[package]]
 name = "hearth_color"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "bytemuck",
  "derive_more",
@@ -1654,7 +1669,7 @@ dependencies = [
 [[package]]
 name = "hearth_core_pipeline"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "bitflags 2.13.2",
  "hearth_app",
@@ -1683,7 +1698,7 @@ dependencies = [
 [[package]]
 name = "hearth_curve"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "approx",
  "hearth_math",
@@ -1697,7 +1712,7 @@ dependencies = [
 [[package]]
 name = "hearth_derive"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "hearth_macro_utils",
  "quote",
@@ -1707,14 +1722,13 @@ dependencies = [
 [[package]]
 name = "hearth_dev_tools"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "hearth_animation",
  "hearth_app",
  "hearth_asset",
  "hearth_camera",
  "hearth_color",
- "hearth_core_pipeline",
  "hearth_diagnostic",
  "hearth_ecs",
  "hearth_extract",
@@ -1724,7 +1738,6 @@ dependencies = [
  "hearth_log",
  "hearth_math",
  "hearth_mesh",
- "hearth_pbr",
  "hearth_picking",
  "hearth_platform",
  "hearth_reflect",
@@ -1736,7 +1749,6 @@ dependencies = [
  "hearth_time",
  "hearth_transform",
  "hearth_ui",
- "hearth_ui_render",
  "hearth_ui_widgets",
  "hearth_utils",
  "hearth_window",
@@ -1752,7 +1764,7 @@ dependencies = [
 [[package]]
 name = "hearth_diagnostic"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "atomic-waker",
  "const-fnv1a-hash",
@@ -1769,7 +1781,7 @@ dependencies = [
 [[package]]
 name = "hearth_ecs"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "arrayvec",
  "bitflags 2.13.2",
@@ -1796,7 +1808,7 @@ dependencies = [
 [[package]]
 name = "hearth_ecs_macro_logic"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "hearth_macro_utils",
  "proc-macro2",
@@ -1807,7 +1819,7 @@ dependencies = [
 [[package]]
 name = "hearth_ecs_macros"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "hearth_ecs_macro_logic",
  "hearth_macro_utils",
@@ -1819,7 +1831,7 @@ dependencies = [
 [[package]]
 name = "hearth_encase_derive"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "encase_derive_impl",
  "hearth_macro_utils",
@@ -1828,7 +1840,7 @@ dependencies = [
 [[package]]
 name = "hearth_extract"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "hearth_app",
  "hearth_camera",
@@ -1845,7 +1857,7 @@ dependencies = [
 [[package]]
 name = "hearth_extract_macros"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "hearth_macro_utils",
  "proc-macro2",
@@ -1856,7 +1868,7 @@ dependencies = [
 [[package]]
 name = "hearth_feathers"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "accesskit",
  "hearth_a11y",
@@ -1887,7 +1899,7 @@ dependencies = [
 [[package]]
 name = "hearth_gilrs"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "gilrs",
  "hearth_app",
@@ -1902,7 +1914,7 @@ dependencies = [
 [[package]]
 name = "hearth_gizmos"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "hearth_app",
  "hearth_asset",
@@ -1926,7 +1938,7 @@ dependencies = [
 [[package]]
 name = "hearth_gizmos_macros"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "hearth_macro_utils",
  "quote",
@@ -1936,7 +1948,7 @@ dependencies = [
 [[package]]
 name = "hearth_gizmos_render"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "bytemuck",
  "hearth_app",
@@ -1956,7 +1968,6 @@ dependencies = [
  "hearth_render",
  "hearth_shader",
  "hearth_shape",
- "hearth_sprite_render",
  "hearth_transform",
  "hearth_utils",
  "tracing",
@@ -1965,7 +1976,7 @@ dependencies = [
 [[package]]
 name = "hearth_image"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "bitflags 2.13.2",
  "bytemuck",
@@ -1991,7 +2002,7 @@ dependencies = [
 [[package]]
 name = "hearth_input"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "derive_more",
  "hearth_app",
@@ -2008,7 +2019,7 @@ dependencies = [
 [[package]]
 name = "hearth_input_focus"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "hearth_app",
  "hearth_camera",
@@ -2025,7 +2036,7 @@ dependencies = [
 [[package]]
 name = "hearth_internal"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "hearth_a11y",
  "hearth_android",
@@ -2043,7 +2054,6 @@ dependencies = [
  "hearth_dev_tools",
  "hearth_diagnostic",
  "hearth_ecs",
- "hearth_extract",
  "hearth_feathers",
  "hearth_gilrs",
  "hearth_gizmos",
@@ -2067,6 +2077,7 @@ dependencies = [
  "hearth_scene",
  "hearth_shader",
  "hearth_shape",
+ "hearth_soft_render",
  "hearth_sprite",
  "hearth_sprite_render",
  "hearth_state",
@@ -2085,7 +2096,7 @@ dependencies = [
 [[package]]
 name = "hearth_light"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "half",
  "hearth_app",
@@ -2112,7 +2123,7 @@ dependencies = [
 [[package]]
 name = "hearth_log"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "android_log-sys",
  "hearth_app",
@@ -2129,7 +2140,7 @@ dependencies = [
 [[package]]
 name = "hearth_macro_utils"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2140,7 +2151,7 @@ dependencies = [
 [[package]]
 name = "hearth_material"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "encase",
  "hearth_asset",
@@ -2162,7 +2173,7 @@ dependencies = [
 [[package]]
 name = "hearth_material_macros"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "hearth_macro_utils",
  "quote",
@@ -2172,7 +2183,7 @@ dependencies = [
 [[package]]
 name = "hearth_math"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "approx",
  "derive_more",
@@ -2188,7 +2199,7 @@ dependencies = [
 [[package]]
 name = "hearth_mesh"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "bitflags 2.13.2",
  "bytemuck",
@@ -2216,12 +2227,12 @@ dependencies = [
 [[package]]
 name = "hearth_mikktspace"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 
 [[package]]
 name = "hearth_pbr"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "arrayvec",
  "bitflags 2.13.2",
@@ -2264,7 +2275,7 @@ dependencies = [
 [[package]]
 name = "hearth_picking"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "crossbeam-channel",
  "hearth_app",
@@ -2288,7 +2299,7 @@ dependencies = [
 [[package]]
 name = "hearth_platform"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "async-io",
  "bytemuck",
@@ -2311,7 +2322,7 @@ dependencies = [
 [[package]]
 name = "hearth_post_process"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "hearth_app",
  "hearth_asset",
@@ -2337,12 +2348,12 @@ dependencies = [
 [[package]]
 name = "hearth_ptr"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 
 [[package]]
 name = "hearth_reflect"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "assert_type_match",
  "derive_more",
@@ -2370,7 +2381,7 @@ dependencies = [
 [[package]]
 name = "hearth_reflect_derive"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "hearth_macro_utils",
  "indexmap",
@@ -2383,7 +2394,7 @@ dependencies = [
 [[package]]
 name = "hearth_remote"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -2399,7 +2410,7 @@ dependencies = [
  "hearth_log",
  "hearth_platform",
  "hearth_reflect",
- "hearth_render",
+ "hearth_soft_render",
  "hearth_tasks",
  "hearth_utils",
  "hearth_window",
@@ -2413,7 +2424,7 @@ dependencies = [
 [[package]]
 name = "hearth_render"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "async-channel",
  "bitflags 2.13.2",
@@ -2470,7 +2481,7 @@ dependencies = [
 [[package]]
 name = "hearth_render_macros"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "hearth_extract_macros",
  "hearth_macro_utils",
@@ -2482,7 +2493,7 @@ dependencies = [
 [[package]]
 name = "hearth_scene"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "hearth_app",
  "hearth_asset",
@@ -2501,7 +2512,7 @@ dependencies = [
 [[package]]
 name = "hearth_scene_macros"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "hearth_ecs_macro_logic",
  "hearth_macro_utils",
@@ -2513,7 +2524,7 @@ dependencies = [
 [[package]]
 name = "hearth_shader"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "hearth_asset",
  "hearth_platform",
@@ -2529,7 +2540,7 @@ dependencies = [
 [[package]]
 name = "hearth_shape"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "arrayvec",
  "derive_more",
@@ -2542,9 +2553,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "hearth_soft_render"
+version = "0.20.0-dev"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
+dependencies = [
+ "bytemuck",
+ "hearth_app",
+ "hearth_asset",
+ "hearth_camera",
+ "hearth_color",
+ "hearth_ecs",
+ "hearth_image",
+ "hearth_math",
+ "hearth_platform",
+ "hearth_sprite",
+ "hearth_tasks",
+ "hearth_text",
+ "hearth_transform",
+ "hearth_window",
+ "softbuffer",
+ "tracing",
+]
+
+[[package]]
 name = "hearth_sprite"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "hearth_app",
  "hearth_asset",
@@ -2569,7 +2603,7 @@ dependencies = [
 [[package]]
 name = "hearth_sprite_render"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "bitflags 2.13.2",
  "bytemuck",
@@ -2605,7 +2639,7 @@ dependencies = [
 [[package]]
 name = "hearth_state"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "hearth_app",
  "hearth_ecs",
@@ -2620,7 +2654,7 @@ dependencies = [
 [[package]]
 name = "hearth_state_macros"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "hearth_macro_utils",
  "quote",
@@ -2630,7 +2664,7 @@ dependencies = [
 [[package]]
 name = "hearth_tasks"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "async-channel",
  "async-executor",
@@ -2648,7 +2682,7 @@ dependencies = [
 [[package]]
 name = "hearth_text"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "hearth_app",
  "hearth_asset",
@@ -2675,7 +2709,7 @@ dependencies = [
 [[package]]
 name = "hearth_time"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "crossbeam-channel",
  "hearth_app",
@@ -2689,7 +2723,7 @@ dependencies = [
 [[package]]
 name = "hearth_transform"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "derive_more",
  "hearth_app",
@@ -2705,7 +2739,7 @@ dependencies = [
 [[package]]
 name = "hearth_ui"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "accesskit",
  "derive_more",
@@ -2743,7 +2777,7 @@ dependencies = [
 [[package]]
 name = "hearth_ui_render"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "bytemuck",
  "derive_more",
@@ -2778,7 +2812,7 @@ dependencies = [
 [[package]]
 name = "hearth_ui_widgets"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "accesskit",
  "hearth_a11y",
@@ -2806,7 +2840,7 @@ dependencies = [
 [[package]]
 name = "hearth_utils"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "async-channel",
  "disqualified",
@@ -2819,7 +2853,7 @@ dependencies = [
 [[package]]
 name = "hearth_window"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "hearth_app",
  "hearth_asset",
@@ -2838,7 +2872,7 @@ dependencies = [
 [[package]]
 name = "hearth_winit"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "accesskit",
  "accesskit_winit",
@@ -2870,7 +2904,7 @@ dependencies = [
 [[package]]
 name = "hearth_world_serialization"
 version = "0.20.0-dev"
-source = "git+https://github.com/noahsabaj/hearth?branch=main#812dc3ca081855978d1a012799d467882a848cb7"
+source = "git+https://github.com/noahsabaj/hearth?branch=main#cd4c3271eaec4d9547e20cc1fff404319da580c5"
 dependencies = [
  "derive_more",
  "hearth_app",
@@ -4714,6 +4748,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "softbuffer"
+version = "0.4.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aac18da81ebbf05109ab275b157c22a653bb3c12cf884450179942f81bcbf6c3"
+dependencies = [
+ "as-raw-xcb-connection",
+ "bytemuck",
+ "fastrand",
+ "js-sys",
+ "memmap2",
+ "ndk",
+ "objc2 0.6.5",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-foundation 0.3.2",
+ "objc2-quartz-core 0.3.2",
+ "raw-window-handle",
+ "redox_syscall 0.5.18",
+ "rustix 1.1.5",
+ "tiny-xlib",
+ "tracing",
+ "wasm-bindgen",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-sys",
+ "web-sys",
+ "windows-sys 0.61.2",
+ "x11rb",
+]
+
+[[package]]
 name = "spin"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4912,6 +4977,19 @@ dependencies = [
  "arrayref",
  "bytemuck",
  "strict-num",
+]
+
+[[package]]
+name = "tiny-xlib"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a90a0ca3ee6a69f2ad28fd11621a4c3f03b371f366be500b64df260c4ffbafb4"
+dependencies = [
+ "as-raw-xcb-connection",
+ "ctor",
+ "libloading",
+ "pkg-config",
+ "tracing",
 ]
 
 [[package]]

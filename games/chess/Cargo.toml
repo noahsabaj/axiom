@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-hearth = { git = "https://github.com/noahsabaj/hearth", branch = "main", default-features = false, features = ["2d"] }
+hearth = { git = "https://github.com/noahsabaj/hearth", branch = "main", default-features = false, features = ["2d_soft"] }
 ab_glyph = "0.2"
 
 [features]

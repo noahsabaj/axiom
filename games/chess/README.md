@@ -31,6 +31,7 @@ Chess for AxiomOS, made with Hearth.
 - `src/canvas.rs`, `src/pieces.rs`, `src/ui.rs`: the game draws its whole frame on the CPU
   (signed-distance anti-aliasing for shapes, `ab_glyph` for text) into one image that the engine
   shows as a sprite. Axiom has no GPU, so this needs no more of a renderer than a textured quad.
+  It builds with Hearth's CPU renderer (`2d_soft`), with no wgpu, on the desktop as on Axiom.
   The pieces are drawn here as layered vector shapes.
 - The font is Mona Sans (SIL Open Font License, `assets/fonts/MonaSans-OFL.txt`), embedded.
 
