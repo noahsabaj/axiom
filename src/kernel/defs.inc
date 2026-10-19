@@ -127,6 +127,7 @@ RT_DESK_WINDOW  equ 1 << 8              ; the desktop: open windows on it
 RT_WIN_DRAW     equ 1 << 8              ; a window: show what was drawn, title it
 RT_FS_READ      equ 1 << 8              ; files: list folders, read files
 RT_FS_WRITE     equ 1 << 9              ; write, make, rename, remove
+RT_FS_KERNEL    equ 1 << 10             ; every volume: a new kernel (RO_FS_UPDATE)
 RT_SOUND_PLAY   equ 1 << 8              ; the speakers: open streams on them
 RT_STREAM_PLAY  equ 1 << 8              ; a stream: play it, wait on it
 RT_ALL          equ 0xFFFF
@@ -493,7 +494,23 @@ RO_WIN_POINTER  equ 43                  ; handle = a window, a0 = PTRM_*: the
 RO_NET_ADDR     equ 44                  ; handle = a socket, into handle2 + a0:
                                         ; NA_SIZE bytes, its addresses -> 0;
                                         ; E_EMPTY while its host is looked up
-RO_COUNT        equ 45
+RO_FS_UPDATE    equ 45                  ; handle = files, to every volume, with
+                                        ; RT_FS_KERNEL; a1 = UPD_*: a new kernel,
+                                        ; as the shell's 'update' (update.asm)
+RO_COUNT        equ 46
+
+; a new kernel (RO_FS_UPDATE's a1)
+UPD_STATE       equ 0                   ; -> UPS_*
+UPD_TRY         equ 1                   ; handle2 + a0: a kernel.bin's path, a2 =
+                                        ; seconds to keep it in (0: 600) -> 0: in
+                                        ; the slot not kept, tried at the next start
+UPD_KEEP        equ 2                   ; on trial -> 0: kept, for every start
+UPD_RESTART     equ 3                   ; a2 = seconds, 1 to 60 -> 0: with a trial
+                                        ; to come, the machine restarts into it
+UPS_SLOT        equ 0xFF                ; the kernel running: 'A', 'B'; 0 built in
+UPS_TRIAL       equ 1 << 8              ; it is on trial, not kept yet
+UPS_KEPT_SHIFT  equ 16                  ; << the one kept: 'A', 'B'; 0 none
+UPS_NEXT_SHIFT  equ 24                  ; << the one the next start tries, or 0
 
 ; files (fscap.asm)
 FS_PATH         equ 256                 ; a path's field
@@ -692,7 +709,8 @@ AW_DESK         equ 4                   ; the desktop, to open windows on (SB_DE
                                         ; (8: the settings, on their branch)
 AW_FILES        equ 16                  ; the files on every volume (SB_FILES)
 AW_SOUND        equ 32                  ; the speakers (SB_SOUND)
-AW_ALL          equ 7 | AW_FILES | AW_SOUND
+AW_UPDATE       equ 64                  ; with AW_FILES: a new kernel (RT_FS_KERNEL)
+AW_ALL          equ 7 | AW_FILES | AW_SOUND | AW_UPDATE
 
 ; the start block, at USER_START; the first thread starts with RDI = it
 SB_RING         equ 0                   ; dword: a handle to the task's ring

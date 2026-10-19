@@ -2053,6 +2053,11 @@ user_load:
 .no_desk:
     test qword [rsp + 8 + 48], AW_FILES
     jz .no_files
+    xor esi, esi
+    test qword [rsp + 8 + 48], AW_UPDATE
+    jz .files
+    mov esi, RT_FS_KERNEL               ; and a new kernel
+.files:
     call files_program                  ; the files, on every volume
     mov [rbp + SB_FILES], eax
 .no_files:

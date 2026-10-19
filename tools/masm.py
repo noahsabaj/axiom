@@ -27,7 +27,7 @@ SOURCES = [K / "defs.inc", K / "kbd.asm", K / "kobj.asm", K / "user.asm", K / "f
 PUBLIC = ("OT_", "RT_", "E_", "RA_", "SQ_", "SQF_", "CQ_", "RO_", "FS_PATH", "FV_", "FVF_",
           "FE_", "FEA_", "USER_", "AXE_", "AW_", "SB_", "SYS_", "WE_", "WM_", "WNF_", "PTRM_",
           "WIN_MAX", "TC_", "LK_", "SKS_", "NETW_", "NETF_", "NA_", "NS_", "NI_", "KEY_", "MEM_MAX", "AS_MAX",
-          "CON_WRITE_MAX", "FS_ROOM_MAX", "SN_", "SI_", "EXIT_TASK")
+          "CON_WRITE_MAX", "FS_ROOM_MAX", "SN_", "SI_", "EXIT_TASK", "UPD_", "UPS_")
 
 
 def tools():
@@ -97,7 +97,8 @@ def wants_of(src, known):
     m = re.search(r"^;\s*wants:\s*(.+)$", src.read_text(encoding="latin-1"), re.M)
     if not m:
         return 0
-    names = {n: v for n, v in (("AW_NET", 1), ("AW_STORE", 2), ("AW_DESK", 4), ("AW_FILES", 16), ("AW_SOUND", 32))}
+    names = {n: v for n, v in (("AW_NET", 1), ("AW_STORE", 2), ("AW_DESK", 4), ("AW_FILES", 16), ("AW_SOUND", 32),
+                                          ("AW_UPDATE", 64))}
     value = 0
     for word in m.group(1).replace("|", " OR ").split():
         if word.upper() == "OR":

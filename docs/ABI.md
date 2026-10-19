@@ -75,6 +75,7 @@ start block:
 | (8) | | reserved for the settings, on their branch |
 | `AW_FILES` | 16 | every FAT volume |
 | `AW_SOUND` | 32 | the speakers, to open streams of sound on |
+| `AW_UPDATE` | 64 | with `AW_FILES`: `RT_FS_KERNEL` on that handle, a new kernel for the machine |
 
 The shell gives a program what it wants and no more. The user can grant
 more for one run: `+net hello`, `+files notes`. A program started by
@@ -236,7 +237,8 @@ Each object type has its own `OT_*`:
 **Rights** (`RT_*`): three for any object, `RT_DUP` 1, `RT_GIVE` 2 and
 `RT_INFO` 4. The rest are by type, from bit 8: `RT_MEM_READ` and
 `RT_MEM_WRITE`, `RT_CH_SEND` and `RT_CH_RECV`, `RT_WIN_DRAW`, `RT_FS_READ`
-and `RT_FS_WRITE`, `RT_SOUND_PLAY` and `RT_STREAM_PLAY`, and so on.
+and `RT_FS_WRITE` (and `RT_FS_KERNEL`, for `RO_FS_UPDATE`), `RT_SOUND_PLAY`
+and `RT_STREAM_PLAY`, and so on.
 
 - `RO_DUP` derives a handle with the same rights or fewer, and an expiry
   (a TSC value, 0 for none) no later than its own.
@@ -377,8 +379,9 @@ requests still waiting with that data.
 | 42 | `RO_FS_SUB` | handle2 + a0: a folder, a1 = rights | a handle to that folder alone |
 | 43 | `RO_WIN_POINTER` | handle = a window, a0 = `PTRM_*` | |
 | 44 | `RO_NET_ADDR` | handle = a socket, into handle2 + a0: `NA_SIZE` bytes (`NA_*`) | 0, or `E_EMPTY` while it is looked up |
+| 45 | `RO_FS_UPDATE` | handle = files, to every volume, with `RT_FS_KERNEL`; a1 = `UPD_*` (see Files) | `UPS_*`, or 0 |
 
-`RO_COUNT` is 45. Anything from there up is `E_ARG`.
+`RO_COUNT` is 46. Anything from there up is `E_ARG`.
 
 **Fixed fields**: a path (`FS_PATH`, 256 bytes), a store name (64), a host
 (256) or a pattern (64) is read at its full size from handle2 + a0,
@@ -534,6 +537,23 @@ With `AW_FILES`:
   the first time a program uses that volume's files.
 - **Writes**: `RO_FS_WRITE` replaces the whole file. A read or a write is at
   most `FS_ROOM_MAX` (16 MiB).
+- **A new kernel**: with `AW_UPDATE` too, the handle to every volume has
+  `RT_FS_KERNEL`, and `RO_FS_UPDATE` does what the shell's `update` does
+  (a1 = `UPD_*`):
+  - `UPD_STATE` -> `UPS_*`: the kernel running (`UPS_SLOT`: `'A'`, `'B'`,
+    0 for the one built into the loader), `UPS_TRIAL` if it is on trial,
+    the one kept `<< UPS_KEPT_SHIFT`, the one the next start tries
+    `<< UPS_NEXT_SHIFT`.
+  - `UPD_TRY`: handle2 + a0, a kernel.bin's path; a2 = seconds to keep it
+    in, 30 to 3600 (0: 600). It goes into the slot not kept, and the next
+    start tries it. Not a kernel, or too big: `E_ARG`.
+  - `UPD_KEEP`: on trial, this kernel kept for every start; else `E_ARG`.
+  - `UPD_RESTART`: a2 = seconds, 1 to 60: with a trial to come, the
+    machine restarts into it that long from now; else `E_ARG`.
+
+  A trial not kept in time, a panic on trial, or a hang, and the machine
+  restarts into the kernel kept. `fleet` keeps a trial once a client
+  reaches it.
 
 ## Time
 

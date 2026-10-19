@@ -49,6 +49,7 @@ RT_DESK_WINDOW  EQU 1 SHL 8  ; the desktop: open windows on it
 RT_WIN_DRAW     EQU 1 SHL 8  ; a window: show what was drawn, title it
 RT_FS_READ      EQU 1 SHL 8  ; files: list folders, read files
 RT_FS_WRITE     EQU 1 SHL 9  ; write, make, rename, remove
+RT_FS_KERNEL    EQU 1 SHL 10  ; every volume: a new kernel (RO_FS_UPDATE)
 RT_SOUND_PLAY   EQU 1 SHL 8  ; the speakers: open streams on them
 RT_STREAM_PLAY  EQU 1 SHL 8  ; a stream: play it, wait on it
 RT_ALL          EQU 0FFFFh
@@ -146,7 +147,16 @@ RO_FS_RENAME    EQU 41  ; handle, handle2 + a0: a file or a folder,
 RO_FS_SUB       EQU 42  ; handle, handle2 + a0: a folder, a1 =
 RO_WIN_POINTER  EQU 43  ; handle = a window, a0 = PTRM_*: the
 RO_NET_ADDR     EQU 44  ; handle = a socket, into handle2 + a0:
-RO_COUNT        EQU 45
+RO_FS_UPDATE    EQU 45  ; handle = files, to every volume, with
+RO_COUNT        EQU 46
+UPD_STATE       EQU 0  ; -> UPS_*
+UPD_TRY         EQU 1  ; handle2 + a0: a kernel.bin's path, a2 =
+UPD_KEEP        EQU 2  ; on trial -> 0: kept, for every start
+UPD_RESTART     EQU 3  ; a2 = seconds, 1 to 60 -> 0: with a trial
+UPS_SLOT        EQU 0FFh  ; the kernel running: 'A', 'B'; 0 built in
+UPS_TRIAL       EQU 1 SHL 8  ; it is on trial, not kept yet
+UPS_KEPT_SHIFT  EQU 16  ; << the one kept: 'A', 'B'; 0 none
+UPS_NEXT_SHIFT  EQU 24  ; << the one the next start tries, or 0
 FS_PATH         EQU 256  ; a path's field
 FV_INDEX        EQU 0  ; a volume (RO_FS_VOLUMES): dword, its n in "vol<n>:"
 FV_FLAGS        EQU 4  ; dword FVF_*
@@ -227,7 +237,8 @@ AW_STORE        EQU 2  ; its own names in the store (SB_STORE)
 AW_DESK         EQU 4  ; the desktop, to open windows on (SB_DESK)
 AW_FILES        EQU 16  ; the files on every volume (SB_FILES)
 AW_SOUND        EQU 32  ; the speakers (SB_SOUND)
-AW_ALL          EQU 7 OR AW_FILES OR AW_SOUND
+AW_UPDATE       EQU 64  ; with AW_FILES: a new kernel (RT_FS_KERNEL)
+AW_ALL          EQU 7 OR AW_FILES OR AW_SOUND OR AW_UPDATE
 SB_RING         EQU 0  ; dword: a handle to the task's ring
 SB_RING_MEM     EQU 4  ; dword: to the ring's memory
 SB_CONSOLE      EQU 8  ; dword: to the console

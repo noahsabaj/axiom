@@ -7,7 +7,8 @@ EFI system partition holding build/esp (so EFI/BOOT/BOOTX64.EFI).
 
 Boot it with run.py --stick build/stick.img. Axiom keeps its log in
 /AXIOM.LOG there; fatcheck.py --show /AXIOM.LOG prints it afterwards.
---file puts more files at the top of it (CLAUDE.KEY, for instance).
+--file puts more files on it: at the top (CLAUDE.KEY, for instance), or in
+a folder (EFI/AXIOM/START.TXT=start.txt).
 --linux puts a Linux root from mkroot.py at /LINUX (META, ROOT/...), on a
 stick large enough for it, with 4 KiB clusters.
 """
@@ -32,6 +33,15 @@ def size_of(t):
     return sum(size_of(v) if isinstance(v, dict) else len(v) + 4096 for v in t.values())
 
 
+def merge(into, more):
+    """more's files into the tree into: folders merged, files replaced."""
+    for name, v in more.items():
+        if isinstance(v, dict) and isinstance(into.get(name), dict):
+            merge(into[name], v)
+        else:
+            into[name] = v
+
+
 def build(out, serial, mib=64, extra=None, linux=None):
     spc = 1
     if linux:
@@ -46,7 +56,7 @@ def build(out, serial, mib=64, extra=None, linux=None):
     fs = fat32.Fat32(img, part[0], part[1] - part[0] + 1)
     fs.format(spc=spc, label=b"AXIOM BOOT ", serial=serial)
     files = tree(ROOT / "build" / "esp")
-    files.update(extra or {})
+    merge(files, extra or {})
     fs.add_tree(files)
     fs.flush_fat()
     out.write_bytes(img)
@@ -57,13 +67,17 @@ if __name__ == "__main__":
     ap.add_argument("out", nargs="?", default=str(ROOT / "build" / "stick.img"))
     ap.add_argument("--serial", default="5354494B", help="FAT volume serial, hex")
     ap.add_argument("--file", action="append", default=[], metavar="NAME=PATH",
-                    help="one more file at the top")
+                    help="one more file: at the top, or at a/b/NAME")
     ap.add_argument("--linux", metavar="DIR", help="a Linux root from mkroot.py, at /LINUX")
     opts = ap.parse_args()
     extra = {}
     for f in opts.file:
         name, _, path = f.partition("=")
-        extra[name] = pathlib.Path(path).read_bytes()
+        *folders, name = name.split("/")
+        at = extra
+        for d in folders:
+            at = at.setdefault(d, {})
+        at[name] = pathlib.Path(path).read_bytes()
     build(pathlib.Path(opts.out), int(opts.serial, 16), extra=extra,
           linux=pathlib.Path(opts.linux) if opts.linux else None)
     print(opts.out)

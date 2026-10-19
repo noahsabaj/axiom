@@ -45,28 +45,33 @@ FSQ_MKDIR       equ 4
 FSQ_REMOVE      equ 5
 FSQ_RENAME      equ 6
 FSQ_FOLDER      equ 7                   ; is it a folder? (RO_FS_SUB)
+FSQ_UPDATE      equ 8                   ; a new kernel (RO_FS_UPDATE): FQ_LEN = UPD_*,
+                                        ; FQ_ROOM = seconds
 
 FS_ROOM_MAX     equ 16 * 1024 * 1024    ; a read or a write, at most
 
 section .text
 
-; files_program -> EAX = a handle to every volume, in the current task, for
-; a program run from the console; 0 if none could be made. Preserves others.
+; files_program(ESI = more rights: RT_FS_KERNEL, or 0) -> EAX = a handle to
+; every volume, in the current task, for a program run from the console; 0
+; if none could be made. Preserves others.
 files_program:
     push rcx
     push rdx
     push rsi
     push rdi
+    push rsi
     mov edi, OT_FILES
     mov esi, FO_SIZE
     lea rdx, [str_ot_files]
     call obj_new
+    pop rsi
     test rax, rax
     jz .none
     mov qword [rax + FO_VOL], -1
     mov byte [rax + FO_ROOT], 0
     mov rdi, rax
-    mov esi, RT_FS_READ | RT_FS_WRITE | RT_DUP | RT_GIVE | RT_INFO
+    or esi, RT_FS_READ | RT_FS_WRITE | RT_DUP | RT_GIVE | RT_INFO
     call handle_new
     cmp rax, E_ANY
     jb .out
@@ -658,6 +663,50 @@ h_fs_sub:
 .out:
     FS_LEAVE
 
+; h_fs_update(EDI = files, ESI = memory, RDX = where a path is, RCX = UPD_*,
+; R8 = seconds) -> RAX: a new kernel, as the shell's 'update' does (needs
+; RT_FS_KERNEL, on a handle to every volume): UPD_STATE -> UPS_*; UPD_TRY,
+; the path's kernel.bin tried at the next start; UPD_KEEP, on trial, kept;
+; UPD_RESTART, with a trial to come, the machine restarted into it
+h_fs_update:
+    FS_ENTER
+    mov r13d, esi
+    mov r15, rdx
+    mov [rbx + FQ_LEN], rcx
+    mov [rbx + FQ_ROOM], r8
+    mov rax, E_ARG
+    cmp rcx, UPD_RESTART
+    ja .out
+    push rdi
+    mov edx, RT_FS_KERNEL
+    call fs_open
+    pop rdi
+    jc .out
+    mov rax, E_RIGHTS                   ; every volume's, not a folder's
+    cmp qword [r12 + FO_VOL], -1
+    jne .put
+    cmp qword [rbx + FQ_LEN], UPD_TRY
+    jne .asked
+    mov edi, r13d
+    mov rsi, r15
+    mov edx, FQ_PATH
+    call fs_take
+    jc .put
+.asked:
+    xor eax, eax
+.put:
+    push rax
+    mov rdi, r12
+    call obj_put
+    pop rax
+    test rax, rax
+    jnz .out
+    mov dword [rbx + FQ_OP], FSQ_UPDATE
+    call fs_call
+    mov rax, [rbx + FQ_RESULT]
+.out:
+    FS_LEAVE
+
 ; -----------------------------------------------------------------------------
 ;  The main thread's side
 ; -----------------------------------------------------------------------------
@@ -725,7 +774,7 @@ fs_run:
 ; fs_do(RBX = a request, R14 = its volume) -> RAX = its result
 fs_do:
     mov eax, [rbx + FQ_OP]
-    cmp eax, FSQ_FOLDER
+    cmp eax, FSQ_UPDATE
     ja .bad
     lea rcx, [fs_ops]
     jmp [rcx + rax * 8]
@@ -1220,10 +1269,39 @@ fsq_folder:
 .out:
     ret
 
+; a new kernel (update.asm): FQ_LEN = UPD_*, FQ_ROOM = seconds
+fsq_update:
+    mov rax, [rbx + FQ_LEN]
+    cmp eax, UPD_TRY
+    je .try
+    cmp eax, UPD_KEEP
+    je .keep
+    cmp eax, UPD_RESTART
+    je .restart
+    jmp upd_state
+.try:
+    lea rsi, [rbx + FQ_PATH]
+    mov rdx, [rbx + FQ_ROOM]
+    mov eax, edx
+    cmp rdx, rax
+    mov rax, E_ARG
+    jne .out                            ; (beyond a dword)
+    jmp upd_try_file
+.keep:
+    jmp upd_keep_now
+.restart:
+    mov rdi, [rbx + FQ_ROOM]
+    mov rax, E_ARG
+    cmp rdi, 60
+    ja .out
+    jmp upd_restart
+.out:
+    ret
+
 section .rodata
 align 8
 fs_ops:         dq fsq_volumes, fsq_list, fsq_read, fsq_write, fsq_mkdir
-                dq fsq_remove, fsq_rename, fsq_folder
+                dq fsq_remove, fsq_rename, fsq_folder, fsq_update
 str_ot_files:   db 'files', 0
 str_home:       db '/Home', 0
 str_home_in:    db '/home/', 0          ; (lower case: home_inside folds to it)

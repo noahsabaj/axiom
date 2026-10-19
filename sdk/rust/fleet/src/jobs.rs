@@ -3,6 +3,9 @@
 //! HOME/jobs/ID/job.json (what fleet's node keeps, in its order) and
 //! /log, kept in memory as it grows and written there every few seconds
 //! and at its end. A job found unfinished at the start was lost.
+//!
+//! One job is fleet's own, no program: `update <file> [<seconds>]`, a new
+//! kernel for this machine (Jobs::update).
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -24,6 +27,9 @@ const SUMMARY: [&str; 16] = [
 ];
 /// How often a running job's log is written down.
 const SAVE_EVERY: Duration = Duration::from_secs(5);
+/// From an update's job to the restart into its kernel: for its end to be
+/// written, and seen.
+const RESTART_S: u32 = 10;
 
 /// The time as fleet writes it: ISO, to the second, with the zone (UTC:
 /// Axiom keeps the clock so).
@@ -272,6 +278,9 @@ impl Jobs {
         let job = Arc::new(Job::new(&s.id, self.seq.fetch_add(1, Ordering::SeqCst), rec, true));
         all.insert(s.id.clone(), job.clone());
         drop(all);
+        if s.argv[0] == "update" {
+            return Ok(self.update(&job, &s, files));
+        }
 
         // The program: a name (as the shell's run takes it), or a path in
         // the project; then its words, as SYS_SPAWN splits them.
@@ -320,6 +329,68 @@ impl Jobs {
                 Ok(pid)
             }
         }
+    }
+
+    /// The job `update <file> [<seconds>]`: the project's file, a
+    /// kernel.bin, into the slot not kept (Files::try_kernel), and the
+    /// machine restarted into it RESTART_S later, for its trial. There the
+    /// first client to reach this node keeps it (Node::serve); with none
+    /// within the seconds (600 unless said), the machine restarts into the
+    /// kernel it runs now. -> its "pid": 0.
+    fn update(&self, job: &Arc<Job>, s: &Start, files: Files) -> u64 {
+        let said = self.try_kernel(s, files);
+        let (state, text) = match &said {
+            Ok(text) => ("done", text.clone()),
+            Err(why) => ("failed", format!("fleet: {}", why)),
+        };
+        job.append(format!("{}\n", text).as_bytes());
+        let mut fields = vec![
+            ("state", Value::from(state)),
+            ("exit", Int(said.is_err() as i128)),
+            ("ended", now_iso().into()),
+            ("log_bytes", Int(lock(&job.log).bytes.len() as i128)),
+        ];
+        if let Err(why) = said {
+            fields.push(("reason", why.into()));
+        }
+        job.update(fields);
+        self.save_log(job);
+        self.save(job);
+        println!("{}", text);
+        job.poke();
+        0
+    }
+
+    fn try_kernel(&self, s: &Start, files: Files) -> Result<String, String> {
+        const USAGE: &str = "usage: update <a kernel.bin in the project> [<seconds to keep it in: 30 to 3600>]";
+        let (file, seconds) = match &s.argv[1..] {
+            [f] => (f, 0),
+            [f, t] => (f, t.parse::<u32>().ok().filter(|t| (30..=3600).contains(t)).ok_or(USAGE)?),
+            _ => return Err(USAGE.into()),
+        };
+        if file.starts_with('/') || file.contains(':') {
+            return Err(format!("update: {} is not a path in the project", file));
+        }
+        files
+            .try_kernel(&format!("{}/{}", s.dir, file), seconds)
+            .map_err(|e| format!("update: {} was not taken: {} (Axiom's log says why)", file, e))?;
+        let next = files.kernel().ok().and_then(|k| k.next).unwrap_or('?');
+        files
+            .restart_for_trial(RESTART_S)
+            .map_err(|e| format!("update: kernel {} is tried at the next start, but there is no restart: {}", next, e))?;
+        let others = self.list().iter().filter(|j| j.id != s.id && !j.is_final()).count();
+        let ending = if others > 0 { format!(", and {} running jobs end", others) } else { String::new() };
+        let within = if seconds == 0 { 600 } else { seconds };
+        Ok(format!(
+            "fleet: {} is kernel {}, tried at the next start: the machine restarts in {} s{}. {} {} {}",
+            file,
+            next,
+            RESTART_S,
+            ending,
+            format_args!("There the first fleet command to reach {} keeps it;", self.node),
+            format_args!("with none within {} s,", within),
+            "the machine restarts into the kernel it runs now.",
+        ))
     }
 
     fn spawn(&self, text: &str, dir: &str, files: Files, net: axiom::Net) -> Result<(Arc<task::Child>, chan::End), String> {

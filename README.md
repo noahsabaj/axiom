@@ -503,6 +503,24 @@ already sends nothing. A job still running when `fleet` last ended is
 `tools/test/fleet` runs it in QEMU against a client speaking fleet's wire,
 over two boots.
 
+A machine no one is at runs it at every start with `fleet &` in
+`/EFI/AXIOM/START.TXT`: that file's lines are typed into the first
+terminal as Axiom starts (start.asm). It takes a new kernel over fleet too:
+
+```
+fleet run --on axiom-1 -- update kernel.bin [seconds]   # kernel.bin pushed with the project
+fleet info axiom-1                # after the restart: this keeps it
+```
+
+`update` is fleet's own job, no program: it puts the project's
+kernel.bin into the slot not kept (as `update try`; FLEET.AXE wants
+`UPDATE`, a right on its files handle) and restarts the machine 10 s
+later. On that trial the first client to reach the node keeps the kernel;
+with none in time (600 s unless said), the machine restarts into the
+kernel it ran before. A kernel that cannot bring up the network, TLS, the
+files or `fleet` is given up on its own. `tools/test/update-fleet` pushes
+a kernel, keeps it, and lets a second one lapse, in QEMU.
+
 ## Layout
 
 ```
@@ -563,7 +581,9 @@ tools/test/             host-side tests for self-contained modules (tls: the
                         tried, kept, given up, and its file damaged,
                         across boots; fleet: Axiom as one of
                         fleet's nodes, a client here pushing to it and
-                        running jobs, across two boots); all.py runs them
+                        running jobs, across two boots; update-fleet: a
+                        new kernel over fleet, kept by the client's
+                        hello, or given up without one); all.py runs them
                         all at once, and qemu.py boots side by side
 tools/hw/hp1.py         test runs on hp-1, through fleet (hp1_node.py runs
                         there, as root)

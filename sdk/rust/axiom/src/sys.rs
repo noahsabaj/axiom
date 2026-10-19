@@ -70,8 +70,19 @@ pub const RO_FS_RENAME: u8 = 41;
 pub const RO_FS_SUB: u8 = 42;
 pub const RO_WIN_POINTER: u8 = 43;
 pub const RO_NET_ADDR: u8 = 44;
+pub const RO_FS_UPDATE: u8 = 45;
 
 pub const SQF_LINK: u8 = 1; // the next entry starts once this one succeeds
+
+// a new kernel (RO_FS_UPDATE's a1, UPD_*; UPD_STATE's result, UPS_*)
+pub const UPD_STATE: u64 = 0;
+pub const UPD_TRY: u64 = 1;
+pub const UPD_KEEP: u64 = 2;
+pub const UPD_RESTART: u64 = 3;
+pub const UPS_SLOT: u64 = 0xFF;
+pub const UPS_TRIAL: u64 = 1 << 8;
+pub const UPS_KEPT_SHIFT: u32 = 16;
+pub const UPS_NEXT_SHIFT: u32 = 24;
 
 // rights (RT_*)
 pub const RT_DUP: u32 = 1 << 0;
@@ -80,6 +91,7 @@ pub const RT_INFO: u32 = 1 << 2;
 pub const RT_DESK_WINDOW: u32 = 1 << 8;
 pub const RT_FS_READ: u32 = 1 << 8;
 pub const RT_FS_WRITE: u32 = 1 << 9;
+pub const RT_FS_KERNEL: u32 = 1 << 10;
 pub const RT_NET_CONNECT: u32 = 1 << 8;
 pub const RT_NET_TLS: u32 = 1 << 9;
 pub const RT_NET_INSECURE: u32 = 1 << 10;

@@ -19,6 +19,8 @@ pub mod wants {
     pub const DESK: u64 = 4;
     pub const FILES: u64 = 16;
     pub const SOUND: u64 = 32;
+    /// With FILES: a new kernel for this machine (Files::try_kernel).
+    pub const UPDATE: u64 = 64;
 }
 
 fn sb_u32(off: usize) -> u32 {

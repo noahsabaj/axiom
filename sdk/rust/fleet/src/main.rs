@@ -18,6 +18,13 @@
 //! a path in its project to an .AXE; it is given its project's folder and
 //! the network, and what it prints is its log. Its env, limits and grace
 //! are taken and not used.
+//!
+//! The job `update <file> [<seconds>]` is fleet's own: the project's file,
+//! a kernel.bin, is tried at the next start, and the machine restarts into
+//! it. On that trial the first client's hello keeps it; with none in time
+//! (600 s unless said), the machine restarts into the kernel it ran before.
+//! So a machine no one is at takes a new Axiom over fleet, and a kernel
+//! that cannot reach fleet is given up on its own.
 
 mod jobs;
 mod json;
@@ -29,6 +36,7 @@ use std::collections::BTreeSet;
 use std::net::IpAddr;
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use core::time::Duration;
 
@@ -41,7 +49,7 @@ use json::{Bool, Float, Int, List, Null, Object, Str, Value, obj};
 use store::{Store, clean_path, differing, entries, entry_value};
 use wire::{Closed, Conn, Fail, MAX_LINE, with};
 
-axiom::entry!(wants = axiom::wants::FILES | axiom::wants::NET);
+axiom::entry!(wants = axiom::wants::FILES | axiom::wants::NET | axiom::wants::UPDATE);
 
 const VERSION: &str = "0.1.0";
 const PROTOCOL: i128 = 1;
@@ -66,6 +74,8 @@ struct Node {
     net: Net,
     store: Store,
     jobs: Arc<Jobs>,
+    /// The kernel is on trial: the first client's hello keeps it.
+    trial: AtomicBool,
 }
 
 /// Python's round(x, 1).
@@ -206,6 +216,12 @@ impl Node {
         if c.send(&reply).is_err() {
             return;
         }
+        if self.trial.swap(false, Ordering::SeqCst) {
+            match self.files.keep_kernel() {
+                Ok(()) => println!("fleet: the kernel on trial is kept: {} reached this node", client),
+                Err(e) => println!("fleet: the kernel on trial could not be kept: {}", e),
+            }
+        }
         c.deadline = None;
         while self.request(&mut c, &client, peer) {}
     }
@@ -257,6 +273,13 @@ impl Node {
         let busy: BTreeSet<String> =
             running.iter().filter_map(|j| j.get("project").str().map(String::from)).collect();
         let here = c.socket().addrs().ok().map(|a| net::ip(a.local).to_string());
+        let os_version = match self.files.kernel() {
+            Ok(k) => match k.running {
+                Some(s) => format!("Axiom (kernel {}{})", s, if k.trial { ", on trial" } else { "" }),
+                None => "Axiom".to_string(),
+            },
+            Err(_) => "Axiom".to_string(),
+        };
         let reply = obj([
             ("id", id.clone()),
             ("node", self.name.clone().into()),
@@ -264,7 +287,7 @@ impl Node {
             ("code", self.code.clone().into()),
             ("protocol", Int(PROTOCOL)),
             ("os", "axiom".into()),
-            ("os_version", "Axiom".into()),
+            ("os_version", os_version.into()),
             ("arch", "x86_64".into()),
             ("hostname", self.name.clone().into()),
             ("cpu", cpu_name().into()),
@@ -699,8 +722,17 @@ fn main() -> ExitCode {
         files,
         net,
         jobs,
+        trial: AtomicBool::new(false),
     });
     println!("fleet: node {} listening on port {}, code {}, {} clients", node.name, port, node.code, node.clients.len());
+    match files.kernel() {
+        Ok(k) if k.trial => {
+            node.trial.store(true, Ordering::SeqCst);
+            println!("fleet: kernel {} is on trial: the first client to reach this node keeps it", k.running.unwrap_or('?'));
+        }
+        Ok(_) => {}
+        Err(e) => println!("fleet: no new kernels here: {}", e),
+    }
 
     loop {
         match listener.accept() {

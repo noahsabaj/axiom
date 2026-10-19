@@ -133,6 +133,7 @@ section .text
 %include "efivar.asm"
 %include "harness.asm"
 %include "update.asm"
+%include "start.asm"
 %include "lxmm.asm"
 %include "lxfs.asm"
 %include "linux.asm"

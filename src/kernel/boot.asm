@@ -158,6 +158,7 @@ main_loop:
     call user_service
     call iommu_service
     call shell_service                  ; the rest of a line, after a command
+    call start_service                  ; START.TXT's lines, at each start
     call harness_service                ; a test run's next line
     call update_service                 ; a trial not kept in time: a restart
 .keys:

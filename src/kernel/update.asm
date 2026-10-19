@@ -148,13 +148,23 @@ update_start:
     pop rbx
     ret
 
-; update_service: from the main loop. A trial not kept by its end: the end
-; of the log kept (AxiomLog: 'harness log' shows it), and the machine
-; restarted, into the kept kernel.
+; update_service: from the main loop. A restart a program asked for, to
+; start a trial (upd_restart). A trial not kept by its end: the end of the
+; log kept (AxiomLog: 'harness log' shows it), and the machine restarted,
+; into the kept kernel.
 update_service:
+    cmp qword [upd_restart_at], 0
+    jne .asked
     cmp byte [upd_trial], 0
     jne .on
     ret
+.asked:
+    RDTSC64
+    cmp rax, [upd_restart_at]
+    jb .out
+    KLOG "update: restarting, for the trial"
+    call log_final
+    jmp power_reboot
 .on:
     RDTSC64
     cmp rax, [upd_end]
@@ -233,36 +243,78 @@ update_show:
 ; kept, and named in AxiomTry: the next start tries it, and 'update keep'
 ; there keeps it within the seconds (600 unless said)
 update_try:
-    push rbx
     push r12
-    push r13
     push r14
-    push r15
     cmp edi, 1
     jb .usage
     cmp edi, 2
     ja .usage
     mov r12, rsi
-    mov eax, UPDATE_TRIAL
+    xor edx, edx                        ; (600)
     cmp edi, 2
-    jne .seconds
+    jne .file
     mov rsi, [r12 + 8]
     call arg_uint
     jc .usage
-    cmp eax, UPDATE_MIN
+    mov edx, eax
+    cmp edx, UPDATE_MIN
     jb .usage
-    cmp eax, UPDATE_MAX
+    cmp edx, UPDATE_MAX
     ja .usage
-.seconds:
-    mov [upd_new + UV_TRIAL], ax
-    xor ebx, ebx                        ; no pages yet
+.file:
     mov rsi, [r12]
     call fat_vol
     jc .out
+    call upd_try_file
+    test rax, rax
+    jz .out                             ; (CF clear)
+    stc
+    jmp .out
+.usage:
+    KLOG "usage: update try <file> [<seconds to keep it in: 30 to 3600>]"
+    stc
+.out:
+    pop r14
+    pop r12
+    ret
+
+; update keep: on trial, this kernel kept: every start uses it (AxiomSlot),
+; and the watchdog stopped
+update_keep:
+    call upd_keep_now
+    test rax, rax
+    jz .out
+    stc
+.out:
+    ret
+
+; upd_try_file(R14 = a volume, RSI = a kernel.bin's path on it, EDX =
+; seconds to keep it in, 0 for 600) -> RAX = 0: it is in the slot not kept,
+; read back, and named in AxiomTry; else E_* (said why). For the shell, and
+; for programs (RO_FS_UPDATE). The main thread's.
+upd_try_file:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r13
+    push r14
+    push r15
+    xor ebx, ebx                        ; no pages yet
+    test edx, edx
+    jnz .said
+    mov edx, UPDATE_TRIAL
+.said:
+    cmp edx, UPDATE_MIN
+    jb .seconds
+    cmp edx, UPDATE_MAX
+    ja .seconds
+    mov [upd_new + UV_TRIAL], dx
     xor ecx, ecx                        ; its size first
     lea rdi, [upd_new]
     call fat_read_file
-    jc .out
+    jc .missing
     cmp rdx, 32
     jb .not_kernel
     cmp rdx, SLOT_MAX
@@ -279,7 +331,7 @@ update_try:
     add rdi, [phys_base]
     mov rcx, r13
     call fat_read_file
-    jc .free
+    jc .missing
     cmp rax, r13
     jne .short
     mov rsi, rdi                        ; a kernel?
@@ -326,10 +378,10 @@ update_try:
     call fat_write_file
     pop rax
     mov [r14 + VO_WRITABLE], al
-    jc .free
+    jc .io
     mov rcx, r13                        ; read back: what the loader will read
     call fat_read_file
-    jc .free
+    jc .io
     cmp rax, r13
     jne .unlike
     mov rsi, rdi
@@ -348,60 +400,75 @@ update_try:
     lea rdx, [upd_path]
     movzx ecx, word [upd_new + UV_TRIAL]
     KLOG "update: %b into %s (vol%u:%s); the next start tries it, and 'update keep' there keeps it, within %u s", r13, rsi, rax, rdx, rcx
-    clc
+    xor eax, eax
     jmp .free
-.usage:
-    KLOG "usage: update try <file> [<seconds to keep it in: 30 to 3600>]"
-    stc
-    jmp .out
+.seconds:
+    KLOG "update: a trial is given 30 to 3600 s"
+    mov rax, E_ARG
+    jmp .free
+.missing:
+    KLOG "update: that file could not be read"
+    mov rax, E_NOFILE
+    jmp .free
 .too_big:
     KLOG "update: a kernel holds 32 MiB at most"
-    stc
-    jmp .out
+    mov rax, E_ARG
+    jmp .free
 .no_memory:
     KLOG "update: no memory to read it into"
-    stc
-    jmp .out
+    mov rax, E_NOMEM
+    jmp .free
 .short:
     KLOG "update: only %b of %b could be read", rax, r13
-    stc
+    mov rax, E_IO
     jmp .free
 .not_kernel:
     KLOG "update: that is not a kernel.bin (its header is not Axiom's, or not its size)"
-    stc
+    mov rax, E_ARG
     jmp .free
 .no_volume:
     KLOG "update: the volume Axiom started from is not here, or two have its serial number"
-    stc
+    mov rax, E_NOFILE
+    jmp .free
+.io:
+    KLOG "update: the slot could not be written; nothing is tried"
+    mov rax, E_IO
     jmp .free
 .unlike:
     KLOG "update: what was written does not read back the same; nothing is tried"
-    stc
+    mov rax, E_IO
     jmp .free
 .var_failed:
     KLOG "update: AxiomTry was not written (EFI status %x); nothing is tried", rax
-    stc
+    mov rax, E_IO
 .free:
-    pushfq
     test rbx, rbx
-    jz .freed
+    jz .out
+    push rax
     mov rdi, rbx
     mov rsi, r15
     call pmm_free
-.freed:
-    popfq
+    pop rax
 .out:
     pop r15
     pop r14
     pop r13
-    pop r12
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
     pop rbx
     ret
 
-; update keep: on trial, this kernel kept: every start uses it (AxiomSlot),
-; and the watchdog stopped
-update_keep:
+; upd_keep_now -> RAX = 0: on trial, this kernel kept: every start uses it
+; (AxiomSlot), and the watchdog stopped; else E_ARG or E_IO (said why). For
+; the shell, and for programs. The main thread's.
+upd_keep_now:
     push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
     mov rbx, [boot_info]
     cmp byte [upd_trial], 0
     je .not_trial
@@ -446,21 +513,86 @@ update_keep:
 .run:
     mov byte [upd_watch], 0             ; the test run reloads it, and ends it
 .done:
-    clc
+    xor eax, eax
     jmp .out
 .not_trial:
     KLOG "update keep: only on trial, after 'update try' and a restart"
-    stc
+    mov rax, E_ARG
     jmp .out
 .lost:
     KLOG "update keep: AxiomTry no longer names this kernel (another was tried since); nothing kept"
-    stc
+    mov rax, E_ARG
     jmp .out
 .failed:
     KLOG "update keep: AxiomSlot was not written (EFI status %x); nothing kept", rax
-    stc
+    mov rax, E_IO
 .out:
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
     pop rbx
+    ret
+
+; upd_state -> RAX = UPS_*: the kernel running, whether on trial, the one
+; kept, and one the next start tries. Preserves others.
+upd_state:
+    push rcx
+    call upd_read
+    mov rax, [boot_info]
+    movzx eax, byte [rax + BI_SLOT]
+    cmp byte [upd_trial], 0
+    je .kept
+    or eax, UPS_TRIAL
+.kept:
+    movzx ecx, byte [upd_kept]
+    shl ecx, UPS_KEPT_SHIFT
+    or eax, ecx
+    cmp byte [upd_try_ok], 0
+    je .out
+    movzx ecx, byte [upd_try + UV_SLOT]
+    cmp ecx, 'a'
+    jae .out                            ; tried already
+    shl ecx, UPS_NEXT_SHIFT
+    or eax, ecx
+.out:
+    pop rcx
+    ret
+
+; upd_restart(EDI = seconds, 1 to 60) -> RAX = 0: with a trial to come
+; (AxiomTry), the machine restarts that long from now, into it
+; (update_service); else E_ARG. For programs, which have no 'reboot'.
+; Preserves others.
+upd_restart:
+    push rcx
+    push rdx
+    mov rax, E_ARG
+    cmp edi, 1
+    jb .out
+    cmp edi, 60
+    ja .out
+    call upd_read
+    cmp byte [upd_try_ok], 0
+    je .none
+    movzx ecx, byte [upd_try + UV_SLOT]
+    cmp ecx, 'a'
+    jae .none                           ; tried already
+    RDTSC64
+    mov ecx, edi
+    imul rcx, rcx, 1000
+    imul rcx, [tsc_per_ms]
+    add rax, rcx
+    mov [upd_restart_at], rax
+    mov ecx, edi
+    KLOG "update: the machine restarts in %u s, for the trial", rcx
+    xor eax, eax
+    jmp .out
+.none:
+    KLOG "update: no trial to come (AxiomTry): no restart"
+    mov rax, E_ARG
+.out:
+    pop rdx
+    pop rcx
     ret
 
 ; upd_read -> upd_kept = the slot AxiomSlot names (0 if none), upd_kept_var
@@ -603,6 +735,7 @@ upd_seconds:    resq 1                  ; the trial's: how long,
 upd_end:        resq 1                  ; its end (TSC),
 upd_stuck_at:   resq 1                  ; when the timer panics,
 upd_pet_at:     resq 1                  ; the watchdog's next reload
+upd_restart_at: resq 1                  ; a restart a program asked for (TSC), or 0
 upd_kept_var:   resb UV_BYTES           ; AxiomSlot
 upd_try:        resb UV_BYTES           ; AxiomTry
 upd_new:        resb UV_BYTES           ; one being written
