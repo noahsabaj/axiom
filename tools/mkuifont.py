@@ -3,7 +3,8 @@
 (regular, semibold) at the sizes the desktop draws its words in,
 into src/kernel/gen/uifont.bin (8-bit coverage) and src/kernel/gen/uifont.inc
 (the tables that find a glyph). What Noto Sans lacks (arrows, a check, the
-keys' symbols) comes from DejaVu Sans of the same weight.
+keys' symbols) comes from DejaVu Sans of the same weight. And the clock's
+figures alone (digits, a colon, a point, % and a degree), large (UF_BIG).
 
     python tools/mkuifont.py [fonts directory]
 
@@ -16,7 +17,9 @@ and public domain changes. Both free to embed and redistribute.
 
 uifont.inc:
   UF_WEIGHTS, UF_SIZES, UF_GLYPHS; uf_size_px (UF_SIZES bytes)
-  uf_fonts: UF_WEIGHTS * UF_SIZES entries of UFT_SIZE bytes (weight-major):
+  UF_BIG, UF_BIG_SIZES; uf_big_px: the figures' fonts, after the others
+  uf_fonts: UF_WEIGHTS * UF_SIZES entries of UFT_SIZE bytes (weight-major),
+  then UF_BIG_SIZES more:
     UFT_GLYPHS dq  offset of its glyph table in uifont.bin
     UFT_ASCENT dd  pixels above the baseline
     UFT_DESCENT dd pixels below it
@@ -51,6 +54,8 @@ FONTS = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else pathlib.Path(r"C:\Wi
 WEIGHTS = [("REGULAR", "NotoSans-Regular.ttf", "DejaVuSans.ttf", 0),
            ("SEMIBOLD", "NotoSans-Regular.ttf", "DejaVuSans.ttf", 2)]
 SIZES = [11, 13, 14, 16, 20, 22, 26]           # 11 and 13 points at 1, 1.25, 1.5, 2x
+BIG_CHARS = "0123456789:.%-\u00b0"               # figures, for the clock and the widgets
+BIG_SIZES = [22, 28, 33, 39, 44, 55, 66, 77, 88]  # 22 and 44 points at 1 .. 2x
 SS = 4                                          # drawn at 4x, averaged down
 
 SYMBOLS = [0x2318, 0x2325, 0x21E7, 0x2303, 0x23CE, 0x232B, 0x2713, 0x2715, 0x2192, 0x2190,
@@ -87,6 +92,19 @@ def main():
             blob += bytes(-len(blob) % 4)
             tables.append((len(blob), ascent, descent, ascent + descent, cap, table))
             blob += table
+    for px in BIG_SIZES:                        # the figures, a little heavier
+        nf = ImageFont.truetype(str(FONTS / WEIGHTS[0][1]), px * SS)
+        ascent, descent = ImageFont.truetype(str(FONTS / WEIGHTS[0][1]), px).getmetrics()
+        cap = round(-nf.getbbox("0", anchor="ls")[1] / SS)
+        table = bytearray()
+        for c in [None] + glyph_codes:
+            if c is not None and chr(c) in BIG_CHARS + " ":
+                table += glyph(nf, chr(c), px // 22, blob)
+            else:
+                table += struct.pack("<IHBBbbH", 0, 0, 0, 0, 0, 0, 0)
+        blob += bytes(-len(blob) % 4)
+        tables.append((len(blob), ascent, descent, ascent + descent, cap, table))
+        blob += table
     index = {c: i + 1 for i, c in enumerate(glyph_codes)}
     _INDEX.update(index)
 
@@ -104,6 +122,9 @@ def main():
     for i, (name, *_rest) in enumerate(WEIGHTS):
         lines.append(f"UF_{name:<12} equ {i}")
     lines.append("uf_size_px:     db " + ", ".join(str(s) for s in SIZES))
+    lines.append(f"UF_BIG          equ {len(WEIGHTS) * len(SIZES)}")
+    lines.append(f"UF_BIG_SIZES    equ {len(BIG_SIZES)}")
+    lines.append("uf_big_px:      db " + ", ".join(str(s) for s in BIG_SIZES))
     lines.append("align 8")
     lines.append("uf_fonts:")
     for off, asc, desc, line, cap, _ in tables:
@@ -125,7 +146,7 @@ def main():
         lines.append(f"    dd 0x{c:04X}, {index[c]}")
     (OUT / "uifont.inc").write_text("\n".join(lines) + "\n", newline="\n")
     print(f"uifont: {len(glyph_codes) + 1} glyphs, {len(WEIGHTS)} weights x {len(SIZES)} sizes, "
-          f"{len(blob):,} bytes")
+          f"the figures at {len(BIG_SIZES)}, {len(blob):,} bytes")
     preview(blob, tables)
 
 

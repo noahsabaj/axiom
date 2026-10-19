@@ -120,6 +120,7 @@ section .text
 %include "shell.asm"
 %include "theme.asm"
 %include "wall.asm"
+%include "widgets.asm"
 %include "draw.asm"
 %include "icons.asm"
 %include "look.asm"

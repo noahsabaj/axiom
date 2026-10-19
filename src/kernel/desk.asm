@@ -226,10 +226,11 @@ desk_metrics:
     ret
 
 ; desk_looks: what the theme makes: the wallpaper, the menu bar's glass,
-; the shadows, the icons, the pointer. Preserves RBX, RBP, R12-R15.
+; the widgets, the shadows, the icons, the pointer. Preserves RBX, RBP, R12-R15.
 desk_looks:
     call wall_make
     call bar_make
+    call wg_looks
     mov eax, [th_c + TC_SHADOW_A]
     mov [sh_focus + SH_A], eax
     mov eax, [th_c + TC_SHADOW2_A]
@@ -1718,6 +1719,7 @@ wall_draw:
     je .plain
     lea r8, [wall_sf]
     call sf_copy_rows
+    call wg_show                        ; the widgets over it
     jmp .out
 .plain:
     mov r8d, COL_BG
@@ -2403,6 +2405,7 @@ desk_tick:
     mov [bar_minute], rax
     call desk_bar_damage
 .out:
+    call wg_tick                        ; and the widgets'
     pop rax
     ret
 
