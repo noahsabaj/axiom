@@ -256,6 +256,7 @@ harness_end:
     mov ecx, 10
     div rcx
     KLOG "harness: the run is over, %h s after power-on; the machine restarts", rax
+    call rtw_leave                      ; (in the log; power_reboot would too)
     call harness_save
     call log_final
     jmp power_reboot

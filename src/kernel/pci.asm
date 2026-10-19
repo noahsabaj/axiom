@@ -287,6 +287,33 @@ pci_power_on:
     pop rax
     ret
 
+; pci_power_d3hot(EDI = bdf): bus mastering off, then D3hot, as Linux
+; leaves a function before a restart (a driver's shutdown), if it has the
+; power-management capability. Preserves all.
+pci_power_d3hot:
+    push rax
+    push rdx
+    push rsi
+    mov esi, 0x04
+    call pci_read32
+    mov edx, eax
+    and edx, 0xFFFF & ~(1 << 2)         ; the command, without Bus Master
+    call pci_write32                    ;   (the status half written as 0)
+    mov esi, 0x01
+    call pci_find_cap
+    jc .out
+    add esi, 4                          ; PMCSR
+    call pci_read32
+    mov edx, eax
+    and edx, ~(3 | (1 << 15))           ; (PME status kept)
+    or edx, 3                           ; D3hot
+    call pci_write32
+.out:
+    pop rsi
+    pop rdx
+    pop rax
+    ret
+
 ; pci_find_cap(EDI = bdf, ESI = capability ID) -> ESI = its offset, CF if
 ; the function does not have it. Preserves others.
 pci_find_cap:
