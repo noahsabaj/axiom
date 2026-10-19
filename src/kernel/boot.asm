@@ -108,6 +108,7 @@ kernel_main:
     mov ecx, [cpu_count]
     KLOG "smp: %u of %u threads online in %u us", rax, rcx, qword [smp_us]
     call pci_init
+    call vmd_init                       ; and what a VMD hides (hp-1's drive)
     call iommu_init                     ; before any driver lets a device do DMA
     mov eax, [pci_count]
     KLOG "pci: %u functions", rax

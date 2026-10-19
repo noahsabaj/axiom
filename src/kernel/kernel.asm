@@ -60,6 +60,7 @@ section .text
 %include "user.asm"
 %include "channel.asm"
 %include "pci.asm"
+%include "vmd.asm"
 %include "iommu.asm"
 %include "kbd.asm"
 %include "usb.asm"

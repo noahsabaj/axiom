@@ -16,6 +16,7 @@ PE_CLASS        equ 8
 PE_SUBCLASS     equ 9
 PE_PROGIF       equ 10
 PE_REV          equ 11
+PE_SEG          equ 12                  ; 1: behind a VMD (vmd.asm)
 
 section .text
 
@@ -24,6 +25,8 @@ section .text
 pci_read32:
     push rcx
     push rdx
+    test edi, VMD_SEG
+    jnz .vmd
     cmp byte [pci_use_ecam], 0
     je .legacy
     mov eax, edi
@@ -43,6 +46,14 @@ pci_read32:
     out dx, eax
     mov dx, 0xCFC
     in eax, dx
+    jmp .out
+.vmd:
+    call vmd_cfg
+    jc .nothing
+    mov eax, [rax]
+    jmp .out
+.nothing:
+    mov eax, -1                         ; as an absent function answers
 .out:
     pop rdx
     pop rcx
@@ -53,6 +64,8 @@ pci_write32:
     push rax
     push rcx
     push rdx
+    test edi, VMD_SEG
+    jnz .vmd
     cmp byte [pci_use_ecam], 0
     je .legacy
     mov eax, edi
@@ -74,6 +87,11 @@ pci_write32:
     mov dx, 0xCFC
     mov eax, ecx
     out dx, eax
+    jmp .out
+.vmd:
+    call vmd_cfg
+    jc .out
+    mov [rax], edx
 .out:
     pop rdx
     pop rcx
@@ -195,9 +213,12 @@ pci_find_class:
     xor eax, eax
     ret
 
-; pci_bdf(RDI = entry) -> EAX = bus << 8 | dev << 3 | fn. Preserves others.
+; pci_bdf(RDI = entry) -> EAX = bus << 8 | dev << 3 | fn, and VMD_SEG for
+; a function behind a VMD. Preserves others.
 pci_bdf:
-    movzx eax, byte [rdi + PE_BUS]
+    movzx eax, byte [rdi + PE_SEG]
+    shl eax, 8
+    or al, [rdi + PE_BUS]
     shl eax, 5
     or al, [rdi + PE_DEV]
     shl eax, 3

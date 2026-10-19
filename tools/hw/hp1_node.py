@@ -4,8 +4,9 @@ other system (Ubuntu), through `fleet run --admin`. Its folder holds what
 hp1.py sent: EFI/AXIOM/BOOTX64.EFI and run.txt.
 
     python3 hp1_node.py status     what is there; changes nothing
-    python3 hp1_node.py install    the loader onto the EFI system partition,
-                                   and a boot entry for it (BootOrder as it was)
+    python3 hp1_node.py install    the loader and the programs onto the EFI
+                                   system partition (EFI/AXIOM), and a boot
+                                   entry for the loader (BootOrder as it was)
     python3 hp1_node.py run        run.txt into AxiomRun, BootNext = Axiom,
                                    and a restart in 5 seconds
     python3 hp1_node.py log        AxiomLog printed, then deleted
@@ -98,17 +99,21 @@ def status():
 
 
 def install():
-    src = pathlib.Path(LOADER)
-    dst = ESP / LOADER
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    data = src.read_bytes()
-    tmp = dst.with_suffix(".NEW")
-    tmp.write_bytes(data)
-    os.sync()
-    tmp.replace(dst)
-    os.sync()
-    same = hashlib.sha256(dst.read_bytes()).digest() == hashlib.sha256(data).digest()
-    print(f"{dst}: {len(data)} bytes, {'as sent' if same else 'NOT as sent'}")
+    same = True
+    for src in sorted(LOADER.parent.iterdir()):
+        dst = ESP / LOADER.parent / src.name
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        data = src.read_bytes()
+        if dst.exists() and dst.read_bytes() == data:
+            continue
+        tmp = dst.with_suffix(".NEW")
+        tmp.write_bytes(data)
+        os.sync()
+        tmp.replace(dst)
+        os.sync()
+        ok = hashlib.sha256(dst.read_bytes()).digest() == hashlib.sha256(data).digest()
+        same = same and ok
+        print(f"{dst}: {len(data)} bytes, {'as sent' if ok else 'NOT as sent'}")
     _, _, order, axiom = boot_entries()
     if axiom is None:
         disk, part = esp_disk()

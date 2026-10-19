@@ -156,23 +156,20 @@ nvme_start:
     mov ecx, NV_SIZE
     xor eax, eax
     rep stosb
-    movzx edi, byte [rbx + PE_BUS]
-    shl edi, 8
-    movzx eax, byte [rbx + PE_DEV]
-    shl eax, 3
-    or edi, eax
-    movzx eax, byte [rbx + PE_FN]
-    or edi, eax
-    mov [r15 + NV_BDF], edi
-    mov r13d, edi
+    mov rdi, rbx
+    call pci_bdf
+    mov [r15 + NV_BDF], eax
+    mov r13d, eax
     cmp qword [nvme_domain], 0          ; its DMA, through the NVMe domain
     jne .domain
     lea rdi, [str_nv_domain]
     call iommu_domain_new
     mov [nvme_domain], rax
 .domain:
+    mov edi, r13d                       ; (behind a VMD: as the VMD)
+    call pci_dma_bdf
+    mov esi, eax
     mov rdi, [nvme_domain]
-    mov esi, r13d
     call iommu_attach
     cmp qword [nv_bounce], 0            ; a page for what Identify says
     jne .bounce_ok
@@ -617,6 +614,8 @@ nvme_msix:
     push r9
     mov dword [r15 + NV_MSIX], 0
     mov edi, [r15 + NV_BDF]
+    test edi, VMD_SEG                   ; behind a VMD: its MSI-X would go
+    jnz .out                            ; through the VMD's, not set up: polled
     mov esi, 0x11
     call pci_find_cap
     jc .out
