@@ -70,7 +70,9 @@ rtw_join:
 
 ; rtw_connect(R12) -> CF (said why) if not on the network with keys in
 ; use: found, authenticated, associated, and the 4-way handshake done
-; within 3 seconds. Preserves all but RAX.
+; within 3 seconds. A handshake that fails counts in rtw_hs_fails (a
+; wrong key, likely: the link stops trying after two). Preserves all but
+; RAX.
 rtw_connect:
     push rcx
     call rtw_find
@@ -93,11 +95,13 @@ rtw_connect:
     mov eax, [rtw_eapol_n]
     KLOG "wifi: no keys agreed in 3 s (%u EAPOL frames from the access point)", rax
     call rtw_deauth
+    inc byte [rtw_hs_fails]
 .fail:
     mov byte [rtw_js], JS_IDLE
     stc
     jmp .out
 .keys:
+    mov byte [rtw_hs_fails], 0
     clc
 .out:
     pop rcx
@@ -653,3 +657,4 @@ rtw_bss_rsn:    resb 1                  ; RB_*
 rtw_bss_found:  resb 1
 rtw_js:         resb 1                  ; JS_*
 rtw_js_got:     resb 1
+rtw_hs_fails:   resb 1                  ; handshakes failed in a row

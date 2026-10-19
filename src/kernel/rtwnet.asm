@@ -7,7 +7,8 @@
 ;  lost network is joined again. Part of the rtw88 port (rtw.asm).
 ; =============================================================================
 
-RTW_REJOIN      equ 10                  ; seconds between tries to join again
+RTW_REJOIN      equ 10                  ; seconds before the first try to join
+RTW_REJOIN_MAX  equ 300                 ;   again, doubling up to this
 
 section .text
 
@@ -56,23 +57,43 @@ rtw_nic_ack:
     ret
 
 ; link: up while the keys are in use; when they are not, the network
-; joined again (every RTW_REJOIN seconds)
+; joined again, RTW_REJOIN seconds on and doubling to RTW_REJOIN_MAX; not
+; after two handshakes failed (the key is wrong, likely, and an access
+; point may shut out a station that keeps failing)
 rtw_nic_link:
     cmp byte [rtw_up], 0
     je .speed
     cmp byte [rtw_keys], 0
-    jne .speed
+    jne .on
+    cmp byte [rtw_hs_fails], 2
+    jae .speed
     mov rax, [net_now]
     cmp rax, [rtw_rejoin_at]
     jb .speed
-    mov rcx, [net_second]
-    imul rcx, rcx, RTW_REJOIN
+    mov ecx, [rtw_rejoin_s]
+    test ecx, ecx
+    jnz .wait
+    mov ecx, RTW_REJOIN
+.wait:
+    lea edx, [ecx * 2]
+    cmp edx, RTW_REJOIN_MAX
+    jbe .next
+    mov edx, RTW_REJOIN_MAX
+.next:
+    mov [rtw_rejoin_s], edx
+    imul rcx, [net_second]
     add rax, rcx
     mov [rtw_rejoin_at], rax
     push r12
     mov r12, [rtw_mmio]
     call rtw_connect
     pop r12
+    cmp byte [rtw_hs_fails], 2
+    jb .speed
+    KLOG "wifi: two handshakes failed: not trying again (is WIFI.KEY this network's?)"
+    jmp .speed
+.on:
+    mov dword [rtw_rejoin_s], 0         ; the next loss starts over
 .speed:
     xor eax, eax
     cmp byte [rtw_keys], 0
@@ -81,6 +102,30 @@ rtw_nic_link:
 .store:
     mov [rbx + NI_SPEED], eax
     mov dword [rbx + NI_DUPLEX], 0
+    ret
+
+; rtw_leave: before a restart or power-off: the network left (the access
+; point told, so it holds no association for the next system to trip
+; on), the card off. Preserves all.
+rtw_leave:
+    cmp byte [rtw_up], 0
+    je .out
+    push rax
+    push rsi
+    push r12
+    mov r12, [rtw_mmio]
+    cmp byte [rtw_js], JS_LINKED
+    jne .off
+    call rtw_deauth
+.off:
+    mov byte [rtw_up], 0
+    mov byte [rtw_keys], 0
+    mov word [r12 + 0xAA], 0x8000       ; to Bluetooth: Wi-Fi off
+    call rtw_power_off
+    pop r12
+    pop rsi
+    pop rax
+.out:
     ret
 
 ; send(RSI = an Ethernet frame, ECX = its length) -> CF if it could not go
@@ -246,4 +291,5 @@ alignb 8
 rtw_nic:        resq 1
 rtw_tx_pn:      resq 1                  ; the next CCMP packet number
 rtw_rejoin_at:  resq 1                  ; TSC
+rtw_rejoin_s:   resd 1                  ; seconds until the next try
 rtw_up:         resb 1                  ; the radio is on, for a network

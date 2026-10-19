@@ -6,7 +6,8 @@ went out unprotected), messages it must ignore (a wrong MIC, a stale replay
 counter, another handshake's ANonce, a repeat), the group key handshake
 (answered protected), and data frames through rtw_rx_data (CCMP with the
 pairwise and group keys, refused when tampered with, keyed wrong or sent
-in the clear). Run by run.py."""
+in the clear, or replayed: a packet number not past the last one, or the
+group key's RSC). Run by run.py."""
 import ctypes
 import hashlib
 import hmac
@@ -153,17 +154,26 @@ def run(k, rng, result, prf, aes_wrap, ccmp_seal):
         sa = rng.randbytes(6)
         payload = rng.randbytes(rng.randrange(0, 200))
         hdr = bytes([0x08, 0x42, 0, 0]) + spa + aa + sa + rng.randbytes(2)
-        pn = rng.randrange(1, 1 << 48)
+        pn = rng.randrange(2, 1 << 47)
         frame = ccmp_seal(tk, hdr, pn, 0, LLC_IP + payload)
         b = rx_data(frame)
         result(u("eth_n") == 1 and u("eth_off") == 32 and u("eth_len") == 8 + len(payload)
                and k.read(b + 32, 8 + len(payload)) == LLC_IP + payload,
                f"case {case}: a unicast frame decrypted (pairwise key) and handed on")
+        rx_data(frame)
+        result(u("eth_n") == 0, f"case {case}: the same frame again refused (a replay)")
+        rx_data(ccmp_seal(tk, hdr, pn - 1, 0, LLC_IP + payload))
+        result(u("eth_n") == 0, f"case {case}: an older packet number refused")
+        rsc_pn = int.from_bytes(rsc[:6], "little")
         ghdr = bytes([0x08, 0x42, 0, 0]) + b"\xff" * 6 + aa + sa + rng.randbytes(2)
-        b = rx_data(ccmp_seal(gtk2, ghdr, pn, keyid2, LLC_IP + payload))
-        result(u("eth_n") == 1 and k.read(b + 32, 8 + len(payload)) == LLC_IP + payload,
+        rx_data(ccmp_seal(gtk2, ghdr, rsc_pn, keyid2, LLC_IP + payload))
+        result(u("eth_n") == 0, f"case {case}: a group frame at the key's RSC refused")
+        gpn = rsc_pn + rng.randrange(1, 1000)
+        b = rx_data(ccmp_seal(gtk2, ghdr, gpn, keyid2, LLC_IP + payload))
+        result(u("eth_n") == 1 and u("eth_off") == 32 and u("eth_len") == 8 + len(payload)
+               and k.read(b + 32, 8 + len(payload)) == LLC_IP + payload,
                f"case {case}: a group frame decrypted (group key) and handed on")
-        rx_data(ccmp_seal(gtk2, ghdr, pn, 1 + keyid2 % 3, LLC_IP + payload))
+        rx_data(ccmp_seal(gtk2, ghdr, gpn + 1, 1 + keyid2 % 3, LLC_IP + payload))
         result(u("eth_n") == 0, f"case {case}: a group frame under another key ID refused")
         bad = bytearray(frame)
         bad[24 + 8 + rng.randrange(8 + len(payload) + 8)] ^= 1

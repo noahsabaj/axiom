@@ -42,6 +42,7 @@ efi_reset:
     ret
 
 power_reboot:
+    call rtw_leave                      ; off the Wi-Fi network, first
     mov edi, EFI_RESET_COLD
     call efi_reset
     cli
@@ -73,6 +74,7 @@ power_reboot:
     jmp .hang
 
 power_off:
+    call rtw_leave
     mov edi, EFI_RESET_SHUTDOWN
     call efi_reset
     cli

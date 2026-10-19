@@ -49,8 +49,9 @@ rtw_wpa_reset:
 
 ; rtw_rx_data(RSI = a data frame from the access point, no FCS, ECX = its
 ; length, EBX = its header's): decrypted if protected (the pairwise key,
-; or the group key for a group address), then by its LLC/SNAP header:
-; EAPOL to rtw_eapol_rx, the rest to the network (rtw_rx_eth).
+; or the group key for a group address; its packet number must be past
+; the last one taken under that key, 12.5.3.4.4), then by its LLC/SNAP
+; header: EAPOL to rtw_eapol_rx, the rest to the network (rtw_rx_eth).
 ; Unprotected frames are taken only for EAPOL. Preserves all but RAX.
 rtw_rx_data:
     push rbx
@@ -60,6 +61,7 @@ rtw_rx_data:
     push rdi
     push r8
     push r9
+    push r10
     mov r9, rsi                         ; the header
     xor r8d, r8d                        ; protected?
     test byte [rsi + 1], 0x40
@@ -70,6 +72,7 @@ rtw_rx_data:
     cmp ecx, eax
     jb .out
     lea rdx, [rtw_tk]
+    lea r10, [rtw_rx_pn]
     test byte [rsi + 4], 1              ; to a group address
     jz .key
     mov al, [rsi + rbx + 3]             ; the CCMP header's key ID
@@ -77,6 +80,7 @@ rtw_rx_data:
     cmp al, [rtw_gtk_id]
     jne .failed
     lea rdx, [rtw_gtk]
+    lea r10, [rtw_rx_gpn]
 .key:
     mov rdi, rsi
     mov rsi, rdx
@@ -84,9 +88,16 @@ rtw_rx_data:
     mov ecx, ebx
     call ccmp_open
     jc .failed
+    mov ecx, eax                        ; the body's length
+    movzx edx, word [rdi + rbx]         ; its PN: PN0 PN1, then PN2-PN5
+    mov eax, [rdi + rbx + 4]
+    shl rax, 16
+    or rax, rdx
+    cmp rax, [r10]
+    jbe .replayed
+    mov [r10], rax
     inc dword [rtw_rx_dec]
     lea rsi, [rdi + rbx + 8]
-    mov ecx, eax
     inc r8d
     jmp .payload
 .plain:
@@ -116,9 +127,13 @@ rtw_rx_data:
 .locked:
     inc dword [rtw_rx_locked]
     jmp .out
+.replayed:
+    inc dword [rtw_rx_replay]
+    jmp .out
 .failed:
     inc dword [rtw_rx_undec]
 .out:
+    pop r10
     pop r9
     pop r8
     pop rdi
@@ -213,6 +228,9 @@ rtw_eapol_rx:
     jz .out
     call rtw_kd_gtk
     jc .no_gtk
+    mov rax, 0x0000FFFFFFFFFFFF         ; the group key's PNs start past its RSC
+    and rax, [rsi + EK_RSC]
+    mov [rtw_rx_gpn], rax
     mov rax, [rsi + EK_REPLAY]
     mov [rtw_replay], rax
     call rtw_ek_start                   ; message 4
@@ -224,6 +242,7 @@ rtw_eapol_rx:
     mov ecx, 16
     rep movsb
     mov qword [rtw_tx_pn], 1
+    mov qword [rtw_rx_pn], 0
     mov byte [rtw_keys], 1
     mov byte [rtw_hs], 2
     mov byte [rtw_js_got], 1
@@ -243,6 +262,9 @@ rtw_eapol_rx:
     jz .out
     call rtw_kd_gtk
     jc .no_gtk
+    mov rax, 0x0000FFFFFFFFFFFF         ; the group key's PNs start past its RSC
+    and rax, [rsi + EK_RSC]
+    mov [rtw_rx_gpn], rax
     mov rax, [rsi + EK_REPLAY]
     mov [rtw_replay], rax
     call rtw_ek_start                   ; its message 2
@@ -526,6 +548,9 @@ rtw_ptkd:       resb 12 + 64            ; the PRF's data
 rtw_mic:        resb 20
 alignb 8
 rtw_replay:     resq 1                  ; the last replay counter taken (as sent)
+rtw_rx_pn:      resq 1                  ; the last PN taken: pairwise key,
+rtw_rx_gpn:     resq 1                  ;   group key
+rtw_rx_replay:  resd 1
 rtw_rx_dec:     resd 1
 rtw_rx_undec:   resd 1
 rtw_rx_locked:  resd 1
