@@ -526,6 +526,20 @@ icon_system:
     dd IP_RRECT, 580, 230, 100, 550, 24, 0xFF64D2FF, 256
     dd IP_RRECT, 720, 400, 100, 380, 24, 0xFF30D158, 256
     dd IP_END
+icon_mandel:
+    dd IP_GRAD, 0xFF2456C8, 0xFF0B1A4A
+    dd IP_CIRCLE, 90, 140, 760, 0xFF5AB8FF, 60
+    dd IP_CIRCLE, 150, 200, 640, 0xFF8FD3FF, 70
+    dd IP_RRECT, 60, 494, 160, 12, 6, 0xFF8FD3FF, 220
+    dd IP_CIRCLE, 140, 465, 70, 0xFF050510, 256
+    dd IP_CIRCLE, 200, 390, 220, 0xFF050510, 256
+    dd IP_CIRCLE, 370, 250, 500, 0xFF050510, 256
+    dd IP_CIRCLE, 520, 160, 130, 0xFF050510, 256
+    dd IP_CIRCLE, 520, 710, 130, 0xFF050510, 256
+    dd IP_CIRCLE, 760, 330, 90, 0xFF050510, 256
+    dd IP_CIRCLE, 760, 580, 90, 0xFF050510, 256
+    dd IP_POLY, 3, 0xFF2A5BC0, 256, 880, 440, 880, 560, 800, 500
+    dd IP_END
 
 ; the pointer: its edge and its fill, hundredths of a point from the tip
 cursor_edge:

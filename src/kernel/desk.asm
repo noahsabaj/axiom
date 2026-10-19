@@ -61,6 +61,7 @@ WF_RESIZE       equ 1 << 2              ; it may be resized
 WF_CLOSING      equ 1 << 3              ; it goes at the next desk_service
 WF_PROGRAM      equ 1 << 4              ; a program's (its pixels are not ours)
 WF_ZOOMED       equ 1 << 5              ; it fills the screen (WN_Z* is where it was)
+WF_AWAY         equ 1 << 6              ; put away: not on the screen, not in the dock
 
 OP_PAINT        equ 0                   ; RBX = window: draw the whole client
 OP_KEY          equ 8                   ; RBX, EAX = key code
@@ -93,7 +94,7 @@ DRAG_MOVE       equ 1
 DRAG_SIZE       equ 2
 
 ; the dock's items
-DOCK_APPS       equ 7
+DOCK_APPS       equ 8
 DOCK_MAX        equ DOCK_APPS + 2 * DESK_MAX
 DI_KIND         equ 0                   ; dword DK_*
 DI_APP          equ 4                   ; dword: which app (DK_APP)
@@ -109,6 +110,7 @@ DK_MIN          equ 2                   ; a window minimised
 
 APP_TERMINAL    equ 0
 APP_SYSTEM      equ 6
+APP_MANDEL      equ 7
 
 DOUBLE_MS       equ 400                 ; two clicks this close are a double click
 
@@ -904,6 +906,7 @@ win_focus:
     test dword [rdi + WN_FLAGS], WF_SHOWN
     jnz .shown
     or dword [rdi + WN_FLAGS], WF_SHOWN
+    and dword [rdi + WN_FLAGS], ~WF_AWAY
     push rdi
     lea rdi, [rdi + WN_THUMB]           ; out of the dock
     call sf_free
@@ -967,6 +970,30 @@ win_minimise:
 .bar:
     call desk_bar_damage
 .out:
+    ret
+
+; win_put_away(RDI = window): off the screen and out of the dock, until its
+; app in the dock brings it back (win_focus). The built-in windows start so,
+; and their close buttons do it. Preserves all.
+win_put_away:
+    test dword [rdi + WN_FLAGS], WF_SHOWN
+    jz .away
+    call win_damage_whole
+.away:
+    and dword [rdi + WN_FLAGS], ~WF_SHOWN
+    or dword [rdi + WN_FLAGS], WF_AWAY
+    mov byte [dock_dirty], 1
+    cmp rdi, [desk_focus]
+    jne .bar
+    push rax
+    push rdi
+    call desk_last_focused
+    mov rdi, rax
+    call win_focus
+    pop rdi
+    pop rax
+.bar:
+    call desk_bar_damage
     ret
 
 ; desk_top_shown -> RAX = the topmost window shown, or 0. Preserves others.
@@ -2396,6 +2423,8 @@ win_app:
     je .system
     cmp rdi, [cpu_win]
     je .system
+    cmp rdi, [demo_win]
+    je .mandel
     xor ecx, ecx
 .each:
     cmp ecx, DOCK_APPS
@@ -2421,6 +2450,9 @@ win_app:
     jmp .out
 .system:
     mov eax, APP_SYSTEM
+    jmp .out
+.mandel:
+    mov eax, APP_MANDEL
     jmp .out
 .none:
     mov eax, -1
@@ -2502,7 +2534,7 @@ dock_layout:
     mov rdi, [rax + rbx * 8]
     test rdi, rdi
     jz .extra_next
-    test dword [rdi + WN_FLAGS], WF_CLOSING
+    test dword [rdi + WN_FLAGS], WF_CLOSING | WF_AWAY
     jnz .extra_next
     call win_app
     test eax, eax
@@ -2553,7 +2585,7 @@ dock_layout:
     mov rdi, [rax + rbx * 8]
     test rdi, rdi
     jz .min_next
-    test dword [rdi + WN_FLAGS], WF_SHOWN | WF_CLOSING
+    test dword [rdi + WN_FLAGS], WF_SHOWN | WF_CLOSING | WF_AWAY
     jnz .min_next
     cmp qword [rdi + WN_THUMB + SF_PTR], 0
     jne .has_thumb
@@ -2620,7 +2652,8 @@ dock_layout:
     pop rbx
     ret
 
-; dock_running(EDI = an app) -> RAX = 1 if it has a window. Preserves others.
+; dock_running(EDI = an app) -> RAX = 1 if it has a window (not put away).
+; Preserves others.
 dock_running:
     push rcx
     push rdx
@@ -2632,7 +2665,7 @@ dock_running:
     mov rdi, [rax + rcx * 8]
     test rdi, rdi
     jz .next
-    test dword [rdi + WN_FLAGS], WF_CLOSING
+    test dword [rdi + WN_FLAGS], WF_CLOSING | WF_AWAY
     jnz .next
     call win_app
     cmp eax, edx
@@ -2886,7 +2919,9 @@ dock_click:
     mov edi, [rbx + DI_APP]
     cmp edi, APP_TERMINAL
     je .terminal
-    cmp edi, APP_SYSTEM
+    cmp edi, APP_SYSTEM                 ; built in: their windows are always
+    je .out                             ; there, put away or not
+    cmp edi, APP_MANDEL
     je .out
     imul rax, rdi, DA_SIZE
     lea rcx, [dock_apps]
@@ -3509,12 +3544,22 @@ desk_wheel:
     pop rbx
     ret
 
-; desk_key(EAX = key code): to the window with the keys
+; desk_key(EAX = key code): to the window with the keys; with none, to the
+; first shell, brought forward
 desk_key:
     push rbx
     mov rbx, [desk_focus]
     test rbx, rbx
+    jnz .to
+    mov rbx, [con_first]
+    test rbx, rbx
     jz .out
+    mov rbx, [rbx + TW_WIN]
+    test rbx, rbx
+    jz .out
+    mov rdi, rbx
+    call win_focus
+.to:
     mov rdx, [rbx + WN_OPS]
     mov rdx, [rdx + OP_KEY]
     test rdx, rdx
@@ -3616,7 +3661,12 @@ cmd_win:
     KLOG "desk: '%s' closes", rax
     jmp .out
 .asked:
+    test dword [rbx + WN_FLAGS], WF_AWAY
+    jnz .put_away
     KLOG "desk: '%s' is asked to close", rax
+    jmp .out
+.put_away:
+    KLOG "desk: '%s' is put away (its app in the dock brings it back)", rax
     jmp .out
 .said:
     mov rdi, rbx
@@ -3684,6 +3734,9 @@ win_say:
     test dword [rbx + WN_FLAGS], WF_SHOWN
     jnz .state
     lea rdx, [str_win_hidden]
+    test dword [rbx + WN_FLAGS], WF_AWAY
+    jz .state
+    lea rdx, [str_win_away]
 .state:
     cmp rbx, [desk_focus]
     jne .say
@@ -3713,6 +3766,7 @@ str_win_zoom:   db 'zoom', 0
 str_win_close:  db 'close', 0
 str_win_shown:  db 'shown', 0
 str_win_hidden: db 'minimised', 0
+str_win_away:   db 'away', 0
 str_win_focused: db 'focused', 0
 str_finder:     db 'Axiom', 0
 str_empty:      db 0
@@ -3739,6 +3793,7 @@ dock_apps:
     dq str_app_paint, str_prog_paint, icon_paint
     dq str_app_settings, str_prog_settings, icon_settings
     dq str_app_system, 0, icon_system
+    dq str_app_mandel, 0, icon_mandel
 str_app_terminal: db 'Terminal', 0
 str_app_files:  db 'Files', 0
 str_app_notes:  db 'Notes', 0

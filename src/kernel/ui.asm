@@ -200,6 +200,11 @@ ui_init:
     sub rcx, [fr_b]
     call term_open
     mov [con_first], rax
+    test rax, rax                       ; put away: a clean desktop, until
+    jz .no_first                        ; the dock or a key brings it
+    mov rdi, [rax + TW_WIN]
+    call win_put_away
+.no_first:
     pop rbx
     ret
 
@@ -263,10 +268,11 @@ ui_ready:
     mov rdx, [left_w]
     mov rcx, [sys_h]
     call ui_client
-    mov r10d, WF_RESIZE
+    mov r10d, WF_RESIZE | WF_CLOSE
     lea r11, [str_app_system]
     call win_new
     mov [sys_win], rax
+    call .away
     lea rdi, [cpu_ops]
     lea rsi, [str_t_processors]
     mov r8, [right_x]
@@ -274,10 +280,11 @@ ui_ready:
     mov rdx, [right_w]
     mov rcx, [cores_h]
     call ui_client
-    mov r10d, WF_RESIZE
+    mov r10d, WF_RESIZE | WF_CLOSE
     lea r11, [str_app_system]
     call win_new
     mov [cpu_win], rax
+    call .away
     lea rdi, [demo_base]                ; the demo's title
     cmp byte [mandel_ok], 0
     je .no_avx
@@ -294,13 +301,28 @@ ui_ready:
     mov rdx, [right_w]
     mov rcx, [demo_h]
     call ui_client
-    mov r10d, WF_RESIZE
+    mov r10d, WF_RESIZE | WF_CLOSE
     lea r11, [str_app_mandel]
     call win_new
     mov [demo_win], rax
+    call .away
     pop r12
     pop rbx
     ret
+; RAX = a window made, or 0: put away until the dock brings it
+.away:
+    test rax, rax
+    jz .none
+    mov rdi, rax
+    call win_put_away
+.none:
+    ret
+
+; ui_put_away (OP_ASK, RBX = window): a built-in window's close button puts
+; it away; the dock brings it back
+ui_put_away:
+    mov rdi, rbx
+    jmp win_put_away
 
 ; -----------------------------------------------------------------------------
 ;  The demo's window
@@ -1176,9 +1198,9 @@ str_l_network:      db 'Network', 0
 str_l_isa:          db 'ISA', 0
 str_l_boot:         db 'Boot', 0
 align 8
-sys_ops:        dq sys_paint, 0, 0, 0, 0, 0, 0
-cpu_ops:        dq cpu_paint, 0, 0, 0, 0, 0, 0
-demo_ops:       dq demo_paint, 0, demo_click, demo_wheel, 0, 0, 0
+sys_ops:        dq sys_paint, 0, 0, 0, 0, 0, ui_put_away
+cpu_ops:        dq cpu_paint, 0, 0, 0, 0, 0, ui_put_away
+demo_ops:       dq demo_paint, 0, demo_click, demo_wheel, 0, 0, ui_put_away
 info_labels:
     dq str_l_machine, str_l_firmware, str_l_cpu, str_l_cores, str_l_clocks
     dq str_l_memory, str_l_display, str_l_acpi, str_l_pci, str_l_storage

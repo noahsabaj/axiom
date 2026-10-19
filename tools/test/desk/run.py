@@ -6,8 +6,10 @@ and mouse.
 
 Boots build/esp from a USB stick, with a USB tablet (an absolute pointer) and checks, from the
 serial log ('win' lists the windows) and from screenshots:
-  - at the start: four windows (shell 1 with the keys, System, Processors,
-    the Mandelbrot), the menu bar across the top, the dock at the bottom;
+  - at the start: a clean desktop, its four windows put away (shell 1,
+    System, Processors, the Mandelbrot); a key brings shell 1 forward with
+    the keys, System and the Mandelbrot come from the dock; the menu bar
+    across the top, the dock at the bottom;
   - 'win move' and its clamps (a title bar stays on the screen, under the
     bar), 'win size', 'win raise', 'win min', 'win zoom' and back;
   - a window dragged by its title bar, resized from its corner;
@@ -16,7 +18,8 @@ serial log ('win' lists the windows) and from screenshots:
     shell 2 closed by its close button; the 'shell' command opens another,
     'win close' closes it;
   - System minimised by its title bar button into the dock, shown again from
-    there, and not closed by 'win close';
+    there; its close button puts it away, the dock brings it back; 'win
+    close' puts it away too;
   - the wheel over a shell scrolls it back, a key there brings it home;
   - the Mandelbrot held by a right click (its frame count stays);
   - on the screen: the bar, and the desktop where System was;
@@ -52,7 +55,10 @@ TERMINAL_ICON = (0x23, 0x23, 0x26)              # Terminal's icon, under its pro
 # client's size
 SX, SY = 100 + 400, 200 + 600
 SW, SH = 600 + 100, 300 + 50
-SHELL1 = (400, 1300)                            # a point in shell 1, once moved
+SHELL1 = (400, 1300)                            # a point in shell 1, at the start and
+                                                # once moved
+APPS = 8                                        # the dock's apps
+SYSTEM, MANDEL = 6, 7                           # two of them
 SHELL4 = (1000, 800)                            # in the shell opened for paint
 PX, PY = 1400, 200                              # paint's frame, once moved
 PW, PH = 600, 400
@@ -124,6 +130,11 @@ def script():
     gx, gy = 100 + 400 + 600 - 3, 200 + 600 + TITLE + 300 - 3   # its bottom right corner
     return [
         "until log: kept in", "wait 1.5",
+        "shot build/test/desk/clean.png",
+        *win("first key"),
+        f"abs {at(*dock(SYSTEM, APPS))} left", "wait 0.5",
+        f"abs {at(*dock(MANDEL, APPS))} left", "wait 0.5",
+        f"abs {at(*SHELL1)} left", "wait 0.3",
         *win("start"),
         "shot build/test/desk/start.png",
         "type win move 2 0 0\\n", "wait 0.3", *win("clamp low"),
@@ -159,7 +170,14 @@ def script():
         "shot build/test/desk/minimised.png",
         f"abs {at(*dock(8, 9, 1))} left", "wait 0.5",
         f"abs {at(*SHELL1)} left", "wait 0.3", *win("restored"),
-        "type win close 2\\n", "wait 0.5",
+        # its close button puts it away; the dock brings it back
+        f"abs {at(*button(SX, SY, CLOSE))} left", "wait 0.5", *win("put away"),
+        "shot build/test/desk/away.png",
+        f"abs {at(*dock(SYSTEM, APPS))} left", "wait 0.5",
+        f"abs {at(*SHELL1)} left", "wait 0.3", *win("back"),
+        "type win close 2\\n", "wait 0.5", *win("win close"),
+        f"abs {at(*dock(SYSTEM, APPS))} left", "wait 0.5",
+        f"abs {at(*SHELL1)} left", "wait 0.3",
         # the Mandelbrot held by a right click: its frame count stays
         f"abs {at(1000, 400)} right", "wait 0.5",
         f"abs {at(*SHELL1)} left", "wait 0.3",
@@ -212,6 +230,16 @@ def near(a, b, by=2):
 
 
 def check(log, err):
+    k = listing(log, "first key")
+    result(list(k) == ["shell 1", "System", "Processors", "Mandelbrot"],
+           f"its windows: {', '.join(k) or 'none'}")
+    result(k.get("shell 1", {}).get("state") == "focused", "a key brought shell 1, with the keys")
+    result(all(w["state"] == "away" for t, w in k.items() if t != "shell 1"),
+           "the others put away")
+    for what, (x, y) in (("shell 1", SHELL1), ("System", (400, 300)),
+                         ("the Mandelbrot", (1600, 900))):
+        p = pixel("clean.png", x, y)
+        result(p is not None and p != WINDOW, f"at the start, no {what} ({p})")
     s = listing(log, "start")
     result(list(s) == ["shell 1", "System", "Processors", "Mandelbrot"],
            f"at the start: {', '.join(s) or 'no windows'}")
@@ -268,7 +296,16 @@ def check(log, err):
     m = listing(log, "restored").get("System", {})
     result(m.get("state") in ("focused", "shown") and near(m.get("x", 0), SX),
            "its picture in the dock showed it again, where it was")
-    result("desk: 'System' can be minimised, not closed" in log, "win close 2: not closed")
+    m = listing(log, "put away").get("System", {})
+    result(m.get("state") == "away", "its close button put it away: " + str(m.get("state")))
+    p = pixel("away.png", SX + 4, SY + TITLE + 4)
+    result(p is not None and p != WINDOW, f"the desktop where it was ({p})")
+    m = listing(log, "back").get("System", {})
+    result(m.get("state") in ("focused", "shown") and near(m.get("x", 0), SX),
+           "System in the dock brought it back, where it was")
+    m = listing(log, "win close").get("System", {})
+    result(m.get("state") == "away" and "desk: 'System' is put away" in log,
+           "win close 2: put away, not closed")
 
     f1 = re.search(r"frame (\d+)", listing(log, "held").get("Mandelbrot", {}).get("title", ""))
     f2 = re.search(r"frame (\d+)", listing(log, "still held").get("Mandelbrot", {})
@@ -309,7 +346,7 @@ def check(log, err):
     result(re.search(r"^\s+desktop\s+\d+", log, re.M) is not None, "'objects': the desktop")
 
     x, y = dock(0, 8)
-    p = pixel("start.png", x + 15 * PT, y + 10 * PT)
+    p = pixel("clean.png", x + 15 * PT, y + 10 * PT)
     result(p is not None and all(near(a, b, 8) for a, b in zip(p, TERMINAL_ICON)),
            f"Terminal's icon in the dock ({p})")
     p, q = pixel("two.png", SX + 4, SY + TITLE + 4), pixel("minimised.png", SX + 4, SY + TITLE + 4)
