@@ -14,6 +14,8 @@
 ;  worked on as four floats in an XMM register (B, G, R, 0); each pixel is
 ;  dithered as it is stored. The rows above the shore are made first, then
 ;  the lake, which reads them back for its mirror, then the pines over both.
+;  The rows are shared out over every CPU (job_run): each its own row at a
+;  time, keeping its sums aside in a scratch of its own.
 ; =============================================================================
 
 ; a range of mountains
@@ -75,11 +77,79 @@ WL_PINES           equ 8
     addps %1, xmm7
 %endmacro
 
+; each CPU's scratch while it makes rows (wl_scratch; R15 points at its
+; own): what a pixel's or a row's sums keep aside. The names below are
+; that scratch's.
+WS_WATER         equ 0                   ; this row's water, 4 floats
+WS_X             equ 16                  ; the pixel's column
+WS_MIRROR        equ 24                  ; the row this one mirrors
+WS_T             equ 32                  ; floats from here
+WS_F             equ 36
+WS_D             equ 40
+WS_DV            equ 44
+WS_CV            equ 48
+WS_DEP           equ 52
+WS_BELOW         equ 56
+WS_UW            equ 60
+WS_LIT           equ 64
+WS_FACE          equ 68
+WS_MIXW          equ 72
+WS_WOBK          equ 76
+WS_WY            equ 80
+WS_RY            equ 84
+WS_GLK           equ 88
+WS_SIZE          equ 128                 ; two cache lines: none shared
+%define wl_water    r15 + WS_WATER
+%define wl_x        r15 + WS_X
+%define wl_mirror   r15 + WS_MIRROR
+%define wl_t        r15 + WS_T
+%define wl_f        r15 + WS_F
+%define wl_d        r15 + WS_D
+%define wl_dv       r15 + WS_DV
+%define wl_cv       r15 + WS_CV
+%define wl_dep      r15 + WS_DEP
+%define wl_below    r15 + WS_BELOW
+%define wl_uw       r15 + WS_UW
+%define wl_lit      r15 + WS_LIT
+%define wl_face     r15 + WS_FACE
+%define wl_mixw     r15 + WS_MIXW
+%define wl_wobk     r15 + WS_WOBK
+%define wl_wy       r15 + WS_WY
+%define wl_ry       r15 + WS_RY
+%define wl_glk      r15 + WS_GLK
+
+; a row's job, on whichever CPU took it: RBX, RBP, R12-R15 kept (job_worker
+; keeps its own in some); R15 this CPU's scratch, RBP the look
+%macro WL_JOB_IN 0
+    push rbx
+    push rbp
+    push r12
+    push r13
+    push r14
+    push r15
+    mov rax, [gs:PC_INDEX]
+    imul rax, rax, WS_SIZE
+    lea r15, [wl_scratch]
+    add r15, rax
+    mov rbp, [wl_look]
+%endmacro
+
+%macro WL_JOB_OUT 0
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbp
+    pop rbx
+    ret
+%endmacro
+
 section .text
 
 ; -----------------------------------------------------------------------------
 ;  wall_make: the wallpaper, into wall_sf (the screen's size). Again only if
-;  the screen or the look changed since it was made.
+;  the screen or the look changed since it was made. From the thread 'main'
+;  (the desktop's): it shares the rows out with job_run.
 ; -----------------------------------------------------------------------------
 wall_make:
     push rbx
@@ -124,11 +194,21 @@ wall_make:
     jne .look
     lea rbp, [wall_day]
 .look:
+    mov [wl_look], rbp
+    lea r15, [wl_scratch]               ; a scratch, for what is made here
     call wl_setup
     call wl_columns
-    call wl_upper
-    call wl_lake
-    call wl_pines
+    lea rdi, [wl_upper_row]             ; the rows above the shore, on every
+    mov rsi, [wl_hz_y]                  ; CPU
+    xor edx, edx
+    call job_run
+    lea rdi, [wl_lake_row]              ; then the lake's, which mirror them
+    mov rsi, [wl_h]
+    sub rsi, [wl_hz_y]
+    xor edx, edx
+    call job_run
+    lea r15, [wl_scratch]
+    call wl_pines                       ; and the pines, over both
     mov rdi, [wl_cols]
     call vm_free
     mov rax, [wl_want]
@@ -346,12 +426,11 @@ wl_columns:
     lea rdx, [rdx + rax * 4]
     ret
 
-; wl_upper: the rows above the shore: the sky, the ranges over it
-wl_upper:
-    xor r13d, r13d
-.row:
-    cmp r13, [wl_hz_y]
-    jae .done
+; wl_upper_row(RDI = a row above the shore): a job: the sky, the ranges
+; over it
+wl_upper_row:
+    WL_JOB_IN
+    mov r13, rdi
     cvtsi2ss xmm15, r13
     mulss xmm15, [wl_invh]
     mov r14, r13
@@ -360,7 +439,7 @@ wl_upper:
     xor r12d, r12d
 .px:
     cmp r12, [wl_w]
-    jae .next
+    jae .done
     mov [wl_x], r12
     cvtsi2ss xmm14, r12
     mulss xmm14, [wl_invw]
@@ -396,11 +475,8 @@ wl_upper:
     call wl_store
     inc r12
     jmp .px
-.next:
-    inc r13
-    jmp .row
 .done:
-    ret
+    WL_JOB_OUT
 
 ; wl_cover(ESI = a range) -> XMM0 = how much of the pixel it covers, before
 ; clamping to 0..1. Clobbers RAX, RDX.
@@ -661,13 +737,13 @@ wl_shade:
     pop rbx
     ret
 
-; wl_lake: the rows from the shore down: the rows above, mirrored and
-; wobbling, toward the water's color farther down, with ripples
-wl_lake:
-    mov r13, [wl_hz_y]
-.row:
-    cmp r13, [wl_h]
-    jae .done
+; wl_lake_row(RDI = a row of the lake, 0 at the shore): a job: the rows
+; above, mirrored and wobbling, toward the water's color farther down, with
+; ripples
+wl_lake_row:
+    WL_JOB_IN
+    mov r13, rdi
+    add r13, [wl_hz_y]
     cvtsi2ss xmm15, r13
     mulss xmm15, [wl_invh]
     movss xmm0, xmm15                   ; d: 0 at the far shore, 1 at the
@@ -729,7 +805,7 @@ wl_lake:
     xor r12d, r12d
 .px:
     cmp r12, [wl_w]
-    jae .next
+    jae .done
     cvtsi2ss xmm14, r12
     mulss xmm14, [wl_invw]
     movss xmm0, xmm14                   ; the mirror, wobbling
@@ -784,11 +860,8 @@ wl_lake:
     call wl_store
     inc r12
     jmp .px
-.next:
-    inc r13
-    jmp .row
 .done:
-    ret
+    WL_JOB_OUT
 
 ; wl_pines: each pine over what is there: tiers of branches widening down
 ; to its foot, their edges ragged, and a trunk
@@ -1212,7 +1285,7 @@ section .bss
 alignb 16
 wl_pal:         resb 16 * WLC_COUNT     ; this look's colors, as floats
 wl_shades:      resb 16 * WL_PINES         ; each pine's
-wl_water:       resb 16                 ; this row's water
+wl_scratch:     resb WS_SIZE * MAX_CPUS ; each CPU's, making rows
 alignb 8
 wall_sf:        resb SF_SIZE
 wl_made:        resq 1                  ; the screen and look it was made for
@@ -1221,10 +1294,9 @@ wl_cols:        resq 1                  ; tops, lights, edges; then the sky's ro
 wl_skyrows:     resq 1
 wl_w:           resq 1
 wl_h:           resq 1
-wl_x:           resq 1
 wl_hz_y:        resq 1                  ; the lake's first row
 wl_shore:       resq 1                  ; the shore's line, rows
-wl_mirror:      resq 1                  ; the row this one mirrors
+wl_look:        resq 1                  ; the look being made
 wl_pine:        resq 1
 wl_x0:          resq 1
 wl_x1:          resq 1
@@ -1237,24 +1309,28 @@ wl_cell:        resd 1
 wl_inv_cell:    resd 1
 wl_jag:         resd 1
 wl_jag_reach:   resd 1
-wl_t:           resd 1
-wl_f:           resd 1
-wl_d:           resd 1
-wl_dv:          resd 1
-wl_cv:          resd 1
-wl_dep:         resd 1
-wl_below:       resd 1
-wl_uw:          resd 1
-wl_lit:         resd 1
-wl_face:        resd 1
-wl_mixw:        resd 1
-wl_wobk:        resd 1
-wl_wy:          resd 1
-wl_ry:          resd 1
-wl_glk:         resd 1
 wl_xc:          resd 1
 wl_dx:          resd 1
 wl_half:        resd 1
 wl_trunk:       resd 1
 wl_reach:       resd 1
 wl_tip:         resd 1
+
+%undef wl_water
+%undef wl_x
+%undef wl_mirror
+%undef wl_t
+%undef wl_f
+%undef wl_d
+%undef wl_dv
+%undef wl_cv
+%undef wl_dep
+%undef wl_below
+%undef wl_uw
+%undef wl_lit
+%undef wl_face
+%undef wl_mixw
+%undef wl_wobk
+%undef wl_wy
+%undef wl_ry
+%undef wl_glk
