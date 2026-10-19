@@ -413,10 +413,10 @@ ui_system_info:
 
 .clocks:
     INFO 4
+    call power_bias_name                ; 0 without HWP
+    test rax, rax
+    jnz .hwp_done
     lea rax, [str_off]
-    cmp byte [cpu_hwp_on], 0
-    je .hwp_done
-    lea rax, [str_hwp_on]
 .hwp_done:
     lea rdx, [str_xapic]
     cmp byte [lapic_x2], 0
@@ -1156,7 +1156,6 @@ str_t_system:       db 'System', 0
 str_t_processors:   db 'Processors', 0
 str_app_mandel:     db 'Mandelbrot', 0
 str_off:            db 'off', 0
-str_hwp_on:         db 'on, EPP 0 (performance)', 0
 str_x2apic:         db 'x2APIC', 0
 str_xapic:          db 'xAPIC', 0
 str_none:           db 'none found', 0

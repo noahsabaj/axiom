@@ -59,6 +59,8 @@ PC_USER_RSP     equ 448                 ; its RSP in ring 3, on the way in
 PC_CR3          equ 456                 ; the page tables loaded here, 0 = not known
 PC_FSBASE       equ 464                 ; the FS base loaded here (TH_FSBASE)
 PC_UGSBASE      equ 472                 ; ring 3's GS base loaded here (TH_GSBASE)
+PC_TSC_LAST     equ 480                 ; TSC at the last telemetry sample
+PC_C0           equ 488                 ; thousandths of the time since then in C0
 PC_SIZE         equ 512
 
 CPU_KIND_UNKNOWN equ 0
@@ -657,6 +659,18 @@ MSR_PKG_ENERGY  equ 0x611
 MSR_PM_ENABLE   equ 0x770
 MSR_HWP_CAPS    equ 0x771
 MSR_HWP_REQUEST equ 0x774
+MSR_PKG_C2_RES  equ 0x60D               ; package C-state residency, at the
+MSR_PKG_C3_RES  equ 0x3F8               ;   TSC's rate
+MSR_PKG_C6_RES  equ 0x3F9
+MSR_PKG_C7_RES  equ 0x3FA
+MSR_PKG_C8_RES  equ 0x630
+MSR_PKG_C9_RES  equ 0x631
+MSR_PKG_C10_RES equ 0x632
+MSR_PKG_THERM   equ 0x1B1
+
+EPP_PERFORMANCE equ 0                   ; HWP energy-performance preferences
+EPP_BALANCED    equ 128
+EPP_SAVING      equ 192
 MSR_EFER        equ 0xC0000080
 MSR_STAR        equ 0xC0000081
 MSR_LSTAR       equ 0xC0000082

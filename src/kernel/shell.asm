@@ -1988,6 +1988,7 @@ commands:
     THING   'theme',    themes_actions, 'how the desktop looks: light or dark, its accent, its scale'
     COMMAND 'info',     cmd_info,     'what this machine is'
     VERB    'cpus',     cmd_cpus,     'each logical CPU: kind, core, clock, heat, work'
+    THING   'power',    power_actions, 'what the processor draws and how it rests; how idle CPUs sleep; its bias'
     THING   'mem',      mem_actions,  'memory: what uses it, by firmware type, what an address is; a self-test'
     THING   'threads',  threads_actions, 'every thread; each CPU; a self-test of the scheduler; load to watch'
     THING   'tasks',    tasks_actions, 'every task: its threads and handles; one stopped'

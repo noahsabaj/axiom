@@ -1886,8 +1886,7 @@ sched_idle_loop:
     jnz .run
     cmp qword [zombies], 0
     jne .reap
-    sti                                 ; STI's shadow makes STI; HLT atomic
-    hlt
+    call cpu_idle                       ; STI; HLT or STI; MWAIT, atomic
     jmp sched_idle_loop
 .run:
     lea rdi, [r12 + PC_RQ_LOCK]

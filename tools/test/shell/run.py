@@ -232,6 +232,20 @@ STEPS = [
                             not r["use"].split()[1].startswith(("[", "<")) else ""
                             for r in table(l)] == ["", "kinds", "at", "test"],
      "help mem: its actions"),
+    ("help power", lambda l: [r["use"].split()[1] if len(r["use"].split()) > 1 and
+                              not r["use"].split()[1].startswith(("[", "<")) else ""
+                              for r in table(l)] == ["", "idle", "bias"],
+     "help power: its actions"),
+    ("power", lambda l: {"idle", "pc2", "pc10"} <= set(record(l)),
+     "power: one record, a second's measure"),
+    ("power idle light", lambda l: record(l).get("idle") == "HLT", "power idle light: HLT"),
+    ("power idle deep", lambda l: record(l).get("idle", "HLT") != "HLT" or
+     said("power: no deep idle here")(l), "power idle deep: MWAIT, where there is one"),
+    ("power idle nonsense", said("usage: power idle <deep|light>"),
+     "power idle: deep or light only"),
+    ("power bias saving", lambda l: record(l).get("bias") == "saving" or
+     said("power: this CPU's speed is not under HWP")(l), "power bias saving"),
+    ("power bias nonsense", said("usage: power bias"), "power bias: three names only"),
     ("files remove a.txt list.json", lambda l: l == ["removed 2 of 2"], "files remove two"),
 ]
 
