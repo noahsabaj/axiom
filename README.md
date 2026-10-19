@@ -448,6 +448,37 @@ panic saves the log and restarts too; a hang ends in the watchdog's reset.
 `harness` in the shell shows a run and the variables; `tools/test/harness`
 runs the whole round in QEMU.
 
+### One of fleet's nodes
+
+Axiom can be one of fleet's nodes itself, a self-managed one (fleet's
+`docs/protocol.md`, section 7): `fleet` (sdk/rust/fleet) answers fleet's
+coordinator on port 47950, over the kernel's TLS 1.3, so a project can be
+pushed to it and its programs run there as jobs:
+
+```
+fleet add axiom-1 --self-managed --address 192.168.1.199 --os axiom --out DIR
+                                  # on the coordinator: DIR's node.json,
+                                  # cert.pem and key.pem go to /Home/fleet
+fleet                             # in Axiom's shell
+fleet run --on axiom-1 -- hello one two     # the project pushed, run there, its log
+```
+
+It answers the hello (each client's token checked against the SHA-256
+node.json keeps, from the networks it allows), `ping`, `info`, the
+transfers (`manifest`, `put`, `list`, `get`, raw: no zlib, no partial
+copies) and jobs (`start`, `jobs`, `log`, `stop`); anything else is an
+unknown operation, as fleet expects. A job's argv is a program and its
+words (none with a space; Axiom splits a command on spaces), or a path in
+the project to an `.AXE` pushed there. It runs as a child task of `fleet`,
+given its project's folder and the network; what it prints is its log
+(`SYS_SPAWN`'s console channel), and its `--timeout` and `--idle-timeout`
+end it. A FAT keeps a file's time to the second, so each project keeps its
+pushed files' times in `.fleet/files.json`, and a push of what is there
+already sends nothing. A job still running when `fleet` last ended is
+`lost`. Files are 16 MiB at most, as Axiom reads and writes them whole.
+`tools/test/fleet` runs it in QEMU against a client speaking fleet's wire,
+over two boots.
+
 ## Layout
 
 ```
@@ -455,7 +486,7 @@ src/boot/uefi.asm       the loader: a hand-built PE32+ UEFI application
 src/kernel/*.asm        the kernel, one flat image at 0xFFFFFFFF80000000
 src/user/               programs for ring 3 (axe.inc: their header and runtime)
 src/include/            structures shared by the two
-sdk/rust/               programs in Rust: the axiom crate, the target, four programs
+sdk/rust/               programs in Rust: the axiom crate, the target, five programs
 tools/rust.py           build them; tools/mkaxe.py turns each into an .AXE
 sdk/masm/               programs in MASM: axiom.inc (made from defs.inc), mhello
 tools/masm.py           build them with ml64 and link.exe, then tools/mkaxe.py
@@ -504,7 +535,9 @@ tools/test/             host-side tests for self-contained modules (tls: the
                         streams, judged from the WAV file QEMU's codec
                         writes; harness: test runs as hp-1 has them,
                         across boots on one store of firmware variables,
-                        to the watchdog's reset); all.py runs them
+                        to the watchdog's reset; fleet: Axiom as one of
+                        fleet's nodes, a client here pushing to it and
+                        running jobs, across two boots); all.py runs them
                         all at once, and qemu.py boots side by side
 tools/hw/hp1.py         test runs on hp-1, through fleet (hp1_node.py runs
                         there, as root)

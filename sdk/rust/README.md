@@ -13,9 +13,11 @@ sdk/rust/
   demo/               rdemo: std; a window, drawn each frame, and its events
   tone/               rtone: no std; a sine through a stream of sound
   std/                rstd: std's threads, locks, thread_local!, time, files
+  fleet/              fleet: this computer as one of fleet's nodes (README.md)
 tools/rust.py         builds them into build/esp/EFI/AXIOM/<NAME>.AXE
 tools/mkaxe.py        an ELF linked by axiom.ld -> an .AXE
-tools/test/rust/      runs rhello, rdemo and rstd in QEMU (tools/test/sound: rtone)
+tools/test/rust/      runs rhello, rdemo and rstd in QEMU (tools/test/sound: rtone,
+                      tools/test/fleet: fleet, against a client speaking its wire)
 ```
 
 ## Building

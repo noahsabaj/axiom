@@ -7,6 +7,13 @@ name = "axiom"
 version = "0.1.0"
 
 [[package]]
+name = "fleet"
+version = "0.1.0"
+dependencies = [
+ "axiom",
+]
+
+[[package]]
 name = "rdemo"
 version = "0.1.0"
 dependencies = [
