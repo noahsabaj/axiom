@@ -104,14 +104,19 @@ rtw_nic_link:
     mov dword [rbx + NI_DUPLEX], 0
     ret
 
-; rtw_leave: before a restart or power-off: the network left (the access
-; point told, so it holds no association for the next system to trip
-; on), the card off. Preserves all.
+; rtw_leave: before a restart or power-off, the card left as Linux leaves
+; it (rtw_power_off, then rtw_pci_shutdown): the network left (the access
+; point told, so it holds no association for the next system to trip on),
+; the rings emptied, the MAC through its power-off flow, the function in
+; D3hot. Preserves all.
 rtw_leave:
     cmp byte [rtw_up], 0
     je .out
     push rax
+    push rcx
+    push rdx
     push rsi
+    push rdi
     push r12
     mov r12, [rtw_mmio]
     cmp byte [rtw_js], JS_LINKED
@@ -120,10 +125,22 @@ rtw_leave:
 .off:
     mov byte [rtw_up], 0
     mov byte [rtw_keys], 0
+    mov dword [r12 + REG_RWPTR_CLR], 0xFFFFFFFF ; DMA: every ring emptied
     mov word [r12 + 0xAA], 0x8000       ; to Bluetooth: Wi-Fi off
     call rtw_power_off
+    jc .stuck
+    KLOG "wifi: the card is off (D3hot next)"
+    jmp .d3
+.stuck:
+    KLOG "wifi: the card's power-off flow timed out (D3hot all the same)"
+.d3:
+    mov edi, [rtw_bdf]
+    call pci_power_d3hot
     pop r12
+    pop rdi
     pop rsi
+    pop rdx
+    pop rcx
     pop rax
 .out:
     ret
