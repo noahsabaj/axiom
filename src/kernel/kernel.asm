@@ -84,6 +84,8 @@ section .text
 %include "rtwmac.asm"
 %include "rtwphy.asm"
 %include "rtwrx.asm"
+%include "rtwtx.asm"
+%include "rtwjoin.asm"
 %include "tcp.asm"
 %include "netapp.asm"
 %include "sha256.asm"

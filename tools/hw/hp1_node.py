@@ -11,10 +11,16 @@ hp1.py sent: EFI/AXIOM/BOOTX64.EFI and run.txt.
                                    and a restart in 5 seconds
     python3 hp1_node.py log        AxiomLog printed, then deleted
     python3 hp1_node.py cancel     AxiomRun and BootNext gone: no test run
+    python3 hp1_node.py wifi       the Wi-Fi network hp-1 is on, for Axiom:
+                                   its SSID and WPA2 key (PMK), made from
+                                   netplan's wpa_supplicant configuration,
+                                   into EFI/AXIOM/WIFI.KEY
 
 Only BootNext is ever set; BootOrder is never written. Nothing here reads
 or prints anything but Axiom's own variables, the boot entries, and the
-TCO watchdog's registers.
+TCO watchdog's registers, but for `wifi`: it reads the network's saved
+passphrase and writes only the key made from it, and prints neither, nor
+the network's name.
 """
 import hashlib
 import os
@@ -32,6 +38,7 @@ LOADER = pathlib.Path("EFI/AXIOM/BOOTX64.EFI")
 LABEL = "Axiom"
 SMBUS = pathlib.Path("/sys/bus/pci/devices/0000:00:1f.4")
 NV_BS_RT = (7).to_bytes(4, "little")
+WIFI_KEY = ESP / "EFI" / "AXIOM" / "WIFI.KEY"
 
 
 def sh(*args, check=True):
@@ -168,6 +175,101 @@ def log():
     return 0
 
 
+def wpa_string(value):
+    """A wpa_supplicant.conf string as bytes: "quoted", P"printf-escaped"
+    or hex (None if none of them)."""
+    if len(value) >= 3 and value.startswith('P"') and value.endswith('"'):
+        text, out, i = value[2:-1], bytearray(), 0
+        while i < len(text):
+            if text[i] == "\\" and i + 1 < len(text):
+                if text[i + 1] == "x" and i + 4 <= len(text):
+                    out.append(int(text[i + 2:i + 4], 16))
+                    i += 4
+                    continue
+                out.append({"n": 10, "r": 13, "t": 9, "e": 27}.get(text[i + 1], ord(text[i + 1])))
+                i += 2
+            else:
+                out += text[i].encode("utf-8")
+                i += 1
+        return bytes(out)
+    if len(value) >= 2 and value[0] == value[-1] == '"':
+        return value[1:-1].encode("utf-8")
+    try:
+        return bytes.fromhex(value)
+    except ValueError:
+        return None
+
+
+def wpa_form(value):
+    """How a wpa_supplicant.conf string is written, not what it says."""
+    return ("P-quoted" if value.startswith('P"') else "quoted" if value.startswith('"')
+            else "hex" if value and wpa_string(value) is not None else "missing or unknown")
+
+
+def ssid_txt(ssid):
+    """An SSID as wpa_cli prints it (printf_encode)."""
+    return "".join("\\" + chr(c) if c in (0x22, 0x5C) else chr(c) if 0x20 <= c < 0x7F
+                   else f"\\x{c:02x}" for c in ssid)
+
+
+def wifi():
+    """WIFI.KEY, for src/kernel/rtwjoin.asm: "AXWIFI01", the SSID's length
+    (1 byte), the SSID (32 bytes, zero-padded), and the PMK (32 bytes):
+    PBKDF2-HMAC-SHA1 of the passphrase with the SSID, 4096 rounds, as every
+    WPA2-Personal station makes it (IEEE 802.11-2020 J.4.1). The network
+    is the one wpa_supplicant is on now, from the configuration netplan
+    made for it."""
+    ifaces = [p.parent.name for p in pathlib.Path("/sys/class/net").glob("*/wireless")]
+    if len(ifaces) != 1:
+        print(f"{len(ifaces)} Wi-Fi interfaces; 1 wanted")
+        return 1
+    status = dict(line.split("=", 1) for line in
+                  sh("wpa_cli", "-i", ifaces[0], "status").splitlines() if "=" in line)
+    print(f"{ifaces[0]}: {status.get('wpa_state')}, {status.get('freq')} MHz, key management "
+          f"{status.get('key_mgmt')}, ciphers {status.get('pairwise_cipher')} (pairwise) and "
+          f"{status.get('group_cipher')} (group)")
+    if status.get("wpa_state") != "COMPLETED" or status.get("key_mgmt") != "WPA2-PSK":
+        print("not on a WPA2-Personal network now")
+        return 1
+    conf = pathlib.Path(f"/run/netplan/wpa-{ifaces[0]}.conf").read_text(encoding="utf-8")
+    networks = [dict(line.strip().split("=", 1) for line in block.splitlines()
+                     if "=" in line)
+                for block in re.findall(r"network=\{(.*?)\n\s*\}", conf, re.S)]
+    mine = [n for n in networks if (s := wpa_string(n.get("ssid", ""))) is not None
+            and ssid_txt(s) == status.get("ssid")]
+    print(f"{len(networks)} networks configured, {len(mine)} of them this one by name; "
+          f"SSIDs written {', '.join(wpa_form(n.get('ssid', '')) for n in networks)}")
+    if not mine and len(networks) == 1:
+        mine = networks                     # the only one wpa_supplicant could be on
+        print("the only one configured, then")
+    if len(mine) != 1 or "WPA-PSK" not in mine[0].get("key_mgmt", "WPA-PSK").split():
+        return 1
+    ssid = wpa_string(mine[0].get("ssid", "")) or b""
+    psk = mine[0].get("psk", "")
+    try:
+        if len(psk) == 64 and all(c in "0123456789abcdefABCDEF" for c in psk):
+            pmk = bytes.fromhex(psk)                    # saved as the key itself
+        elif (phrase := wpa_string(psk)) is not None and psk[:1] in ('"', "P") \
+                and 8 <= len(phrase) <= 63 and 1 <= len(ssid) <= 32:
+            pmk = hashlib.pbkdf2_hmac("sha1", phrase, ssid, 4096, 32)
+        else:
+            print(f"no passphrase of 8-63 characters saved ({wpa_form(psk)}), or an SSID "
+                  f"of {len(ssid)} bytes")
+            return 1
+    finally:
+        psk = phrase = mine = networks = conf = None
+    data = b"AXWIFI01" + bytes([len(ssid)]) + ssid.ljust(32, bytes(1)) + pmk
+    tmp = WIFI_KEY.with_suffix(".NEW")
+    tmp.write_bytes(data)
+    os.sync()
+    tmp.replace(WIFI_KEY)
+    os.sync()
+    ok = WIFI_KEY.read_bytes() == data
+    print(f"{WIFI_KEY}: {len(data)} bytes, {'as written' if ok else 'NOT as written'}: "
+          f"the active network's key (WPA2-Personal, an SSID of {len(ssid)} bytes)")
+    return 0 if ok else 1
+
+
 def cancel():
     efivar_delete(RUN)
     _, nxt, _, axiom = boot_entries()
@@ -180,4 +282,4 @@ def cancel():
 if __name__ == "__main__":
     what = sys.argv[1] if len(sys.argv) > 1 else "status"
     sys.exit({"status": status, "install": install, "run": run, "log": log,
-              "cancel": cancel}[what]() or 0)
+              "cancel": cancel, "wifi": wifi}[what]() or 0)

@@ -82,17 +82,25 @@ rtw_rx_poll:
     ret
 
 ; rtw_rx_frame(RSI = an 802.11 frame, its FCS on the end, ECX = its
-; length, RDX = its RX descriptor): counted for the survey; a beacon's
-; BSSID kept, so access points are counted once. Preserves all but RAX.
+; length, RDX = its RX descriptor): counted for the survey; the BSSID of
+; a beacon or probe response kept, so access points are counted once.
+; Preserves all but RAX.
 rtw_rx_frame:
+    call rtw_join_frame
     push rcx
     push rdi
     inc dword [rtw_sv_frames]
     cmp ecx, 24 + 4
     jb .out
     cmp word [rsi], 0x0080              ; a beacon
-    jne .out
+    je .beacon
+    cmp word [rsi], 0x0050              ; a probe response (to us: the
+    jne .out                            ; chip takes only those unicast)
+    inc dword [rtw_sv_probes]
+    jmp .bss
+.beacon:
     inc dword [rtw_sv_beacons]
+.bss:
     mov eax, [rsi + 16]                 ; its BSSID
     movzx edi, word [rsi + 20]
     shl rdi, 32
@@ -117,8 +125,9 @@ rtw_rx_frame:
     pop rcx
     ret
 
-; rtw_survey(R12): a quarter second on each common channel, listening;
-; what each carried logged as counts (no network's name or address)
+; rtw_survey(R12): a quarter second on each common channel (none that
+; needs radar detection), asking twice who is there and listening; what
+; each carried logged as counts (no network's name or address)
 rtw_survey:
     push rbx
     push rcx
@@ -128,6 +137,9 @@ rtw_survey:
     push r8
     push r9
     lea rbx, [rtw_sv_channels]
+    xor eax, eax
+    mov [rtw_rx_bad], eax
+    mov [rtw_sv_asked], eax
 .channel:
     movzx ecx, byte [rbx]
     test ecx, ecx
@@ -136,16 +148,25 @@ rtw_survey:
     mov [rtw_sv_frames], eax
     mov [rtw_sv_beacons], eax
     mov [rtw_sv_bss_n], eax
-    mov [rtw_rx_bad], eax
     call rtw_set_channel
     call rtw_rx_poll                    ; (what came in before the switch)
     xor eax, eax
     mov [rtw_sv_frames], eax
     mov [rtw_sv_beacons], eax
+    mov [rtw_sv_probes], eax
     mov [rtw_sv_bss_n], eax
-    mov [rtw_rx_bad], eax
     mov r8d, 250
 .listen:
+    cmp r8d, 250
+    je .ask
+    cmp r8d, 125
+    jne .poll
+.ask:
+    xor edx, edx
+    call rtw_probe_req
+    jc .poll
+    inc dword [rtw_sv_asked]
+.poll:
     call rtw_rx_poll
     mov edi, 1000
     call delay_us
@@ -156,12 +177,19 @@ rtw_survey:
     mov r9d, eax
     mov eax, [rtw_sv_frames]
     mov edx, [rtw_sv_beacons]
-    mov esi, [rtw_sv_bss_n]
-    mov edi, [rtw_rx_bad]
-    KLOG "wifi: channel %u (RF 18 %05x): %u frames, %u beacons from %u access points, %u bad", rcx, r9, rax, rdx, rsi, rdi
+    mov esi, [rtw_sv_probes]
+    mov edi, [rtw_sv_bss_n]
+    KLOG "wifi: channel %u (RF 18 %05x): %u frames, %u beacons, %u probe responses, %u access points", rcx, r9, rax, rdx, rsi, rdi
     inc rbx
     jmp .channel
 .out:
+    mov eax, [r12 + 0x3B0]              ; the MGMT ring: how far the chip read
+    shr eax, 16
+    and eax, 0xFFF
+    mov edx, [rtw_tx + RQ_MGMT * RTR_SIZE + RTR_WP]
+    mov esi, [rtw_sv_asked]
+    mov edi, [rtw_rx_bad]
+    KLOG "wifi: %u probe requests sent; the MGMT ring at %u of %u; %u bad frames", rsi, rax, rdx, rdi
     pop r9
     pop r8
     pop rdi
@@ -180,5 +208,7 @@ rtw_sv_bss:     resq 64                 ; BSSIDs heard on this channel
 rtw_sv_bss_n:   resd 1
 rtw_sv_frames:  resd 1
 rtw_sv_beacons: resd 1
+rtw_sv_probes:  resd 1
+rtw_sv_asked:   resd 1
 rtw_rx_bad:     resd 1
 rtw_rx_c2h:     resd 1

@@ -8,6 +8,10 @@
     python tools/hw/hp1.py run --file FILE     (the lines in a file)
     python tools/hw/hp1.py log                 AxiomLog, if a run left one
     python tools/hw/hp1.py cancel              the pending run undone
+    python tools/hw/hp1.py wifi                the Wi-Fi network hp-1 is on, for
+                                               Axiom: its key (PMK) made on hp-1
+                                               from Ubuntu's saved passphrase, into
+                                               EFI/AXIOM/WIFI.KEY; neither printed
 
 hp-1 still runs Ubuntu, and fleet reaches it there. A test run: the lines go
 into the UEFI variable AxiomRun, BootNext is set to Axiom's boot entry and
@@ -119,7 +123,7 @@ def log():
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("what", choices=("status", "install", "run", "log", "cancel"))
+    ap.add_argument("what", choices=("status", "install", "run", "log", "cancel", "wifi"))
     ap.add_argument("lines", nargs="*", help="run: the script's lines")
     ap.add_argument("--file", help="run: the script, from this file")
     ap.add_argument("--wait", type=int, default=900, help="run: seconds to wait for hp-1 "
