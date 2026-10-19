@@ -225,7 +225,7 @@ def show_info():
         nodes = nodes.get("nodes", [])
     entry = next((n for n in nodes if isinstance(n, dict) and n.get("name") == AXIOM1), {})
     info = entry.get("info") or {}
-    keys = ("os_version", "cpu", "threads", "ram_gb", "disk_free_gb", "addresses", "uptime_s")
+    keys = ("os_version", "cpu", "threads", "ram_gb", "disk_free_gb", "temp_c", "battery", "addresses", "uptime_s")
     print(f"hp1.py: {AXIOM1}: online {entry.get('online')}; " +
           ", ".join(f"{k} {info.get(k)}" for k in keys), flush=True)
 

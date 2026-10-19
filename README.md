@@ -558,6 +558,12 @@ programs see the last reading: `SYS_INFO`'s `SI_BATTERY` (the Rust SDK's
 laptops do, `battery: {percent, plugged}`, which fleet's placement uses (a
 laptop off its charger takes no job unless `--allow-battery`).
 
+The CPU's temperature goes in `info` too, as `temp_c`: `heat` reads it
+(heat.asm) from Intel's package thermal sensor, as Linux's `x86_pkg_temp`
+that fleet reads first, else the core's; programs get it with `SI_TEMP`
+(`axiom::sys::cpu_temp()`). QEMU has no sensor; `heat simulate` gives it
+one at 47 C.
+
 On HP's boards the embedded controller (ec.asm: its two I/O ports, from the
 ECDT or the board table) takes a charge mode in one register: 0 charges as
 the firmware likes, 5 stops charging, 2 runs the laptop from the battery

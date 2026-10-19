@@ -306,7 +306,7 @@ impl Node {
             ),
             ("disk_free_gb", boot.map_or(Null, |v| gb(v.free))),
             ("disk_total_gb", boot.map_or(Null, |v| gb(v.bytes))),
-            ("temp_c", Null),
+            ("temp_c", axiom::sys::cpu_temp().map_or(Null, |t| Float(t as f64))),
             ("uptime_s", Int((axiom::sys::uptime_ms() / 1000) as i128)),
             ("addresses", here.into_iter().collect::<Vec<_>>().into()),
             ("desktop", Null),

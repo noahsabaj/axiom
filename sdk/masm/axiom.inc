@@ -283,6 +283,7 @@ SI_BAT_PERCENT  EQU 0FFh  ; SI_BATTERY: its charge, in percent
 SI_BAT_PLUGGED  EQU 1 SHL 8  ; on its charger
 SI_BAT_HELD     EQU 1 SHL 9  ; kept between 75% and 80% ('battery hold')
 SI_BAT_MODE_SHIFT EQU 16  ; bits 19:16: 0 charging as the firmware likes, 2 run from the battery, 5 not charging
+SI_TEMP         EQU 6  ; the CPU's temperature now, degrees C (its package's sensor), or E_EMPTY
 SN_WRITE        EQU 0  ; dword: frames written, in all (the program's)
 SN_READ         EQU 4  ; dword: frames taken to play, in all
 SN_FRAMES       EQU 8  ; dword: the ring's, a power of two

@@ -669,6 +669,7 @@ MSR_MPERF       equ 0xE7
 MSR_APERF       equ 0xE8
 MSR_THERM_STATUS equ 0x19C
 MSR_TEMP_TARGET equ 0x1A2
+MSR_PKG_THERM_STATUS equ 0x1B1
 MSR_RAPL_UNIT   equ 0x606
 MSR_PKG_ENERGY  equ 0x611
 MSR_PM_ENABLE   equ 0x770
@@ -780,6 +781,7 @@ SI_BAT_PERCENT  equ 0xFF                ; SI_BATTERY: its charge, in percent
 SI_BAT_PLUGGED  equ 1 << 8              ; on its charger
 SI_BAT_HELD     equ 1 << 9              ; kept between 75% and 80% ('battery hold')
 SI_BAT_MODE_SHIFT equ 16                ; bits 19:16: 0 charging as the firmware likes, 2 run from the battery, 5 not charging
+SI_TEMP         equ 6                   ; the CPU's temperature now, degrees C (its package's sensor), or E_EMPTY
 
 ; a stream's memory (SYS_SOUND_NEW): this header, then SN_FRAMES frames at
 ; SN_DATA, each a left and a right sample, 16 bits signed, SN_RATE a second.

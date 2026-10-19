@@ -6,6 +6,8 @@ limit 900
 timeout 240
 until fleet: node
 update
+heat
+battery
 timeout 600
 until hello axiom1-done
 sleep 5

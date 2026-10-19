@@ -204,7 +204,10 @@ Notes:
   hold`), and HP's charge mode in bits 19:16 (0 as the firmware likes,
   2 run from the battery, which counts as plugged, 5 not charging); or
   `E_EMPTY` where there is no battery whose charge Axiom reads, or the
-  last reading failed. Anything else is `E_ARG`.
+  last reading failed; `SI_TEMP` (6) the CPU's temperature now, in
+  degrees C, from its package's digital thermal sensor (else the calling
+  CPU's core's), or `E_EMPTY` where there is none (QEMU; AMD's are not
+  read). Anything else is `E_ARG`.
 - **`SYS_SPAWN`**: the text is at most 255 bytes, and programs nest eight
   deep. The gifts move to the child before it runs. The child is the
   caller's own: the caller's task handle can `RO_KILL` it (`RO_JOIN` on

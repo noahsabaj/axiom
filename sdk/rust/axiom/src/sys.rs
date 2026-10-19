@@ -40,6 +40,8 @@ pub const SI_BAT_PERCENT: u64 = 0xFF;
 pub const SI_BAT_PLUGGED: u64 = 1 << 8;
 pub const SI_BAT_HELD: u64 = 1 << 9;
 pub const SI_BAT_MODE_SHIFT: u32 = 16;
+/// SYS_INFO's: the CPU's temperature now, in degrees C; negative with none.
+pub const SI_TEMP: u64 = 6;
 
 // what a ring entry asks for (RO_*)
 pub const RO_NOP: u8 = 0;
@@ -396,6 +398,13 @@ pub fn battery() -> Option<Battery> {
         held: r & SI_BAT_HELD != 0,
         mode: ((r >> SI_BAT_MODE_SHIFT) & 0x0F) as u8,
     })
+}
+
+/// The CPU's temperature now, in degrees C, from its package's sensor (else
+/// the calling CPU's core's); None where Axiom reads none (QEMU, AMD).
+pub fn cpu_temp() -> Option<u32> {
+    let r = unsafe { syscall(SYS_INFO, SI_TEMP, 0, 0, 0, 0) }.0;
+    if r < 0 { None } else { Some(r as u32) }
 }
 
 /// Others run first.

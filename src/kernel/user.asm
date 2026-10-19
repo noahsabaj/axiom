@@ -682,7 +682,7 @@ futex_result:
 ; read at boot, taken as UTC, kept since by the TSC); SI_CPUS, CPUs running;
 ; SI_RAM and SI_RAM_FREE, bytes of memory and of it free; SI_UPTIME,
 ; milliseconds since power-on; SI_BATTERY, the battery as last read
-; (bat_info)
+; (bat_info); SI_TEMP, the CPU's temperature now (cpu_heat)
 sys_info:
     cmp edi, SI_CLOCK
     je .clock
@@ -696,11 +696,17 @@ sys_info:
     je .uptime
     cmp edi, SI_BATTERY
     je .battery
+    cmp edi, SI_TEMP
+    je .temp
     mov rax, E_ARG
     xor edx, edx
     ret
 .battery:
     call bat_info
+    xor edx, edx
+    ret
+.temp:
+    call cpu_heat
     xor edx, edx
     ret
 .ram:

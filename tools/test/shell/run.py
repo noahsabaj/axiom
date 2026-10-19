@@ -18,6 +18,7 @@ the next one's, and checks what each printed:
     a quote not closed, '&' (not yet);
   - what prints, piped as lines ('echo hi | count'); cpus, mem, threads,
     tasks as records, and 'tasks stop' refusing the kernel's own task;
+    heat: no sensor in QEMU, then 'heat simulate' read at 47 C;
   - programs by name, case aside, and by path; each given only what its
     header wants, and what +net, +store, +desk grant for one run; '&' runs
     one in the background, ctrl+C stops only the one in front, 'tasks stop'
@@ -215,6 +216,11 @@ STEPS = [
     ("cpus | count", lambda l: l == ["4"], "cpus | count: 4"),
     ("cpus | pick cpu kind | to json", lambda l: len(json.loads("\n".join(l))) == 4 and
      set(json.loads("\n".join(l))[0]) == {"cpu", "kind"}, "cpus | pick | to json"),
+    ("heat", said("heat: no reading (no digital thermal sensor here)"), "heat: QEMU has no sensor"),
+    ("heat simulate", said("heat: simulated from now on: 53 below a TjMax of 100, 47 C"),
+     "heat simulate: a sensor where there is none"),
+    ("heat", said("heat: 47 C (simulated, 'heat simulate'; TjMax 100 C)"),
+     "heat: the simulated sensor, read through the same decoding"),
     ("mem | pick usable free", lambda l: set(record(l)) == {"usable", "free"},
      "mem | pick usable free: one record, two fields"),
     ("mem kinds | where kind = conventional | count", lambda l: l == ["1"],

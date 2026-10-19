@@ -137,6 +137,7 @@ section .text
 %include "ec.asm"
 %include "battery.asm"
 %include "batterytest.asm"
+%include "heat.asm"
 %include "lxmm.asm"
 %include "lxfs.asm"
 %include "linux.asm"
