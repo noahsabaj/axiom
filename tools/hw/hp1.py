@@ -31,6 +31,9 @@ import time
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 STAGE = ROOT / "build" / "hw" / "hp1"
+# the Wi-Fi card's firmware, if it is here: Realtek's rtw88/rtw8821c_fw.bin
+# from linux-firmware (not in this tree); src/kernel/rtwfw.asm reads it
+FIRMWARE = ROOT / "build" / "hw" / "RTW8821C.BIN"
 NODE = "hp-1"
 
 
@@ -50,7 +53,7 @@ def stage(script=None):
     shutil.copyfile(ROOT / "tools" / "hw" / "hp1_node.py", STAGE / "hp1_node.py")
     esp = ROOT / "build" / "esp" / "EFI"
     (STAGE / "EFI" / "AXIOM").mkdir(parents=True, exist_ok=True)
-    for f in [esp / "BOOT" / "BOOTX64.EFI", *sorted((esp / "AXIOM").glob("*"))]:
+    for f in [esp / "BOOT" / "BOOTX64.EFI", *sorted((esp / "AXIOM").glob("*")), FIRMWARE]:
         if f.is_file():
             to = STAGE / "EFI" / "AXIOM" / f.name
             if not to.exists() or to.read_bytes() != f.read_bytes():

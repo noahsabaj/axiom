@@ -130,6 +130,7 @@ kernel_main:
     sti
     mov byte [ints_on], 1
     call store_init                     ; interrupts on: the drive completes by them
+    call rtw_start                      ; the Wi-Fi card's firmware, from the boot volume
 
     RDTSC64
     mov [next_refresh], rax

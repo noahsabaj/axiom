@@ -105,6 +105,20 @@ log_volume:
     push rcx
     push rdx
     push r8
+    push r9
+    mov r9d, DKF_REMOVABLE
+    jmp vol_by_serial
+
+; boot_volume -> R14 = the volume the loader came from, removable or not
+; (a laptop's own EFI partition: hp-1), CF if it is not here (yet). As
+; log_volume otherwise; only reads are meant. Preserves all but RAX.
+boot_volume:
+    push rcx
+    push rdx
+    push r8
+    push r9
+    xor r9d, r9d                        ; any disk
+vol_by_serial:
     xor r8d, r8d
     cmp dword [log_fs], 32
     jne .none
@@ -122,8 +136,10 @@ log_volume:
     cmp byte [r14 + VF_MOUNTED], 0
     je .next
     mov rax, [r14 + VO_DISK]
-    test dword [rax + DK_FLAGS], DKF_REMOVABLE
-    jz .next
+    mov eax, [rax + DK_FLAGS]
+    and eax, r9d
+    cmp eax, r9d                        ; removable, if that was asked
+    jne .next
     cmp [r14 + VF_SERIAL], edx
     jne .next
     test r8, r8
@@ -139,6 +155,7 @@ log_volume:
 .none:
     stc
 .out:
+    pop r9
     pop r8
     pop rdx
     pop rcx

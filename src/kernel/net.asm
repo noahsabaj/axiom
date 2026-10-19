@@ -106,6 +106,10 @@ net_init:
     call rtl_probe
     test eax, eax
     jnz .skip
+    mov rdi, r12
+    call rtw_probe                      ; the Wi-Fi card
+    test eax, eax
+    jnz .skip
     cmp byte [r12 + PE_SUBCLASS], 0x00  ; Ethernet that no driver took
     jne .skip
     mov rdi, r12
