@@ -316,6 +316,7 @@ def check(log1, log2):
     result(i.get("os") == "axiom" and i.get("threads") == 2 and i.get("ram_gb", 0) > 0.5
            and 0 < i.get("disk_free_gb", 0) <= i.get("disk_total_gb", 0) and i.get("gpus") == []
            and i.get("admin") is False and i.get("battery") is None and i.get("temp_c") is None
+           and isinstance(i.get("load"), float) and 0 <= i["load"] < 4
            and i.get("jobs_running") == 0
            and i.get("projects_running") == [] and i.get("uptime_s", 0) > 0,
            f"info: {json.dumps(i)[:400]}")

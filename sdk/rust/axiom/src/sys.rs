@@ -42,6 +42,8 @@ pub const SI_BAT_HELD: u64 = 1 << 9;
 pub const SI_BAT_MODE_SHIFT: u32 = 16;
 /// SYS_INFO's: the CPU's temperature now, in degrees C; negative with none.
 pub const SI_TEMP: u64 = 6;
+/// SYS_INFO's: the load average over the last minute, in hundredths.
+pub const SI_LOAD: u64 = 7;
 
 // what a ring entry asks for (RO_*)
 pub const RO_NOP: u8 = 0;
@@ -405,6 +407,12 @@ pub fn battery() -> Option<Battery> {
 pub fn cpu_temp() -> Option<u32> {
     let r = unsafe { syscall(SYS_INFO, SI_TEMP, 0, 0, 0, 0) }.0;
     if r < 0 { None } else { Some(r as u32) }
+}
+
+/// The load average over the last minute, as Unix's: the threads running
+/// or waiting for a CPU, averaged every 5 s (1.0: one CPU's worth).
+pub fn load() -> f64 {
+    unsafe { syscall(SYS_INFO, SI_LOAD, 0, 0, 0, 0) }.0.max(0) as f64 / 100.0
 }
 
 /// Others run first.

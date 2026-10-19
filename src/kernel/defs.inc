@@ -782,6 +782,7 @@ SI_BAT_PLUGGED  equ 1 << 8              ; on its charger
 SI_BAT_HELD     equ 1 << 9              ; kept between 75% and 80% ('battery hold')
 SI_BAT_MODE_SHIFT equ 16                ; bits 19:16: 0 charging as the firmware likes, 2 run from the battery, 5 not charging
 SI_TEMP         equ 6                   ; the CPU's temperature now, degrees C (its package's sensor), or E_EMPTY
+SI_LOAD         equ 7                   ; the load average over the last minute, in hundredths
 
 ; a stream's memory (SYS_SOUND_NEW): this header, then SN_FRAMES frames at
 ; SN_DATA, each a left and a right sample, 16 bits signed, SN_RATE a second.

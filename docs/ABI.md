@@ -207,7 +207,10 @@ Notes:
   last reading failed; `SI_TEMP` (6) the CPU's temperature now, in
   degrees C, from its package's digital thermal sensor (else the calling
   CPU's core's), or `E_EMPTY` where there is none (QEMU; AMD's are not
-  read). Anything else is `E_ARG`.
+  read); `SI_LOAD` (7) the load average over the last minute, in
+  hundredths, as Unix's: every 5 s, the CPUs' busy time and the threads
+  waiting for one, folded into an exponential average. Anything else is
+  `E_ARG`.
 - **`SYS_SPAWN`**: the text is at most 255 bytes, and programs nest eight
   deep. The gifts move to the child before it runs. The child is the
   caller's own: the caller's task handle can `RO_KILL` it (`RO_JOIN` on

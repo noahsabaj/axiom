@@ -292,7 +292,7 @@ impl Node {
             ("hostname", self.name.clone().into()),
             ("cpu", cpu_name().into()),
             ("threads", Int(axiom::sys::cpus() as i128)),
-            ("load", Null),
+            ("load", Float(axiom::sys::load())),
             ("ram_gb", gb(ram)),
             ("ram_free_gb", gb(free)),
             ("commit_gb", Null),

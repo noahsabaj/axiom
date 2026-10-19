@@ -1892,7 +1892,12 @@ cmd_clear:
 
 cmd_uptime:
     call uptime_ms
-    KLOG "up %u ms since power-on", rax
+    mov rcx, rax
+    call load_info                      ; in hundredths
+    xor edx, edx
+    mov r8d, 100
+    div r8
+    KLOG "up %u ms since power-on; load %u.%02u (the last minute's average)", rcx, rax, rdx
     ret
 
 cmd_echo:

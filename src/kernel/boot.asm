@@ -163,6 +163,7 @@ main_loop:
     call harness_service                ; a test run's next line
     call update_service                 ; a trial not kept in time: a restart
     call battery_service                ; the battery hold's minute
+    call load_service                   ; the load average's 5 s
 .keys:
     call key_next                       ; keys down and up, until a key code's turn
     jc .input

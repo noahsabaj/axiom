@@ -562,7 +562,10 @@ The CPU's temperature goes in `info` too, as `temp_c`: `heat` reads it
 (heat.asm) from Intel's package thermal sensor, as Linux's `x86_pkg_temp`
 that fleet reads first, else the core's; programs get it with `SI_TEMP`
 (`axiom::sys::cpu_temp()`). QEMU has no sensor; `heat simulate` gives it
-one at 47 C.
+one at 47 C. So does the load average, as `load`: Unix's, over the last
+minute (load.asm: every 5 s, the CPUs' busy time and the threads waiting
+for one), which `uptime` shows and programs get with `SI_LOAD`
+(`axiom::sys::load()`).
 
 On HP's boards the embedded controller (ec.asm: its two I/O ports, from the
 ECDT or the board table) takes a charge mode in one register: 0 charges as
