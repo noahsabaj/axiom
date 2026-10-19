@@ -32,7 +32,8 @@ uifont.inc:
     UG_LEFT db (signed)   from the pen to the bitmap's left
     UG_TOP  db (signed)   from the baseline up to the bitmap's top
   uf_byte: 256 words, the glyph of each byte of the kernel's text: ASCII,
-    and from 128 the console font's extra symbols (tools/mkfont.py), 0 none
+    and from 128 the console font's extra symbols (tools/mkfont.py), 0 none;
+    from 248 the keys' symbols (UG_CTRL ...), the desktop's alone
   uf_uni: UF_UNI entries of (dd code point, dd glyph), sorted, for UTF-8
 Glyph 0 is the replacement, drawn for anything missing.
 """
@@ -57,6 +58,10 @@ SIZES = [11, 13, 14, 16, 20, 22, 26]           # 11 and 13 points at 1, 1.25, 1.
 BIG_CHARS = "0123456789:.%-\u00b0"               # figures, for the clock and the widgets
 BIG_SIZES = [22, 28, 33, 39, 44, 55, 66, 77, 88]  # 22 and 44 points at 1 .. 2x
 SS = 4                                          # drawn at 4x, averaged down
+# bytes past the console's symbols that only the desktop's text has: the
+# keys' symbols, for the menus' shortcuts (UG_<name>)
+UI_BASE = 248
+UI_BYTES = [("CTRL", 0x2303), ("CMD", 0x2318), ("SHIFT", 0x21E7), ("ALT", 0x2325)]
 
 SYMBOLS = [0x2318, 0x2325, 0x21E7, 0x2303, 0x23CE, 0x232B, 0x2713, 0x2715, 0x2192, 0x2190,
            0x2191, 0x2193, 0x25CF, 0x25B8, 0x25BE, 0x2039, 0x203A, 0x2022, 0x2026, 0x2014,
@@ -136,6 +141,10 @@ def main():
     for i, (_, ch) in enumerate(EXTRAS):
         if EXTRA_BASE + i < 256:
             byte_map[EXTRA_BASE + i] = index.get(ord(ch), 0)
+    assert UI_BASE >= EXTRA_BASE + len(EXTRAS)
+    for i, (name, code) in enumerate(UI_BYTES):
+        byte_map[UI_BASE + i] = index.get(code, 0)
+        lines.append(f"UG_{name:<12} equ {UI_BASE + i}")
     lines.append("uf_byte:")
     for i in range(0, 256, 16):
         lines.append("    dw " + ", ".join(str(g) for g in byte_map[i:i + 16]))

@@ -27,8 +27,11 @@ serial log ('win' lists the windows) and from screenshots:
     with the mouse land in its pixels, a key changes the colour and its
     title, its close button ends the program and the window goes; ctrl+C
     in its shell kills it, and the window goes too;
-  - 'theme light': the shells' background white; 'theme' says so; then
-    'theme accent pink'.
+  - the menus, by the keys from the mark's: File's New Terminal opens a
+    shell, its Close Window closes it; Help's Find an App opens the
+    launcher, which runs what is typed in a new shell;
+  - 'theme light': the shells' background white; 'theme' says so; View's
+    Dark Look, and 'theme' says that; then 'theme accent pink'.
 Outputs go to build/test/desk/.
 """
 import pathlib
@@ -60,6 +63,7 @@ SHELL1 = (400, 1300)                            # a point in shell 1, at the sta
 APPS = 8                                        # the dock's apps
 SYSTEM, MANDEL = 6, 7                           # two of them
 SHELL4 = (1000, 800)                            # in the shell opened for paint
+MARK = ((14 + 15 // 2) * PT, BAR // 2)          # Axiom's mark in the bar: its menu
 PX, PY = 1400, 200                              # paint's frame, once moved
 PW, PH = 600, 400
 INK, RED, PAPER = (0x1B, 0x1F, 0x27), (0xD9, 0x48, 0x3B), (0xF4, 0xF1, 0xE8)
@@ -209,9 +213,30 @@ def script():
         "type run paint\\n", "until paint: a window", "wait 0.5",
         f"abs {at(*SHELL4)} left", "wait 0.3", "sendkey ctrl-c", "until run: PAINT", "wait 0.5",
         f"abs {at(*SHELL1)} left", "wait 0.3", *win("paint killed"),
+        # the menus: the mark's, then File's by the arrow: New Terminal
+        f"abs {at(*MARK)} left", "wait 0.5", "sendkey right", "wait 0.3",
+        "sendkey down", "wait 0.3", "shot build/test/desk/menu.png",
+        "sendkey ret", "until desk: shell 5 opens", "wait 0.5",
+        # its Close Window, the last item
+        f"abs {at(*MARK)} left", "wait 0.3", "sendkey right", "wait 0.3",
+        "sendkey up", "wait 0.3", "sendkey ret", "until desk: shell 5 closes", "wait 0.5",
+        # Help's Find an App (the mark's, left, round the end): the launcher,
+        # what is typed run in a new shell; File's Close Window closes it
+        f"abs {at(*MARK)} left", "wait 0.3", "sendkey left", "wait 0.3",
+        "sendkey down", "wait 0.3", "sendkey ret", "wait 0.5",
+        "type echo launched", "wait 0.5", "shot build/test/desk/launcher.png",
+        "sendkey ret", "until desk: shell 6 opens", "wait 1",
+        f"abs {at(*MARK)} left", "wait 0.3", "sendkey right", "wait 0.3",
+        "sendkey up", "wait 0.3", "sendkey ret", "until desk: shell 6 closes", "wait 0.5",
+        f"abs {at(*SHELL1)} left", "wait 0.3",
         "type objects\\n", "wait 0.5",
         "type theme light\\n", "wait 1.5",
         "shot build/test/desk/light.png",
+        # View's Dark Look (the mark's, right three times, its second item)
+        f"abs {at(*MARK)} left", "wait 0.3", "sendkey right", "wait 0.2",
+        "sendkey right", "wait 0.2", "sendkey right", "wait 0.2",
+        "sendkey down", "wait 0.2", "sendkey down", "wait 0.2", "sendkey ret", "wait 1.5",
+        "type theme\\n", "wait 0.5",
         "type theme accent pink\\n", "wait 1",
         "type poweroff\\n", "ended",
     ]
@@ -355,7 +380,15 @@ def check(log, err):
     result(re.search(r"^\s+look\s+light$", log, re.M) is not None, "theme light: so it says")
     p = pixel("light.png", 200, 1000 + TITLE + 2)
     result(p == WINDOW_LIGHT, f"and shell 1 is white ({p})")
+    m = re.search(r"^\s+look\s+light$", log, re.M)
+    result(m is not None and re.search(r"^\s+look\s+dark$", log[m.end():], re.M) is not None,
+           "View's Dark Look: 'theme' says dark")
     result(re.search(r"^\s+accent\s+pink$", log, re.M) is not None, "theme accent pink")
+    result("desk: shell 5 opens" in log, "File's New Terminal opened shell 5")
+    result("desk: shell 5 closes" in log, "its Close Window closed it")
+    result(re.search(r"^launched$", log, re.M) is not None and "desk: shell 6 opens" in log,
+           "the launcher ran what was typed in shell 6")
+    result("desk: shell 6 closes" in log, "and Close Window closed that")
     result("AXIOM PANIC" not in log, "no panic")
     result("QEMU ended by itself" in err, "powered off")
 

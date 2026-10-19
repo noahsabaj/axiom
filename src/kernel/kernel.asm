@@ -126,6 +126,7 @@ section .text
 %include "look.asm"
 %include "fscap.asm"
 %include "desk.asm"
+%include "menus.asm"
 %include "term.asm"
 %include "vt.asm"
 %include "window.asm"

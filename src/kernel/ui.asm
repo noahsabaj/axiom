@@ -947,85 +947,12 @@ ui_tile_label:
     ret
 
 ; -----------------------------------------------------------------------------
-;  ui_refresh: fresh telemetry, the header summary and the tiles
+;  ui_refresh: fresh telemetry, and the tiles
 ; -----------------------------------------------------------------------------
 ui_refresh:
     push rbx
-    push r12
-    push r13
-    push r14
     call telemetry_sample_all
     call cpu_package_power
-    xor r12d, r12d                      ; sum of MHz
-    xor r13d, r13d                      ; CPUs reporting a clock
-    xor r14d, r14d                      ; hottest
-    xor ecx, ecx
-.sum:
-    cmp ecx, [cpu_count]
-    jae .summed
-    PERCPU rbx, rcx
-    cmp qword [rbx + PC_ONLINE], 0
-    je .sum_next
-    mov rax, [rbx + PC_MHZ]
-    test rax, rax
-    jz .temp
-    add r12, rax
-    inc r13
-.temp:
-    mov rax, [rbx + PC_TEMP]
-    cmp rax, r14
-    cmova r14, rax
-.sum_next:
-    inc ecx
-    jmp .sum
-.summed:
-    mov rax, r12
-    test r13, r13
-    jz .avg_done
-    xor edx, edx
-    div r13
-.avg_done:
-    mov r12, rax                        ; average MHz (0 = unknown)
-    call uptime_ms
-    xor edx, edx
-    mov ecx, 1000
-    div rcx
-    xor edx, edx
-    mov ecx, 60
-    div rcx
-    mov r8, rdx                         ; seconds
-    xor edx, edx
-    div rcx
-    mov r9, rdx                         ; minutes
-    mov r10, rax                        ; hours
-    mov rax, [rapl_mw]
-    xor edx, edx
-    mov ecx, 100
-    div rcx
-    mov r11, rax                        ; tenths of a watt
-    lea rdi, [ui_buf]
-    mov eax, [cpus_online]
-    SPRINTF rdi, {"%u threads ", G_MIDDOT, " "}, rax
-    add rdi, rax
-    test r12, r12
-    jz .no_clock
-    SPRINTF rdi, {"avg %u MHz ", G_MIDDOT, " "}, r12
-    add rdi, rax
-.no_clock:
-    test r14, r14
-    jz .no_heat
-    SPRINTF rdi, {"max %u", G_DEGREE, "C ", G_MIDDOT, " "}, r14
-    add rdi, rax
-.no_heat:
-    test r11, r11
-    jz .no_power
-    SPRINTF rdi, {"package %t W ", G_MIDDOT, " "}, r11
-    add rdi, rax
-.no_power:
-    SPRINTF rdi, "up %u:%02u:%02u", r10, r9, r8
-
-    lea rsi, [ui_buf]                   ; at the right of the bar
-    call desk_status
     mov rbx, [cpu_win]                  ; the tiles, if they are seen
     test rbx, rbx
     jz .out
@@ -1035,9 +962,6 @@ ui_refresh:
     mov rdi, rbx
     call win_damage_all
 .out:
-    pop r14
-    pop r13
-    pop r12
     pop rbx
     ret
 

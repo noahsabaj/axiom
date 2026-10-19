@@ -21,8 +21,9 @@
 ;  past a line, the windows minimised, each as a small picture of itself.
 ;  A dot under an app says it runs; the pointer over one names it.
 ;
-;  The menu bar: Axiom's mark, the name of the app in front, and at the
-;  right what the system is doing and the time.
+;  The menu bar: Axiom's mark, the name of the app in front and the menus,
+;  and at the right the battery, the network, the launcher and the time
+;  (menus.asm).
 ;
 ;  All of it runs on the main thread, but win_damage and desk_damage,
 ;  which any thread may call. Measures are points (theme.asm: pt).
@@ -109,6 +110,9 @@ DK_EXTRA        equ 1                   ; a program's that is not one of the app
 DK_MIN          equ 2                   ; a window minimised
 
 APP_TERMINAL    equ 0
+APP_FILES       equ 1
+APP_NOTES       equ 2
+APP_SETTINGS    equ 5
 APP_SYSTEM      equ 6
 APP_MANDEL      equ 7
 
@@ -173,6 +177,7 @@ desk_metrics:
     PT m_bar_pad, 14
     PT m_gap, 16
     PT m_mark, 15
+    call mn_metrics
     mov rax, [m_blur]
     cmp rax, 64
     jbe .blur_ok
@@ -1567,6 +1572,7 @@ desk_update:
     mov rcx, [rax + 24]
     sub rcx, rsi
     call desk_glass                     ; all the glass it touches, with it
+    call mn_glass
     call desk_compose
     inc rbx
     jmp .rect
@@ -1683,8 +1689,10 @@ desk_compose:
 .tip:
     call tip_paint
     cmp r13, [m_bar_h]                  ; the menu bar
-    jge .shown
+    jge .menu
     call bar_paint
+.menu:
+    call mn_paint                       ; an open menu, over all
 .shown:
     call gfx_target_back                ; the clip off again
     mov rdi, r12
@@ -2163,29 +2171,6 @@ desk_bar_damage:
     pop rdi
     ret
 
-; desk_status(RSI = text): at the right of the bar. Preserves all.
-desk_status:
-    push rax
-    push rcx
-    push rsi
-    push rdi
-    lea rdi, [bar_status]
-    mov ecx, 159
-.copy:
-    lodsb
-    test al, al
-    jz .end
-    stosb
-    dec ecx
-    jnz .copy
-.end:
-    mov byte [rdi], 0
-    pop rdi
-    pop rsi
-    pop rcx
-    pop rax
-    jmp desk_bar_damage
-
 ; bar_paint: the bar, within the clip
 bar_paint:
     push rbx
@@ -2215,43 +2200,17 @@ bar_paint:
     add rax, [m_bar_h]
     shr rax, 1
     mov r13, rax
-    call bar_mark                       ; the mark
-    mov rdi, [m_bar_pad]                ; then the app in front, its name
-    lea rdi, [rdi * 2]
-    add rdi, [m_mark]
-    call bar_app_name
-    mov rdx, rax
-    mov rsi, r13
-    mov ecx, [th_c + TC_TEXT]
-    mov r8d, [f_title]
-    call uf_text
-    ; at the right: the time, then what the system is doing
-    call bar_clock
-    lea rdi, [bar_clock_text]
-    mov esi, [f_body]
-    call uf_width
-    mov rdi, [scr_w]
-    sub rdi, [m_bar_pad]
-    sub rdi, rax
-    mov r12, rdi
+    call bar_layout                     ; where each thing is
+    call bt_paint                       ; the open menu's title lit, the app,
+    call bar_mark                       ; the menus; the mark
+    mov rdi, [bar_clock_x]              ; at the right: the time,
     mov rsi, r13
     lea rdx, [bar_clock_text]
     mov ecx, [th_c + TC_TEXT]
     mov r8d, [f_body]
     call uf_text
-    lea rdi, [bar_status]
-    mov esi, [f_body]
-    call uf_width
-    mov rdi, r12
-    sub rdi, [m_bar_pad]
-    sub rdi, [m_bar_pad]
-    sub rdi, rax
-    mov rsi, r13
-    lea rdx, [bar_status]
-    mov ecx, [th_c + TC_TEXT2]
-    mov r8d, [f_body]
-    call uf_text
-.out:
+    call st_paint                       ; and the battery, the network, the
+.out:                                   ; launcher
     pop r13
     pop r12
     pop rbx
@@ -2405,7 +2364,8 @@ desk_tick:
     mov [bar_minute], rax
     call desk_bar_damage
 .out:
-    call wg_tick                        ; and the widgets'
+    call st_tick                        ; the battery and the network,
+    call wg_tick                        ; the widgets
     pop rax
     ret
 
@@ -2917,16 +2877,25 @@ dock_click:
     jmp .out
 .app:
     mov edi, [rbx + DI_APP]
-    call app_front                      ; its windows, if it has any
+    call app_open
+.out:
+    pop rbx
+    ret
+
+; app_open(EDI = an app): its windows forward, if it has any; else it
+; starts (the dock's apps, the menus)
+app_open:
+    push rbx
+    mov ebx, edi
+    call app_front
     jnc .out
-    mov edi, [rbx + DI_APP]
-    cmp edi, APP_TERMINAL
+    cmp ebx, APP_TERMINAL
     je .terminal
-    cmp edi, APP_SYSTEM                 ; built in: their windows are always
+    cmp ebx, APP_SYSTEM                 ; built in: their windows are always
     je .out                             ; there, put away or not
-    cmp edi, APP_MANDEL
+    cmp ebx, APP_MANDEL
     je .out
-    imul rax, rdi, DA_SIZE
+    imul rax, rbx, DA_SIZE
     lea rcx, [dock_apps]
     mov rdi, [rcx + rax + DA_PROG]
     lea rsi, [str_empty]
@@ -3202,6 +3171,8 @@ desk_press:
     push r12
     push r13
     mov r12d, edx
+    call mn_press                       ; the bar's, or an open menu's?
+    jc .done
     mov rdi, [ptr_x]
     mov rsi, [ptr_y]
     call desk_hit
@@ -3311,6 +3282,7 @@ desk_press:
 
 ; desk_release(EDX = button)
 desk_release:
+    call mn_release                     ; over an open menu's item: it is done
     cmp edx, 1
     jne .press
     mov byte [drag_mode], DRAG_NONE
@@ -3482,6 +3454,7 @@ desk_motion:
 ; desk_hover: what is under the pointer, for the buttons that light and
 ; the dock's names
 desk_hover:
+    call mn_hover                       ; an open menu's item, or another menu
     push rbx
     mov rdi, [ptr_x]
     mov rsi, [ptr_y]
@@ -3547,9 +3520,11 @@ desk_wheel:
     pop rbx
     ret
 
-; desk_key(EAX = key code): to the window with the keys; with none, to the
-; first shell, brought forward
+; desk_key(EAX = key code): to an open menu; else to the window with the
+; keys; with none, to the first shell, brought forward
 desk_key:
+    cmp qword [mn_which], -1
+    jne mn_key
     push rbx
     mov rbx, [desk_focus]
     test rbx, rbx
@@ -3886,6 +3861,5 @@ dock_w:         resq 1
 dock_items:     resb DOCK_MAX * DI_SIZE
 app_icons:      resb DOCK_APPS * SF_SIZE
 bar_minute:     resq 1
-bar_status:     resb 160
 bar_clock_text: resb 64
 light_pts:      resd 32

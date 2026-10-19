@@ -334,7 +334,10 @@ wg_paint:
 ; wallpaper). Preserves all.
 wg_show:
     cmp byte [wg_ok], 0
-    jne .some
+    je .none
+    cmp byte [wg_hidden], 0             ; put away (View's menu)
+    je .some
+.none:
     ret
 .some:
     push rax
@@ -1025,4 +1028,5 @@ wg_f_head:      resd 1
 wg_f_big:       resd 1
 wg_f_mid:       resd 1
 wg_ok:          resb 1                  ; they are made
+wg_hidden:      resb 1                  ; not shown
 wg_buf:         resb 64
