@@ -537,6 +537,43 @@ EFI partition is checked (`fsck.vfat -n`), `START.TXT` is removed and
 `install` put there. `tools/test/update-fleet` runs `axiom1.txt` the same
 way in QEMU.
 
+### A battery kept between 75% and 80%
+
+A laptop that lives on its charger wears its battery out kept full and
+warm, and the battery can swell. As fleet's battery-hold does under Linux,
+`battery hold` (a line `START.TXT` may hold) keeps it between 75% and 80%:
+
+```
+battery                           # the charge, the charger, how it charges
+battery hold [off]                # a tick each minute: stop or start charging
+battery mode normal|inhibit|discharge   # by hand, the hold off
+battery ec                        # the embedded controller's 256 registers
+battery test                      # the hold against a simulated EC
+```
+
+On HP's boards the embedded controller (ec.asm: its two I/O ports, from the
+ECDT or the board table) takes a charge mode in one register: 0 charges as
+the firmware likes, 5 stops charging, 2 runs the laptop from the battery
+with the charger in. From 85% it runs down to 80%; at 80% charging stops;
+at 75% it charges again. Axiom runs no AML, so the board table in
+battery.asm says where the EC keeps what the firmware's `_BST` and `_PSR`
+would read: the charge left and when full, and the charger, as EC
+registers or through the smart battery on the EC's SMBus. No reading, a
+reading that makes no sense, or a run-down that lowers nothing in 10
+minutes puts it back to normal charging (or holds it where it is), as every
+restart and power-off does. A board not in the table is left alone.
+
+hp-1's board (HP 87FE) is in the table with its charge register (0x76,
+tried by fleet under Linux); where its charge is read is found with
+
+```
+python tools/hw/hp1.py battery    # its ACPI tables and EC registers, read under Ubuntu
+```
+
+which runs `tools/hw/ecmap.py` on them: the EC's fields, the code of
+`_BST`, `_BIF` and `_PSR` and the fields they reach, and which registers
+hold the numbers Linux reports at that moment.
+
 ## Layout
 
 ```
@@ -600,10 +637,14 @@ tools/test/             host-side tests for self-contained modules (tls: the
                         running jobs, across two boots; update-fleet: a
                         new kernel over fleet, kept by the client's
                         hello, or given up without one, and hp-1's
-                        axiom1.txt as test runs); all.py runs them
-                        all at once, and qemu.py boots side by side
+                        axiom1.txt as test runs; battery: the hold
+                        against a simulated EC, hp-1's board with no EC,
+                        and ecmap.py on a DSDT made by hand); all.py runs
+                        them all at once, and qemu.py boots side by side
 tools/hw/hp1.py         test runs on hp-1, through fleet (hp1_node.py runs
                         there, as root)
+tools/hw/ecmap.py       a DSDT's embedded controller: its fields, and those
+                        the battery's _BST and the charger's _PSR read
 tools/mkfont.py         rasterize the console font into src/kernel/gen/
 tools/mkuifont.py       rasterize the desktop's font into src/kernel/gen/
 docs/                   vision, architecture, and the ABI programs see (ABI.md)

@@ -28,15 +28,24 @@ hp1.py sent: EFI/AXIOM/BOOTX64.EFI and run.txt.
                                    starts the kernel built into its loader
     python3 hp1_node.py fsck       the EFI system partition checked, read
                                    only (fsck.vfat -n), after Axiom wrote it
+    python3 hp1_node.py battery    what tools/hw/ecmap.py needs, as JSON on
+                                   BATTERY lines: the DSDT (and the SSDTs naming a
+                                   battery), the EC's ports, what Linux says
+                                   of the battery and the charger, and the
+                                   EC's registers if ec_sys is loaded; read
+                                   only, nothing loaded
 
 Only BootNext is ever set; BootOrder is never written. Nothing here reads
 or prints anything but Axiom's own variables, the boot entries, and the
 TCO watchdog's registers, but for `wifi`: it reads the network's saved
 passphrase and writes only the key made from it, and prints neither, nor
-the network's name; and `home`, which copies fleet's files for axiom-1 and
-prints only their sizes.
+the network's name; `home`, which copies fleet's files for axiom-1 and
+prints only their sizes; and `battery`, which prints the firmware's ACPI
+tables, the EC's registers, and the battery's and charger's state.
 """
+import base64
 import hashlib
+import json
 import os
 import pathlib
 import re
@@ -44,6 +53,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import zlib
 
 GUID = "8b367f3b-9403-4cf2-81cd-bda84a771936"         # bootinfo.inc's AXIOM_VENDOR_GUID
 EFIVARS = pathlib.Path("/sys/firmware/efi/efivars")
@@ -439,6 +449,48 @@ def fsck():
     return proc.returncode
 
 
+def battery():
+    """For src/kernel/battery.asm's board table (tools/hw/ecmap.py): the
+    ACPI tables that say how the firmware reads the battery, the EC's I/O
+    ports as Linux found them, Linux's battery and charger (not the
+    battery's serial number), the EC's 256 registers if ec_sys is already
+    loaded (fleet's battery-hold loads it), and fleet's battery-hold state.
+    Reads only; loads nothing."""
+    tables = pathlib.Path("/sys/firmware/acpi/tables")
+    out = {"board": [read_text(pathlib.Path("/sys/class/dmi/id") / f)
+                     for f in ("board_vendor", "board_name", "bios_version")],
+           "tables": {}, "supplies": {}}
+    for t in sorted(tables.glob("*SDT*")):
+        data = t.read_bytes()
+        if t.name == "DSDT" or any(k in data for k in (b"_BST", b"_BIF", b"_BIX", b"_PSR")):
+            out["tables"][t.name] = base64.b64encode(zlib.compress(data, 9)).decode()
+    out["ioports"] = [l.strip() for l in open("/proc/ioports", encoding="utf-8")
+                      if "EC " in l or "PNP0C09" in l]
+    for d in sorted(pathlib.Path("/sys/class/power_supply").glob("*")):
+        values = {}
+        for line in read_text(d / "uevent").splitlines():
+            key, _, value = line.partition("=")
+            key = key.removeprefix("POWER_SUPPLY_")
+            if key != "SERIAL_NUMBER":
+                values[key] = value
+        out["supplies"][d.name] = values
+    io = pathlib.Path("/sys/kernel/debug/ec/ec0/io")
+    out["ec"] = io.read_bytes()[:256].hex() if io.exists() else None
+    hold = pathlib.Path("/run/fleet/battery-hold.json")
+    out["hold"] = json.loads(hold.read_text(encoding="utf-8")) if hold.exists() else None
+    text = json.dumps(out)
+    for at in range(0, len(text), 4000):              # lines of a size any log keeps
+        print("BATTERY " + text[at:at + 4000])
+    return 0
+
+
+def read_text(path):
+    try:
+        return path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return ""
+
+
 def cancel():
     efivar_delete(RUN)
     _, nxt, _, axiom = boot_entries()
@@ -452,4 +504,5 @@ if __name__ == "__main__":
     what = sys.argv[1] if len(sys.argv) > 1 else "status"
     sys.exit({"status": status, "install": install, "run": run, "log": log,
               "cancel": cancel, "wifi": wifi, "home": home, "try": try_kernel,
-              "start": start, "forget": forget, "fsck": fsck}[what]() or 0)
+              "start": start, "forget": forget, "fsck": fsck,
+              "battery": battery}[what]() or 0)

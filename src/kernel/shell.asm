@@ -2029,6 +2029,7 @@ commands:
     COMMAND 'panic',    cmd_panic,    'panic [null|code|const|nx|stack|guard|twice|after|page|vm|thread]: test the crash screen, or a kind of memory fault'
     THING   'harness',  harness_actions, 'test runs on a machine no one is at (tools/hw/hp1.py): its script, its log'
     THING   'update',   update_actions, 'a new kernel: tried at the next start, then kept, or given up on its own'
+    THING   'battery',  battery_actions, "a laptop's battery: its charge; kept between 75% and 80% on its charger"
     COMMAND 'reboot',   cmd_reboot,   'restart the machine'
     COMMAND 'poweroff', cmd_poweroff, 'turn the machine off'
     dq 0, 0, 0, 0, 0

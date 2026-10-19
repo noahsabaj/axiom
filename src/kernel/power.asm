@@ -43,6 +43,7 @@ efi_reset:
 
 power_reboot:
     call rtw_leave                      ; off the Wi-Fi network, first
+    call battery_leave                  ; and normal charging again
     mov edi, EFI_RESET_COLD
     call efi_reset
     cli
@@ -75,6 +76,7 @@ power_reboot:
 
 power_off:
     call rtw_leave
+    call battery_leave
     mov edi, EFI_RESET_SHUTDOWN
     call efi_reset
     cli

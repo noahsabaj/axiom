@@ -27,6 +27,9 @@
     python tools/hw/hp1.py fsck                its EFI partition checked, read only
     python tools/hw/hp1.py axiom1 [--update]   one run as axiom-1, fleet's node: see
                                                axiom1() below
+    python tools/hw/hp1.py battery             how Axiom is to read its battery: its
+                                               ACPI tables and EC registers, read
+                                               under Ubuntu, through tools/hw/ecmap.py
 
 axiom1 is the test before Ubuntu goes (Stage C): Axiom alone on hp-1,
 fleet's node over Wi-Fi. It installs build/esp, makes START.TXT 'fleet &',
@@ -51,12 +54,14 @@ job starts or runs on hp-1, and none waiting in fleet's queue may go there.
 The log is also saved to build/hw/hp1-last.log.
 """
 import argparse
+import base64
 import json
 import pathlib
 import shutil
 import subprocess
 import sys
 import time
+import zlib
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 STAGE = ROOT / "build" / "hw" / "hp1"
@@ -284,6 +289,36 @@ def axiom1(update, wait, keep):
     return code
 
 
+def battery():
+    """How Axiom is to read hp-1's battery (src/kernel/battery.asm's board
+    table): hp1_node.py battery, read only, under Ubuntu; its ACPI tables
+    saved in build/hw/hp1-acpi/, the rest in build/hw/hp1-battery.json, and
+    tools/hw/ecmap.py's report on them printed and saved in
+    build/hw/hp1-ecmap.txt."""
+    out = node("battery")
+    text = "".join(line[8:] for line in out.splitlines() if line.startswith("BATTERY "))
+    if not text:
+        sys.exit("hp1.py: hp1_node.py battery said nothing:\n" + out)
+    data = json.loads(text)
+    hw = ROOT / "build" / "hw"
+    (hw / "hp1-acpi").mkdir(parents=True, exist_ok=True)
+    blobs = []
+    for name, packed in sorted(data.pop("tables").items(), key=lambda t: t[0] != "DSDT"):
+        raw = zlib.decompress(base64.b64decode(packed))
+        (hw / "hp1-acpi" / f"{name}.aml").write_bytes(raw)
+        blobs.append((name, raw))
+    (hw / "hp1-battery.json").write_text(json.dumps(data, indent=1), encoding="utf-8")
+    sys.path.insert(0, str(ROOT / "tools" / "hw"))
+    import ecmap
+    lines = [f"board: {' '.join(data['board'])}; tables: {', '.join(n for n, _ in blobs)}",
+             "ioports: " + ("; ".join(data["ioports"]) or "none named EC"),
+             "fleet's battery-hold: " + json.dumps(data.get("hold")),
+             *ecmap.report(blobs, data)]
+    (hw / "hp1-ecmap.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print("\n".join(lines))
+    return 0
+
+
 def log():
     out = node("log", check=False)
     (ROOT / "build" / "hw").mkdir(parents=True, exist_ok=True)
@@ -295,7 +330,8 @@ def log():
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("what", choices=("status", "install", "run", "log", "cancel", "wifi",
-                                     "home", "try", "start", "forget", "fsck", "axiom1"))
+                                     "home", "try", "start", "forget", "fsck", "axiom1",
+                                     "battery"))
     ap.add_argument("lines", nargs="*", help="run: the script's lines; start: START.TXT's")
     ap.add_argument("--update", action="store_true", help="axiom1: a new kernel over fleet, "
                     "and a second run, its trial")
@@ -324,6 +360,8 @@ def main():
         return 0
     if opts.what == "axiom1":
         return axiom1(opts.update, max(opts.wait, 1200), opts.keep)
+    if opts.what == "battery":
+        return battery()
     print(node(opts.what, check=opts.what != "fsck").strip())
     return 0
 

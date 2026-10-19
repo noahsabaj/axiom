@@ -88,6 +88,7 @@ kernel_main:
     mov edx, [ioapic_count]
     KLOG "acpi: %u tables, %u processors in the MADT, %u I/O APIC(s)", rcx, rax, rdx
     call smbios_init
+    call battery_init                   ; the EC, and a board whose battery Axiom holds
     call pmm_release_boot_services
     mov rax, [pmm_free_pages]
     shl rax, 12
@@ -161,6 +162,7 @@ main_loop:
     call start_service                  ; START.TXT's lines, at each start
     call harness_service                ; a test run's next line
     call update_service                 ; a trial not kept in time: a restart
+    call battery_service                ; the battery hold's minute
 .keys:
     call key_next                       ; keys down and up, until a key code's turn
     jc .input
