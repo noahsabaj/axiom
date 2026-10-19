@@ -287,6 +287,9 @@ def main():
                     "serial port on the next two); 0 for free ones and firmware "
                     "variables of its own")
     ap.add_argument("--serial", default="serial.log", help="log name in build/")
+    ap.add_argument("--vars", help="the firmware's variables in this file, kept after "
+                    "the run (made from their first state if it is not there), so that "
+                    "boots one after another share them")
     ap.add_argument("--cpu", help="CPU model (default: max; max,-svm,-vmx on WHPX)")
     ap.add_argument("--no-iommu", action="store_true", help="leave out the emulated VT-d "
                     "unit (intel-iommu) every device's DMA otherwise goes through")
@@ -307,7 +310,7 @@ def main():
                     "[button]' drags, 'wheel X Y N' turns the wheel N notches, 'key NAME "
                     "down|up' presses or lets go of one key)")
     opts = ap.parse_args()
-    fresh = opts.port == 0
+    fresh = opts.port == 0 and not opts.vars
 
     if opts.stick:
         # the loader on a USB stick image, as on real hardware; writes stay
@@ -323,10 +326,18 @@ def main():
     cpu = opts.cpu or ("max,-svm,-vmx" if accel == "whpx" else "max")
 
     def qemu_args():
-        MONITOR[1] = free_ports() if fresh else opts.port
+        MONITOR[1] = free_ports() if opts.port == 0 else opts.port
         # a stick boot leaves its own boot entries in the firmware's variables:
         # keep them apart from the usual ones
-        code, vars_fd = firmware(qemu, f"{MONITOR[1]}{'-stick' if opts.stick else ''}", fresh)
+        if opts.vars:
+            code = qemu.parent / "share" / "edk2-x86_64-code.fd"
+            vars_fd = pathlib.Path(opts.vars).resolve()
+            if not vars_fd.exists():
+                vars_fd.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(code.parent / "edk2-i386-vars.fd", vars_fd)
+        else:
+            code, vars_fd = firmware(qemu, f"{MONITOR[1]}{'-stick' if opts.stick else ''}",
+                                     fresh)
         args = [str(qemu), "-accel", accel, "-machine", "q35", "-cpu", cpu, "-smp", opts.smp,
                 "-m", opts.mem,
                 *([] if opts.no_iommu else ["-device", "intel-iommu,intremap=off"]),

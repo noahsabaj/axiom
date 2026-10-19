@@ -1,0 +1,18 @@
+# hp-1's first test run: what Axiom sees of the machine, reading only
+limit 240
+sleep 3
+info
+cpus
+mem kinds
+threads cpus
+acpi
+pci
+iommu
+usb
+disks
+nvme
+net
+sound
+date
+uptime
+harness

@@ -118,6 +118,8 @@ section .text
 %include "hda.asm"
 %include "sound.asm"
 %include "power.asm"
+%include "efivar.asm"
+%include "harness.asm"
 %include "lxmm.asm"
 %include "lxfs.asm"
 %include "linux.asm"

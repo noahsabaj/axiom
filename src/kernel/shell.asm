@@ -2020,6 +2020,7 @@ commands:
     COMMAND 'echo',     cmd_echo,     'echo <words>: them, as a line'
     COMMAND 'clear',    cmd_clear,    'clear the console (also ctrl+L)'
     COMMAND 'panic',    cmd_panic,    'panic [null|code|const|nx|stack|guard|twice|after|page|vm|thread]: test the crash screen, or a kind of memory fault'
+    THING   'harness',  harness_actions, 'test runs on a machine no one is at (tools/hw/hp1.py): its script, its log'
     COMMAND 'reboot',   cmd_reboot,   'restart the machine'
     COMMAND 'poweroff', cmd_poweroff, 'turn the machine off'
     dq 0, 0, 0, 0, 0

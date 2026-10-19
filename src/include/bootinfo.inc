@@ -47,4 +47,18 @@ BI_RESV_MAX     equ 16
 BI_FW_VENDOR    equ 416                 ; 64-byte ASCII firmware vendor
 BI_BOOT_SERIAL  equ 480                 ; dword FAT volume serial of the boot volume
 BI_BOOT_FS      equ 484                 ; dword: 32 FAT32, 16 FAT16, 0 unknown
+BI_RUN          equ 488                 ; a test run's script (AxiomRun), physical; 0 if none or unread
+BI_RUN_SIZE     equ 496                 ; dword: its bytes; 0 if this is no test run
+BI_TCO          equ 500                 ; word: I/O base of the TCO watchdog the loader started, or 0
+BI_TCO_STS      equ 502                 ; word: TCO2_STS as found (bit 1: the watchdog reset the
+                                        ; machine); bit 15: its NO_REBOOT is locked on
 BI_SIZE         equ 512
+
+; Axiom's UEFI variables (AxiomRun, AxiomLog) are under this vendor GUID:
+; 8b367f3b-9403-4cf2-81cd-bda84a771936 (tools/hw/hp1.py)
+%macro AXIOM_VENDOR_GUID 0
+    dd 0x8B367F3B
+    dw 0x9403, 0x4CF2
+    db 0x81, 0xCD, 0xBD, 0xA8, 0x4A, 0x77, 0x19, 0x36
+%endmacro
+RUN_MAX         equ 8192                ; the most a test run's script may hold, its NUL too

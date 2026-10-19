@@ -239,6 +239,8 @@ panic:
     call panic_paint
     lea rdi, [panic_text]
     call log_panic                      ; onto the boot stick, if that is safe
+    cmp byte [harness_on], 0
+    jne harness_crashed                 ; a test run: its log kept, and a restart
 .halt:
     cli
     hlt

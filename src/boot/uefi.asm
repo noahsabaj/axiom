@@ -142,6 +142,7 @@ entry:                                      ; RCX = ImageHandle, RDX = SystemTab
     call find_config_tables
     call find_boot_volume
     call calibrate_tsc
+    call find_test_run
     call load_kernel
     call build_page_tables
     lea rdx, [msg_launch]
@@ -478,6 +479,196 @@ calibrate_tsc:
     imul rax, rax, 20
     mov [bootinfo + BI_TSC_HZ], rax
     add rsp, 40
+    ret
+
+; -----------------------------------------------------------------------------
+;  find_test_run - a test run, as tools/hw/hp1.py asks for one: its script in
+;  the UEFI variable AxiomRun, read into pages of its own for the kernel and
+;  deleted, so that it runs once; and the chipset's TCO watchdog started, so
+;  that a run that hangs ends in a reset all the same. Never fatal.
+; -----------------------------------------------------------------------------
+find_test_run:
+    sub rsp, 40                             ; shadow space + a fifth argument
+    mov rax, [system_table]
+    mov rax, [rax + ST_RUNTIME]
+    mov [runtime], rax
+    mov qword [run_size], 0                 ; GetVariable(name, guid, NULL, &0, buf):
+    lea rcx, [name_axiom_run]               ; how big, if it is there
+    lea rdx, [axiom_guid]
+    xor r8d, r8d
+    lea r9, [run_size]
+    lea rax, [run_probe]
+    mov [rsp + 32], rax
+    mov rax, [runtime]
+    call [rax + RT_GET_VARIABLE]
+    mov rcx, EFI_BUFFER_TOO_SMALL
+    cmp rax, rcx
+    jne .out                                ; no test run
+    mov rax, [run_size]
+    mov ecx, RUN_MAX
+    cmp rax, rcx
+    cmova eax, ecx                          ; (too big: still a run, of nothing)
+    mov [bootinfo + BI_RUN_SIZE], eax
+    cmp qword [run_size], RUN_MAX - 1
+    ja .delete
+    mov ecx, RUN_MAX / 4096
+    xor edx, edx
+    call alloc_pages                        ; zeroed, and kept for the kernel
+    mov [run_buf], rax
+    mov qword [run_size], RUN_MAX - 1       ; (a NUL after it)
+    lea rcx, [name_axiom_run]
+    lea rdx, [axiom_guid]
+    xor r8d, r8d
+    lea r9, [run_size]
+    mov rax, [run_buf]
+    mov [rsp + 32], rax
+    mov rax, [runtime]
+    call [rax + RT_GET_VARIABLE]
+    test rax, rax
+    jnz .delete
+    mov rax, [run_buf]
+    mov [bootinfo + BI_RUN], rax
+    mov eax, [run_size]
+    mov [bootinfo + BI_RUN_SIZE], eax
+.delete:
+    lea rcx, [name_axiom_run]               ; SetVariable(name, guid, 0, 0, NULL): gone
+    lea rdx, [axiom_guid]
+    xor r8d, r8d
+    xor r9d, r9d
+    mov qword [rsp + 32], 0
+    mov rax, [runtime]
+    call [rax + RT_SET_VARIABLE]
+    call tco_start
+.out:
+    add rsp, 40
+    ret
+
+; -----------------------------------------------------------------------------
+;  tco_start - the chipset's TCO watchdog, counting: it resets the machine
+;  unless the kernel reloads it (harness.asm) in time. Two chipsets so far:
+;  Tiger Lake's (and later ones, where NO_REBOOT is in TCO1_CNT, Linux's
+;  iTCO version 6), and QEMU's ICH9 (version 2: NO_REBOOT in the chipset
+;  registers at RCBA). Anything else has none. BI_TCO says where it is.
+; -----------------------------------------------------------------------------
+TCO_RLD         equ 0x00                    ; written: the count starts again
+TCO1_STS        equ 0x04
+TCO2_STS        equ 0x06
+TCO1_CNT        equ 0x08
+TCO_TMR         equ 0x12                    ; the count: ticks of 0.6 s
+TCO_TICKS       equ 100                     ; counted twice: a reset 2 minutes on
+TCO_TMR_HLT     equ 0x0800
+TCO_NO_REBOOT   equ 0x0001                  ; TCO1_CNT's, on version 6
+
+tco_start:
+    mov byte [tco_v6], 0
+    mov eax, 0x8000FC00                     ; 0:31.4, the SMBus controller
+    call cfg_read
+    lea rsi, [tco_v6_ids]
+.v6_next:
+    mov ecx, [rsi]
+    test ecx, ecx
+    jz .ich9
+    add rsi, 4
+    cmp eax, ecx
+    jne .v6_next
+    mov eax, 0x8000FC54                     ; TCOCTL: TCO_BASE_EN
+    call cfg_read
+    test eax, 0x100
+    jz .none
+    mov eax, 0x8000FC50                     ; TCOBASE
+    call cfg_read
+    and eax, 0xFFE0
+    jz .none
+    mov [tco_base], ax
+    mov byte [tco_v6], 1
+    jmp .found
+.ich9:
+    mov eax, 0x8000F800                     ; 0:31.0, the LPC bridge
+    call cfg_read
+    cmp eax, 0x29188086                     ; ICH9
+    jne .none
+    mov eax, 0x8000F840                     ; PMBASE; the TCO's 0x60 above it
+    call cfg_read
+    and eax, 0xFF80
+    jz .none
+    add eax, 0x60
+    mov [tco_base], ax
+    mov eax, 0x8000F8F0                     ; RCBA, where GCS is
+    call cfg_read
+    test eax, 1
+    jnz .rcba
+    mov eax, 0x8000F8F0                     ; not there yet: where firmware puts it
+    mov ecx, 0xFED1C001
+    call cfg_write
+    mov eax, 0xFED1C001
+.rcba:
+    and eax, 0xFFFFC000
+    mov ecx, [rax + 0x3410]                 ; GCS: NO_REBOOT is bit 5
+    and ecx, ~0x20
+    mov [rax + 0x3410], ecx
+    mov ecx, [rax + 0x3410]
+    test ecx, 0x20
+    jnz .locked                             ; strapped on
+.found:
+    movzx edx, word [tco_base]              ; what it says of the last reset,
+    add edx, TCO2_STS
+    in ax, dx
+    or [bootinfo + BI_TCO_STS], ax
+    mov ax, 0x0006                          ; then cleared: SECOND_TO_STS, BOOT_STS
+    out dx, ax
+    sub edx, TCO2_STS - TCO1_STS
+    mov ax, 0x0008                          ; TIMEOUT
+    out dx, ax
+    add edx, TCO_TMR - TCO1_STS
+    in ax, dx
+    and ax, 0xFC00
+    or ax, TCO_TICKS
+    out dx, ax
+    sub edx, TCO_TMR - TCO_RLD
+    mov ax, 1
+    out dx, ax                              ; from the top
+    add edx, TCO1_CNT - TCO_RLD
+    in ax, dx
+    and ax, ~TCO_TMR_HLT                    ; counting,
+    cmp byte [tco_v6], 0
+    je .count
+    and ax, ~TCO_NO_REBOOT                  ; and allowed to reset the machine
+.count:
+    out dx, ax
+    in ax, dx
+    test ax, TCO_TMR_HLT
+    jnz .none                               ; locked halted
+    cmp byte [tco_v6], 0
+    je .armed
+    test ax, TCO_NO_REBOOT
+    jz .armed
+    or ax, TCO_TMR_HLT                      ; it would count for nothing: stopped
+    out dx, ax
+.locked:
+    or word [bootinfo + BI_TCO_STS], 0x8000
+    jmp .none
+.armed:
+    mov ax, [tco_base]
+    mov [bootinfo + BI_TCO], ax
+.none:
+    ret
+
+; cfg_read(EAX = 0x80000000 | bus << 16 | device << 11 | function << 8 |
+; register) -> EAX = that dword of PCI configuration space
+cfg_read:
+    mov dx, 0xCF8
+    out dx, eax
+    mov dx, 0xCFC
+    in eax, dx
+    ret
+
+; cfg_write(EAX = the same address, ECX = the dword)
+cfg_write:
+    mov dx, 0xCF8
+    out dx, eax
+    mov dx, 0xCFC
+    mov eax, ecx
+    out dx, eax
     ret
 
 ; -----------------------------------------------------------------------------
@@ -887,6 +1078,10 @@ pd_kernel:          dq 0
 pd_fb:              dq 0
 pt_kernel:          dq 0
 pt_fb:              dq 0
+runtime:            dq 0
+run_size:           dq 0
+run_buf:            dq 0
+run_probe:          dq 0
 gop_max_mode:       dd 0
 mode_iter:          dd 0
 best_mode:          dd 0
@@ -894,6 +1089,17 @@ best_w:             dd 0
 best_h:             dd 0
 exit_tries:         dd 0
 boot_block:         dd 0
+tco_base:           dw 0
+tco_v6:             db 0
+
+align 4
+tco_v6_ids:     dd 0xA0A38086                   ; Tiger Lake-LP's SMBus controller
+                dd 0x43A38086                   ; Tiger Lake-H's
+                dd 0
+name_axiom_run: dw __utf16__('AxiomRun'), 0     ; (aligned: UTF-16)
+
+align 8
+axiom_guid:     AXIOM_VENDOR_GUID
 
 align 8
 gop_guid:       dd 0x9042A9DE

@@ -40,6 +40,7 @@ kernel_main:
     call rtc_epoch                      ; the time programs are told (SI_CLOCK)
     KLOG "clock:%04u-%02u-%02u %02u:%02u:%02u", qword [rtc_year], qword [rtc_mon], qword [rtc_day], qword [rtc_hour], qword [rtc_min], qword [rtc_sec]
     call log_init
+    call harness_init                   ; a test run the loader found (hp-1)
     lea rax, [cpu_brand]
     KLOG "cpu: %s, TSC %u MHz", rax, qword [tsc_mhz]
 
@@ -153,6 +154,7 @@ main_loop:
     call user_service
     call iommu_service
     call shell_service                  ; the rest of a line, after a command
+    call harness_service                ; a test run's next line
 .keys:
     call key_next                       ; keys down and up, until a key code's turn
     jc .input
@@ -211,6 +213,8 @@ main_loop:
     cmp byte [user_pending], 0
     jne .awake
     cmp byte [shell_pending], 0
+    jne .awake
+    cmp byte [harness_ready], 0         ; a test run's line done: the next
     jne .awake
     cmp byte [lx_pending], 0            ; a Linux process ended
     jne .awake

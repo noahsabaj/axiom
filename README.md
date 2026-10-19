@@ -424,6 +424,28 @@ Things worth knowing:
   i7-14700F has no integrated graphics, so the monitor must be on the RTX card.
 - Serial output (COM1, 115200) mirrors the log, if your machine has a header.
 
+### Test runs on a machine no one is at
+
+hp-1, a Tiger Lake laptop of the fleet (tools in `C:\Development\fleet`),
+still runs Ubuntu, and Axiom is tested there from this PC:
+
+```
+python tools/hw/hp1.py install              # build/esp's loader onto its EFI partition
+python tools/hw/hp1.py run "pci" "acpi" "threads cpus"
+python tools/hw/hp1.py run --file script.txt
+```
+
+A run's lines go into the UEFI variable `AxiomRun`; hp-1 boots Axiom once
+(BootNext; BootOrder is never touched). The loader takes the script and
+starts the chipset's TCO watchdog; the kernel types each line into the
+shell once the last is done (`harness.asm`: also `sleep <s>`, `until
+<text>`, `timeout <s>`, `limit <s>`, `watchdog <s>`, `end`), then puts the
+end of its log into the UEFI variable `AxiomLog` and restarts, into Ubuntu
+again, where `hp1.py` reads it (and keeps it in `build/hw/hp1-last.log`). A
+panic saves the log and restarts too; a hang ends in the watchdog's reset.
+`harness` in the shell shows a run and the variables; `tools/test/harness`
+runs the whole round in QEMU.
+
 ## Layout
 
 ```
@@ -478,8 +500,12 @@ tools/test/             host-side tests for self-contained modules (tls: the
                         locks, thread_local! and files; masm: mhello,
                         from MASM; sound: HD Audio, the mixer and
                         streams, judged from the WAV file QEMU's codec
-                        writes); all.py runs them
+                        writes; harness: test runs as hp-1 has them,
+                        across boots on one store of firmware variables,
+                        to the watchdog's reset); all.py runs them
                         all at once, and qemu.py boots side by side
+tools/hw/hp1.py         test runs on hp-1, through fleet (hp1_node.py runs
+                        there, as root)
 tools/mkfont.py         rasterize the console font into src/kernel/gen/
 tools/mkuifont.py       rasterize the desktop's font into src/kernel/gen/
 docs/                   vision, architecture, and the ABI programs see (ABI.md)

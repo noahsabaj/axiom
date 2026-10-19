@@ -1340,6 +1340,10 @@ sched_tick:
     push r12
     push r13
     push r14
+    cmp byte [harness_on], 0            ; a test run: the watchdog reloaded
+    je .no_run
+    call harness_tick
+.no_run:
     mov r12, [gs:PC_SELF]
     cmp byte [r12 + PC_SCHED_ON], 0
     je .out
