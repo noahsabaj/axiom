@@ -857,7 +857,12 @@ off. `log` shows the state; `log save`, `log on`, `log off`.
   failed (`NETW_*`: the lookup's reasons, no link, no route, refused,
   reset, timed out, TLS with its alert, a port in use). `RO_NET_SHUT`
   sends a FIN once what was sent has gone; `RO_NET_LISTEN` and
-  `RO_NET_ACCEPT` take connections, eight waiting at most. Errors: `E_FULL`
+  `RO_NET_ACCEPT` take connections, eight waiting at most (port 0: one the
+  main loop picks; `RO_WAIT`, a0 = 1, until it listens). `RO_NET_CONNECT`
+  with `NETF_LOOKUP` only looks the host up, the socket ending once its
+  address is known; `RO_NET_ADDR` says a socket's addresses and ports (the
+  other side's and ours), and `RO_NET_STATUS` also what `RO_WAIT` would
+  find there now (`NS_RECV`, `NS_SEND`): what std::net needs. Errors: `E_FULL`
   and `E_EMPTY` for now, `E_PEER` at the end, `E_NET` on failure. When a
   socket's last handle goes, what it sent still goes out, then it is
   closed, or reset after 10 s. The program's side runs on any CPU, under

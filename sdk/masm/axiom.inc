@@ -128,7 +128,7 @@ RO_ST_SUB       EQU 21  ; handle, handle2 + a0: a name, a1 =
 RO_ST_ROLLBACK  EQU 22  ; handle, a0 = a commit's number -> a new
 RO_ST_LIST      EQU 23  ; handle, into handle2 + a0, a1 bytes at
 RO_NET_CONNECT  EQU 24  ; handle = the network, handle2 + a0: a
-RO_NET_LISTEN   EQU 25  ; handle, a0 = port -> a socket listening
+RO_NET_LISTEN   EQU 25  ; handle, a0 = port (0: one of ours, any
 RO_NET_ACCEPT   EQU 26  ; handle = a socket listening -> a socket,
 RO_NET_STATUS   EQU 27  ; handle = a socket -> SKS_* | NETW_* << 8
 RO_NET_SHUT     EQU 28  ; handle = a socket: a FIN once what was
@@ -145,7 +145,8 @@ RO_FS_REMOVE    EQU 40  ; handle, handle2 + a0: a file or an empty
 RO_FS_RENAME    EQU 41  ; handle, handle2 + a0: a file or a folder,
 RO_FS_SUB       EQU 42  ; handle, handle2 + a0: a folder, a1 =
 RO_WIN_POINTER  EQU 43  ; handle = a window, a0 = PTRM_*: the
-RO_COUNT        EQU 44
+RO_NET_ADDR     EQU 44  ; handle = a socket, into handle2 + a0:
+RO_COUNT        EQU 45
 FS_PATH         EQU 256  ; a path's field
 FV_INDEX        EQU 0  ; a volume (RO_FS_VOLUMES): dword, its n in "vol<n>:"
 FV_FLAGS        EQU 4  ; dword FVF_*
@@ -169,6 +170,16 @@ FEA_DIR         EQU 1
 FEA_RO          EQU 2
 FEA_HIDDEN      EQU 4
 FEA_SYSTEM      EQU 8
+NETF_TLS        EQU 1
+NETF_INSECURE   EQU 2  ; with NETF_TLS: the certificate not checked
+NETF_LOOKUP     EQU 4  ; alone: the host only looked up; the socket
+NA_PEER         EQU 0  ; the other side's (the host's, looked up)
+NA_LOCAL        EQU 16  ; ours (:: until it connects; a listener's)
+NA_PEER_PORT    EQU 32  ; dword
+NA_PORT         EQU 36  ; dword: ours (a listener's, once it listens)
+NA_SIZE         EQU 40
+NS_RECV         EQU 1 SHL 24  ; something to receive, or never more
+NS_SEND         EQU 1 SHL 25  ; room to send, or never again; a
 SKS_LOOKUP      EQU 1  ; its host is being looked up
 SKS_CONNECT     EQU 2
 SKS_HANDSHAKE   EQU 3  ; TLS's

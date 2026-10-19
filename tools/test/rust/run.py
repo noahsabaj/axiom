@@ -33,15 +33,27 @@ screen.
     and write: "Read-only file system", read works), then after `vol 0 rw`
     a folder made, written, appended to, 256 KiB sought in, its metadata,
     listed, NotFound, removed; a thread's panic ends it, 134; a thread's
-    std::process::exit ends it with that code; main's ExitCode is its own.
+    std::process::exit ends it with that code; main's ExitCode is its own;
+  - rstd net (std::net, on an RTL8139 on QEMU's user network, the host
+    10.0.2.2): to an echo server here, 200 KB written by one thread and read
+    back whole by another (try_clone), its addresses, peek, a read's
+    timeout, nonblocking, shutdown and the end; connect_timeout to nobody;
+    loopback and UDP refused; port 0 one of ours; a port listened on, a
+    client from here (forwarded to it) answered; by name (axiom.test, a DNS
+    server here on 127.0.0.1:53, if it can be had), and a name that isn't;
+    no sockets left.
 Skipped (passing) if there is no nightly toolchain. Outputs go to
 build/test/rust/.
 """
 import pathlib
 import re
 import shutil
+import socket
+import struct
 import subprocess
 import sys
+import threading
+import time
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "tools" / "test"))
@@ -118,6 +130,155 @@ def script_usb():
         "key w up", "wait 0.4",
         "type q", "until run: RDEMO exited", "wait 0.3",
     ]
+
+
+def free_port():
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    p = s.getsockname()[1]
+    s.close()
+    return p
+
+
+ECHO, SERVE = free_port(), free_port()
+LISTEN = 7777                           # the guest's, SERVE forwarded to it
+heard = []                              # what the guest told the client here
+
+
+def echo_server():
+    """Back whatever comes, until the other side finishes."""
+    l = socket.socket()
+    l.bind(("127.0.0.1", ECHO))
+    l.listen(8)
+
+    def one(c):
+        with c:
+            while True:
+                try:
+                    b = c.recv(65536)
+                except OSError:
+                    return
+                if not b:
+                    return
+                c.sendall(b)
+
+    def loop():
+        while True:
+            c, _ = l.accept()
+            threading.Thread(target=one, args=(c,), daemon=True).start()
+    threading.Thread(target=loop, daemon=True).start()
+
+
+def dns_server():
+    """axiom.test is 10.0.2.2; anything else does not exist. -> the names
+    asked for, or None if port 53 cannot be had (by name is not tried)."""
+    try:
+        u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        u.bind(("127.0.0.1", 53))
+    except OSError:
+        return None
+    asked = []
+
+    def loop():
+        while True:
+            try:
+                q, peer = u.recvfrom(512)
+            except OSError:
+                return
+            qid = struct.unpack(">H", q[:2])[0]
+            i, labels = 12, []
+            while q[i]:
+                labels.append(q[i + 1:i + 1 + q[i]].decode())
+                i += 1 + q[i]
+            name = ".".join(labels).lower()
+            asked.append(name)
+            question = q[12:i + 5]
+            qtype = struct.unpack(">H", q[i + 1:i + 3])[0]
+            if name == "axiom.test" and qtype == 1:
+                ans = b"\xc0\x0c" + struct.pack(">HHIH", 1, 1, 60, 4) + socket.inet_aton("10.0.2.2")
+                r = struct.pack(">HHHHHH", qid, 0x8180, 1, 1, 0, 0) + question + ans
+            elif name == "axiom.test":
+                r = struct.pack(">HHHHHH", qid, 0x8180, 1, 0, 0, 0) + question  # no AAAA
+            else:
+                r = struct.pack(">HHHHHH", qid, 0x8183, 1, 0, 0, 0) + question
+            u.sendto(r, peer)
+    threading.Thread(target=loop, daemon=True).start()
+    return asked
+
+
+def client(log_path, started):
+    """Once the guest listens: a line to it, and what it says back."""
+    deadline = time.time() + 240
+    while time.time() < deadline:
+        try:
+            if log_path.stat().st_mtime >= started and \
+                    "rstd: net listening on" in log_path.read_text(errors="replace"):
+                break
+        except OSError:
+            pass
+        time.sleep(0.3)
+    try:
+        c = socket.create_connection(("127.0.0.1", SERVE), timeout=20)
+        c.sendall(b"hello from the host\n")
+        back = b""
+        while True:
+            b = c.recv(4096)
+            if not b:
+                break
+            back += b
+        c.close()
+        heard.append(back)
+    except OSError as e:
+        heard.append(repr(e))
+
+
+def script_net(dns):
+    s = ["until log: kept in", "until dhcp: address", "wait 0.5"]
+    if dns:
+        s += ["type ip 10.0.2.15/24 10.0.2.2 10.0.2.2\\n", "wait 0.5"]
+    s += [f"type rstd net {ECHO} {LISTEN}{' dns' if dns else ''}\\n", "until run: RSTD exited",
+          "wait 12", "type sockets\\n", "wait 0.5", "type poweroff\\n", "ended"]
+    return s
+
+
+def check_net(log, dns):
+    """rstd net: std::net on axiom::hermit's sockets."""
+    def has(text):
+        return text in log
+
+    for line, what in [
+        (f"rstd: net connected to 10.0.2.2:{ECHO}, from 10.0.2.15, a port of ours true",
+         "connected, peer_addr, local_addr"),
+        ("rstd: net echoed 200000 bytes Ok(()) Ok(()), right true",
+         "200 KB echoed, written by one thread, read by another (try_clone)"),
+        ('rstd: net peeked "peek", then read "peek"', "peek, then read"),
+        ("rstd: net read timed out Err(WouldBlock) Some(200ms), in time true", "set_read_timeout"),
+        ("rstd: net nonblocking Err(WouldBlock), nodelay Ok(true)", "set_nonblocking, set_nodelay"),
+        ("rstd: net shut, then the end Ok(0)", "shutdown(Write), then the server's end"),
+        ("rstd: net nobody at 10.0.2.99:9: true, in time true", "connect_timeout to nobody"),
+        ('rstd: net loopback Err(AddrNotAvailable) Err(Some(101)), udp Err("Protocol not supported (os error 93)")',
+         "no loopback (bind, connect), no UDP"),
+        ("rstd: net port 0 is one of ours true", "bind port 0"),
+        (f"rstd: net listening on 0.0.0.0:{LISTEN}", "TcpListener::bind, local_addr"),
+        ('rstd: net accepted from 10.0.2.2, said "hello from the host"', "accept, a line read"),
+        (f"net: a program listens on port {LISTEN}", "the kernel said so"),
+        ("rstd: net done", "done"),
+    ]:
+        result(has(line), f"rstd net: {what}")
+    result(heard == [b"you said: hello from the host\n"], f"rstd net: the client here was answered ({heard})")
+    if dns:
+        result(has(f"rstd: net axiom.test is [10.0.2.2:{ECHO}]"), "rstd net: to_socket_addrs by the kernel's DNS")
+        result(has('rstd: net by name, echoed "by name"'), "rstd net: connected by name")
+        result(has('rstd: net nothing.here Err("failed to lookup address information: ")'),
+               "rstd net: a name that does not exist")
+    else:
+        print("SKIP rstd net by name: port 53 here could not be had")
+    result(has("run: RSTD exited with 0"), "rstd net: exit 0")
+    m = re.search(r"sockets: (\d+) live, (\d+) made", log)
+    result(bool(m) and m.group(1) == "0", f"rstd net: no sockets left ({m.group(0) if m else 'no line'})")
+    for line in log.splitlines():
+        if "panicked" in line or "PANIC" in line or "ended by a fault" in line:
+            result(False, f"rstd net: no panics, no faults: {line}")
 
 
 def script_std():
@@ -333,16 +494,27 @@ def main():
     shutil.copyfile(stick, stick_usb)
     stick_std = OUT / "stick-std.img"
     shutil.copyfile(stick, stick_std)
+    stick_net = OUT / "stick-net.img"
+    shutil.copyfile(stick, stick_net)
+    echo_server()
+    dns = dns_server()
+    started = time.time()
+    threading.Thread(target=client, args=(OUT / "rust-net.log", started), daemon=True).start()
+    fwd = f"user,hostfwd=tcp:127.0.0.1:{SERVE}-:{LISTEN}"
     logs = boot_all(OUT, {
         "rust": (script(""), ["--smp", "4", "--demo", "--extra", TABLET, "--stick",
                               stick.relative_to(ROOT).as_posix()], 120, 2),
         "rust-usb": (script_usb(), ["--smp", "2", "--extra", TABLET + USB_KBD, "--stick",
                                     stick_usb.relative_to(ROOT).as_posix()], 120, 1),
         "rust-std": (script_std(), ["--smp", "4", "--stick",
-                                    stick_std.relative_to(ROOT).as_posix()], 120, 2)})
+                                    stick_std.relative_to(ROOT).as_posix()], 120, 2),
+        "rust-net": (script_net(dns is not None), ["--smp", "2", "--nic", "rtl8139", "--netdev", fwd,
+                                                   "--stick", stick_net.relative_to(ROOT).as_posix()],
+                     150, 1)})
     check(*logs["rust"])
     check_keys(logs["rust-usb"][0], "usb", 1)
     check_std(logs["rust-std"][0])
+    check_net(logs["rust-net"][0], dns is not None)
     print(f"{'all passed' if not FAILS else f'{FAILS} FAILED'}")
     return 1 if FAILS else 0
 

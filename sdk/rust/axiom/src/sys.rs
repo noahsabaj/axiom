@@ -47,6 +47,12 @@ pub const RO_WRITE: u8 = 12;
 pub const RO_SEND: u8 = 13;
 pub const RO_RECV: u8 = 14;
 pub const RO_KILL: u8 = 15;
+pub const RO_NET_CONNECT: u8 = 24;
+pub const RO_NET_LISTEN: u8 = 25;
+pub const RO_NET_ACCEPT: u8 = 26;
+pub const RO_NET_STATUS: u8 = 27;
+pub const RO_NET_SHUT: u8 = 28;
+pub const RO_NET_SUB: u8 = 29;
 pub const RO_WIN_SHOW: u8 = 30;
 pub const RO_WIN_TITLE: u8 = 31;
 pub const RO_DESK_LOOK: u8 = 34;
@@ -59,6 +65,7 @@ pub const RO_FS_REMOVE: u8 = 40;
 pub const RO_FS_RENAME: u8 = 41;
 pub const RO_FS_SUB: u8 = 42;
 pub const RO_WIN_POINTER: u8 = 43;
+pub const RO_NET_ADDR: u8 = 44;
 
 pub const SQF_LINK: u8 = 1; // the next entry starts once this one succeeds
 
@@ -69,6 +76,50 @@ pub const RT_INFO: u32 = 1 << 2;
 pub const RT_DESK_WINDOW: u32 = 1 << 8;
 pub const RT_FS_READ: u32 = 1 << 8;
 pub const RT_FS_WRITE: u32 = 1 << 9;
+pub const RT_NET_CONNECT: u32 = 1 << 8;
+pub const RT_NET_TLS: u32 = 1 << 9;
+pub const RT_NET_INSECURE: u32 = 1 << 10;
+pub const RT_NET_LISTEN: u32 = 1 << 11;
+pub const RT_SK_SEND: u32 = 1 << 8;
+pub const RT_SK_RECV: u32 = 1 << 9;
+
+// the network (socket.asm): RO_NET_CONNECT's a2 (NETF_*); a socket's state,
+// why it failed, and what RO_WAIT would find there now (RO_NET_STATUS:
+// SKS_* | NETW_* << 8 | TLS's error << 16 | NS_*); its addresses (RO_NET_ADDR,
+// NA_*: 16 bytes each, IPv4 as ::ffff:a.b.c.d)
+pub const NETF_TLS: u64 = 1;
+pub const NETF_INSECURE: u64 = 2;
+pub const NETF_LOOKUP: u64 = 4;
+pub const SKS_LOOKUP: u32 = 1;
+pub const SKS_CONNECT: u32 = 2;
+pub const SKS_HANDSHAKE: u32 = 3;
+pub const SKS_OPEN: u32 = 4;
+pub const SKS_ENDED: u32 = 5;
+pub const SKS_FAILED: u32 = 6;
+pub const SKS_LISTEN: u32 = 7;
+pub const NETW_NOSERVER: u32 = 1;
+pub const NETW_BADNAME: u32 = 2;
+pub const NETW_BUSY: u32 = 3;
+pub const NETW_NOHOST: u32 = 4;
+pub const NETW_NOADDR: u32 = 5;
+pub const NETW_DNS: u32 = 6;
+pub const NETW_NOANSWER: u32 = 7;
+pub const NETW_DOWN: u32 = 8;
+pub const NETW_NOROUTE: u32 = 9;
+pub const NETW_REFUSED: u32 = 10;
+pub const NETW_RESET: u32 = 11;
+pub const NETW_TIMEOUT: u32 = 12;
+pub const NETW_TLS: u32 = 13;
+pub const NETW_INUSE: u32 = 14;
+pub const NS_RECV: u64 = 1 << 24;
+pub const NS_SEND: u64 = 1 << 25;
+pub const NA_PEER: usize = 0;
+pub const NA_LOCAL: usize = 16;
+pub const NA_PEER_PORT: usize = 32;
+pub const NA_PORT: usize = 36;
+pub const NA_SIZE: usize = 40;
+pub const SK_HOST_MAX: usize = 256;
+pub const SK_BUF: usize = 65536;
 
 // the start block, at USER_START (SB_*)
 pub const SB_RING: usize = 0;
@@ -156,6 +207,7 @@ impl Error {
     pub const EMPTY: Error = Error(-15);
     pub const CONFLICT: Error = Error(-16);
     pub const IO: Error = Error(-18);
+    pub const NET: Error = Error(-20);
     pub const NOFILE: Error = Error(-21);
     pub const READONLY: Error = Error(-22);
     pub const EXISTS: Error = Error(-23);

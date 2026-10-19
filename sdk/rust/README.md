@@ -73,11 +73,20 @@ What std has on Axiom:
   is `Read-only file system`, when the file is opened, except in `/Home`
   on the boot volume, which programs may always write: keep a program's
   files there (`HOME` is `/Home`). The program wants `wants::FILES`.
+- **`std::net`**: `TcpStream` (`connect`, `connect_timeout`, read and
+  write timeouts, `peek`, `set_nonblocking`, `shutdown`, `try_clone`,
+  `peer_addr`, `local_addr`) and `TcpListener` (a port, or 0 for one of
+  ours; `accept`), over the kernel's sockets, 64 KiB each way. Names are
+  looked up by the kernel's DNS, one address each; connecting to a name's
+  address gives the kernel the name, so a capability to that host reaches
+  it. There is no loopback (binding or connecting to 127.0.0.1 says so)
+  and no UDP. The program wants `wants::NET`. TLS is `axiom::net`'s
+  (`Net::connect` with `Tls::Checked`), outside std.
 - **`std::process::exit`** ends the program, every thread, with its code.
   A panic aborts: the program ends, 134. There is no unwinding.
 
-Not there yet: `std::net` (Unsupported), `std::process::Command`, and
-`read_dir` of an empty folder, which is an error.
+Not there yet: UDP, `std::process::Command`, and `read_dir` of an empty
+folder, which is an error.
 
 ## A program
 

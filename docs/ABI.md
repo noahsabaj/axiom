@@ -352,7 +352,7 @@ requests still waiting with that data.
 | 14 | `RO_RECV` | handle, into handle2 + a0, a1 bytes at most | its bytes, `E_EMPTY`, or `E_RANGE` (too big; it stays) |
 | 15 | `RO_KILL` | handle = a task | |
 | 16–23 | `RO_ST_*` | the store: put, get, delete, commit, abort, sub, rollback, list | (defs.inc) |
-| 24–29 | `RO_NET_*` | connect, listen, accept, status, shut, sub | (defs.inc) |
+| 24–29 | `RO_NET_*` | connect (`NETF_LOOKUP`: only a lookup), listen (port 0: any of ours), accept, status (with `NS_*`), shut, sub | (defs.inc) |
 | 30 | `RO_WIN_SHOW` | handle = a window, a0 = x, a1 = y, a2 = w \| h << 32; a2 = 0: all of it | |
 | 31 | `RO_WIN_TITLE` | handle, handle2 + a0: a1 bytes of UTF-8 | |
 | 32, 33 | | reserved for the settings (`RO_SET_LIST`, `RO_SET_CHANGE`, on their branch) | `E_ARG` here |
@@ -366,8 +366,9 @@ requests still waiting with that data.
 | 41 | `RO_FS_RENAME` | handle2 + a0: it, handle2 + a1: its new path, same volume | 0 |
 | 42 | `RO_FS_SUB` | handle2 + a0: a folder, a1 = rights | a handle to that folder alone |
 | 43 | `RO_WIN_POINTER` | handle = a window, a0 = `PTRM_*` | |
+| 44 | `RO_NET_ADDR` | handle = a socket, into handle2 + a0: `NA_SIZE` bytes (`NA_*`) | 0, or `E_EMPTY` while it is looked up |
 
-`RO_COUNT` is 44. Anything from there up is `E_ARG`.
+`RO_COUNT` is 45. Anything from there up is `E_ARG`.
 
 **Fixed fields**: a path (`FS_PATH`, 256 bytes), a store name (64), a host
 (256) or a pattern (64) is read at its full size from handle2 + a0,
@@ -579,7 +580,7 @@ shell says `ended by a fault` and logs what it ran into.
 - `python tools/build.py` assembles every program.
 
 **Rust**: `sdk/rust`, with `std` (threads, locks, `thread_local!`, time,
-files) on std's hermit layer, which the `axiom` crate fills in with the
+files, TCP) on std's hermit layer, which the `axiom` crate fills in with the
 calls above. Its README covers the target, the crate and `entry!`.
 `python tools/rust.py` builds it.
 

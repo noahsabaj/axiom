@@ -13,6 +13,8 @@ use crate::sys::*;
 
 /// A thread's ring, its own (made when first asked for).
 const THREAD_RING: u64 = 16;
+/// State::first's: each with its cancel fits in a thread's ring.
+pub const FIRST_MAX: usize = 7;
 
 pub struct State {
     ring: Handle,
@@ -180,6 +182,42 @@ impl State {
             if c.data == 1 { ra = c.result } else { rb = c.result }
         }
         (ra, rb)
+    }
+
+    /// Requests that wait (RO_WAIT...), FIRST_MAX at most, submitted
+    /// together; once one completes the others are canceled -> which
+    /// completed first, and its result.
+    pub fn first(&mut self, es: &[Entry]) -> (usize, i64) {
+        const MARK: u64 = 0xF125_7000;
+        let n = es.len().min(FIRST_MAX) as u32;
+        if n == 0 {
+            return (0, Error::ARG.0 as i64);
+        }
+        for (i, e) in es[..n as usize].iter().enumerate() {
+            let mut e = *e;
+            e.flags &= !SQF_LINK;
+            e.data = MARK + i as u64;
+            self.submit(&e);
+        }
+        self.enter(n, 1);
+        let won = loop {
+            let c = self.reap_wait();
+            if c.data >= MARK && c.data < MARK + n as u64 {
+                break c;
+            }
+        };
+        for i in 0..n as u64 {
+            if MARK + i != won.data {
+                let mut c = Entry::new(RO_CANCEL, 0);
+                c.a0 = MARK + i;
+                self.submit(&c);
+            }
+        }
+        self.enter(n - 1, 0);
+        for _ in 0..2 * (n - 1) {
+            self.reap_wait(); // each other one's end (canceled, or done), and each cancel's
+        }
+        ((won.data - MARK) as usize, won.result)
     }
 
     /// The block bytes are handed over in, at least `len` long -> where it

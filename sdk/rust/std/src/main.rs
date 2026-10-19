@@ -5,27 +5,33 @@
 //! across threads; thread_local! (each thread its own, destructors run as
 //! each ends); time (Instant, sleep, SystemTime); the CPUs; std::fs on a
 //! volume (files made, written, appended to, read back, sought in, listed,
-//! looked at, removed; a folder made and removed).
+//! looked at, removed; a folder made and removed); std::net against the
+//! test's servers on the host.
 //!
-//!   rstd [fs <folder> | ro <folder> | home | panic | exit | code]
+//!   rstd [fs <folder> | ro <folder> | home | net <echo> <port> [dns] |
+//!         panic | exit | code]
 //!
 //! fs needs a volume that can be written (vol <n> rw); ro checks that one
 //! that can't says so; home: what is in the boot volume's /Home is written
 //! without it, and nothing else is; panic: a thread panics, which ends the program;
 //! exit: a thread ends it, 7, by std::process::exit; code: main returns
-//! ExitCode 3.
+//! ExitCode 3. net: TCP to the echo server at 10.0.2.2:<echo> (written by
+//! one thread, read back by another; peek, a read's timeout, nonblocking,
+//! shutdown, its addresses), a connection nobody answers, what isn't here
+//! (loopback, UDP), port 0, then <port> listened on for a client from the
+//! host; dns: axiom.test by name too.
 
 use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::fs;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Barrier, Condvar, Mutex, Once, OnceLock, RwLock, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-axiom::entry!(wants = axiom::wants::FILES);
+axiom::entry!(wants = axiom::wants::FILES | axiom::wants::NET);
 
 static DROPPED: AtomicU32 = AtomicU32::new(0);
 
@@ -64,6 +70,7 @@ fn main() -> ExitCode {
         Some("fs") => files(&args[1]),
         Some("ro") => read_only(&args[1]),
         Some("home") => home(),
+        Some("net") => network(&args[1..]),
         _ => {
             threads();
             locks();
@@ -370,4 +377,94 @@ fn home() {
     println!("rstd: home outside {:?}, moved out {:?}, removed {:?}", outside, out, itself);
     let gone = fs::remove_file("/Home/rstd/b.txt").is_ok() && fs::remove_dir("/Home/rstd").is_ok();
     println!("rstd: home cleaned {}, there {}", gone, fs::metadata("/Home").map(|m| m.is_dir()).unwrap_or(false));
+}
+
+/// std::net, against the test's servers on the host (10.0.2.2).
+fn network(args: &[String]) {
+    use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
+    let echo: u16 = args[0].parse().expect("the echo server's port");
+    let serve: u16 = args[1].parse().expect("a port to listen on");
+    let dns = args.get(2).is_some_and(|a| a == "dns");
+    let host = SocketAddr::from(([10, 0, 2, 2], echo));
+
+    let s = TcpStream::connect(host).expect("connect");
+    let (peer, local) = (s.peer_addr().unwrap(), s.local_addr().unwrap());
+    println!("rstd: net connected to {}, from {}, a port of ours {}", peer, local.ip(), local.port() >= 49152);
+    let data: Vec<u8> = (0..200_000u32).map(|i| (i * 7 + i / 251) as u8).collect();
+    let mut w = s.try_clone().expect("try_clone");
+    let sent = data.clone();
+    let writer = thread::spawn(move || w.write_all(&sent).map_err(|e| e.kind()));
+    let mut back = vec![0u8; data.len()];
+    let read = (&s).read_exact(&mut back).map_err(|e| e.kind());
+    let wrote = writer.join().unwrap();
+    println!("rstd: net echoed {} bytes {:?} {:?}, right {}", back.len(), wrote, read, back == data);
+
+    (&s).write_all(b"peek").unwrap();
+    let mut b = [0u8; 4];
+    for _ in 0..200 {
+        if s.peek(&mut b).unwrap() == 4 {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let mut r = [0u8; 4];
+    (&s).read_exact(&mut r).unwrap();
+    println!("rstd: net peeked {:?}, then read {:?}", String::from_utf8_lossy(&b), String::from_utf8_lossy(&r));
+
+    s.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
+    let t = Instant::now();
+    let e = (&s).read(&mut b).map_err(|e| e.kind());
+    let ms = t.elapsed().as_millis();
+    println!("rstd: net read timed out {:?} {:?}, in time {}", e, s.read_timeout().unwrap(), (150..1000).contains(&ms));
+    s.set_read_timeout(None).unwrap();
+    s.set_nonblocking(true).unwrap();
+    let e = (&s).read(&mut b).map_err(|e| e.kind());
+    s.set_nonblocking(false).unwrap();
+    s.set_nodelay(true).unwrap();
+    println!("rstd: net nonblocking {:?}, nodelay {:?}", e, s.nodelay());
+
+    s.shutdown(Shutdown::Write).unwrap();
+    let mut rest = Vec::new();
+    let n = (&s).read_to_end(&mut rest).map_err(|e| e.kind());
+    println!("rstd: net shut, then the end {:?}", n);
+    drop(s);
+
+    let t = Instant::now();
+    let nobody = SocketAddr::from(([10, 0, 2, 99], 9));
+    let e = TcpStream::connect_timeout(&nobody, Duration::from_millis(300)).map(|_| ()).map_err(|e| e.kind());
+    println!("rstd: net nobody at {}: {:?}, in time {}", nobody, e.is_err(), t.elapsed() < Duration::from_secs(4));
+
+    let lo = TcpListener::bind("127.0.0.1:0").map(|_| ()).map_err(|e| e.kind());
+    let lo_to = TcpStream::connect("127.0.0.1:80").map(|_| ()).map_err(|e| e.raw_os_error());
+    let udp = UdpSocket::bind("0.0.0.0:0").map(|_| ()).map_err(|e| e.to_string());
+    println!("rstd: net loopback {:?} {:?}, udp {:?}", lo, lo_to, udp);
+
+    let any = TcpListener::bind("0.0.0.0:0").expect("port 0");
+    let p = any.local_addr().unwrap().port();
+    println!("rstd: net port 0 is one of ours {}", p >= 49152);
+    drop(any);
+
+    let l = TcpListener::bind(("0.0.0.0", serve)).expect("listen");
+    println!("rstd: net listening on {}", l.local_addr().unwrap());
+    let (mut c, from) = l.accept().expect("accept");
+    let mut line = String::new();
+    BufReader::new(&c).read_line(&mut line).unwrap();
+    c.write_all(format!("you said: {}", line).as_bytes()).unwrap();
+    println!("rstd: net accepted from {}, said {:?}", from.ip(), line.trim_end());
+    drop(c);
+    drop(l);
+
+    if dns {
+        let found: Vec<SocketAddr> = ("axiom.test", echo).to_socket_addrs().expect("lookup").collect();
+        println!("rstd: net axiom.test is {:?}", found);
+        let mut s = TcpStream::connect(("axiom.test", echo)).expect("by name");
+        s.write_all(b"by name").unwrap();
+        s.shutdown(Shutdown::Write).unwrap();
+        let mut back = String::new();
+        s.read_to_string(&mut back).unwrap();
+        println!("rstd: net by name, echoed {:?}", back);
+        let none = ("nothing.here", 80).to_socket_addrs().map(|_| ()).map_err(|e| e.to_string());
+        println!("rstd: net nothing.here {:?}", none);
+    }
+    println!("rstd: net done");
 }

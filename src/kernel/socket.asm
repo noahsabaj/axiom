@@ -26,7 +26,13 @@
 ;      the other side is gone; E_NET if it failed
 ;    RO_NET_SHUT: once what was sent has gone, a FIN (plain TCP only)
 ;    RO_NET_LISTEN, then RO_NET_ACCEPT: a socket for each connection taken,
-;      SK_ACCEPT_MAX waiting at most; RO_WAIT (a0 = 0) for the next
+;      SK_ACCEPT_MAX waiting at most; RO_WAIT (a0 = 0) for the next. Port
+;      0 is one the main loop picks; RO_WAIT (a0 = 1) until it listens
+;    RO_NET_CONNECT with NETF_LOOKUP: the host looked up, and no more; the
+;      socket ends once its address is known (RO_WAIT, a0 = 0)
+;    RO_NET_ADDR: a socket's addresses and ports, the other side's and ours
+;    RO_NET_STATUS: its state, why it failed, and what RO_WAIT would wait
+;      for that is there now (NS_RECV, NS_SEND)
 ;  When a socket's last handle goes, what it had sent still goes out; then
 ;  it is closed, or reset if that takes more than SK_LINGER_S seconds.
 ;
@@ -56,6 +62,7 @@ SKF_GONE        equ 64                  ; no handle to it is left
 SKF_NOSEND      equ 128                 ; nothing more can be sent
 SKF_LISTENER    equ 256
 SKF_CLOSING     equ 512                 ; gone, closed: TCP finishing
+SKF_LOOKUP      equ 1024                ; its host looked up, not connected to
 
 %macro SK_LOCK 0
     pushfq
@@ -109,7 +116,8 @@ sk_program:
     ret
 
 ; h_net_connect(EDI = the network, ESI = memory, RDX = where the host is in
-; it, RCX = port, R8 = NETF_*) -> RAX = a handle to a socket
+; it, RCX = port, R8 = NETF_*) -> RAX = a handle to a socket. A lookup
+; (NETF_LOOKUP, alone) needs RT_NET_CONNECT and the host, not the port.
 h_net_connect:
     push rbx
     push r12
@@ -122,9 +130,13 @@ h_net_connect:
     mov r14, rcx
     mov r15, r8
     mov rax, E_ARG
-    test r15, ~(NETF_TLS | NETF_INSECURE)
+    test r15, ~(NETF_TLS | NETF_INSECURE | NETF_LOOKUP)
     jnz .out
     mov edx, RT_NET_CONNECT
+    cmp r15, NETF_LOOKUP
+    je .get
+    test r15d, NETF_LOOKUP
+    jnz .out                            ; a lookup, with nothing else
     test r15d, NETF_TLS
     jz .get
     mov edx, RT_NET_TLS
@@ -142,8 +154,11 @@ h_net_connect:
     cmp rax, E_ANY
     jae .out
     mov rbx, rax                        ; RBX = the network, a reference
+    test r15d, NETF_LOOKUP
+    jnz .host
     call nt_port
     jc .put
+.host:
     mov edi, r12d
     mov rsi, r13
     mov rdx, rsp
@@ -161,6 +176,11 @@ h_net_connect:
     mov rax, E_RIGHTS
     jc .put
     xor edi, edi
+    test r15d, NETF_LOOKUP
+    jz .tls
+    mov edi, SKF_LOOKUP
+    jmp .made
+.tls:
     test r15d, NETF_TLS
     jz .made
     mov edi, SKF_TLS
@@ -239,8 +259,10 @@ sk_field:
     stc
     ret
 
-; h_net_listen(EDI = the network, RSI = a port) -> RAX = a handle to a socket
-; listening there (whether the port was free, it says once it has tried)
+; h_net_listen(EDI = the network, RSI = a port, or 0 for one of ours the
+; main loop picks, if this capability reaches any) -> RAX = a handle to a
+; socket listening there (whether the port was free, it says once it has
+; tried: RO_WAIT with a0 = 1 until then)
 h_net_listen:
     push rbx
     push r14
@@ -251,8 +273,16 @@ h_net_listen:
     cmp rax, E_ANY
     jae .out
     mov rbx, rax
+    test r14, r14
+    jnz .port
+    mov rax, E_RIGHTS
+    cmp dword [rbx + NT_PORT], 0
+    jne .put                            ; it reaches one port: that one
+    jmp .make
+.port:
     call nt_port
     jc .put
+.make:
     mov edi, SKF_LISTENER
     call sk_new_socket
     cmp rax, E_ANY
@@ -325,7 +355,7 @@ h_net_accept:
     ret
 
 ; h_net_status(EDI = a socket) -> RAX = SKS_* | why << 8 (NETW_*, once
-; failed) | TLS's error << 16 (for NETW_TLS)
+; failed) | TLS's error << 16 (for NETW_TLS) | NS_RECV, NS_SEND as they are
 h_net_status:
     xor esi, esi
     xor edx, edx
@@ -342,10 +372,69 @@ h_net_status:
     mov al, [rdi + SK_WHY]
     shl eax, 8
     mov al, [rdi + SK_STATE]
+    cmp dword [rdi + SK_RREADY], 0
+    je .recv
+    or eax, NS_RECV
+.recv:
+    cmp dword [rdi + SK_WREADY], 0
+    je .put
+    or eax, NS_SEND
 .put:
     call obj_put
 .out:
     jmp op_done
+
+; h_net_addr(EDI = a socket, ESI = memory, RDX = where in it) -> RAX = 0,
+; its addresses there (NA_*); E_EMPTY while its host is being looked up
+h_net_addr:
+    push rbx
+    push r12
+    push r13
+    sub rsp, NA_SIZE
+    mov r12d, esi
+    mov r13, rdx
+    mov esi, OT_SOCKET
+    xor edx, edx
+    call handle_get
+    cmp rax, E_ANY
+    jae .out
+    mov rbx, rax
+    mov rax, E_EMPTY
+    cmp dword [rbx + SK_STATE], SKS_LOOKUP
+    je .put                             ; (what follows is written before it changes)
+    lea rsi, [rbx + SK_ADDR]
+    lea rdi, [rsp + NA_PEER]
+    call addr_copy
+    lea rsi, [rbx + SK_LADDR]
+    lea rdi, [rsp + NA_LOCAL]
+    call addr_copy
+    mov eax, [rbx + SK_PORT]            ; the other side's, but a listener's
+    xor ecx, ecx
+    test dword [rbx + SK_FLAGS], SKF_LISTENER
+    cmovnz eax, ecx
+    mov [rsp + NA_PEER_PORT], eax
+    mov eax, [rbx + SK_LPORT]
+    mov [rsp + NA_PORT], eax
+    mov edi, r12d
+    mov rsi, r13
+    mov rdx, rsp
+    mov ecx, NA_SIZE
+    call h_mem_write
+    cmp rax, E_ANY
+    jae .put
+    xor eax, eax
+.put:
+    push rax
+    mov rdi, rbx
+    call obj_put
+    pop rax
+.out:
+    call op_done
+    add rsp, NA_SIZE
+    pop r13
+    pop r12
+    pop rbx
+    ret
 
 ; h_net_shut(EDI = a socket) -> RAX = 0: once what was sent has gone, a FIN
 h_net_shut:
@@ -911,6 +1000,12 @@ sk_settle:
     test dword [rbx + SK_FLAGS], SKF_SHUT | SKF_NOSEND | SKF_GONE
     jnz .written
     xor eax, eax
+    cmp ecx, SKS_LISTEN                 ; a listener: once it listens
+    jne .open
+    cmp qword [rbx + SK_LISTENER], 0
+    setne al
+    jmp .written
+.open:
     cmp ecx, SKS_OPEN
     jne .written
     cmp dword [rbx + SK_TX_LEN], SK_BUF
@@ -1047,7 +1142,7 @@ sk_begin:
     lea rsi, [rbx + SK_HOST]
     lea rdi, [rbx + SK_ADDR]
     call addr_parse
-    jnc sk_connect
+    jnc sk_known
 .name:
     lea rsi, [rbx + SK_HOST]
     mov edx, DQ_SOCKET
@@ -1058,21 +1153,53 @@ sk_begin:
     xor edx, edx
     jmp sk_fail
 .listen:
-    mov edi, [rbx + SK_PORT]
-    lea rsi, [sk_tcp_ops]
-    lea rdx, [sk_accept]
-    mov rcx, rbx
-    call tcp_listen
+    cmp dword [rbx + SK_PORT], 0
+    je .any
+    call .take
     jc .in_use
+    jmp .listening
+.any:
+    push r12
+    mov r12d, 16                        ; ports of ours tried, at most
+.pick:
+    call tcp_port                       ; one no connection uses
+    mov [rbx + SK_PORT], eax
+    call .take
+    jnc .picked
+    dec r12d
+    jnz .pick
+    pop r12
+    jmp .in_use
+.picked:
+    pop r12
+.listening:
     mov [rbx + SK_LISTENER], rax
     mov eax, [rbx + SK_PORT]
+    mov [rbx + SK_LPORT], eax
     KLOG "net: a program listens on port %u", rax
+    mov esi, SKS_LISTEN                 ; and who waits for it to, hears
+    jmp sk_state
 .out:
     ret
 .in_use:
     mov esi, NETW_INUSE
     xor edx, edx
     jmp sk_fail
+.take:                                  ; -> RAX = tcp_listen's, CF if refused
+    mov edi, [rbx + SK_PORT]
+    lea rsi, [sk_tcp_ops]
+    lea rdx, [sk_accept]
+    mov rcx, rbx
+    jmp tcp_listen
+
+; sk_known(RBX = a socket, SK_ADDR known): connected to, or, for a lookup,
+; ended
+sk_known:
+    test dword [rbx + SK_FLAGS], SKF_LOOKUP
+    jz sk_connect
+    lock or dword [rbx + SK_FLAGS], SKF_RXEND | SKF_NOSEND
+    mov esi, SKS_ENDED
+    jmp sk_state
 
 ; sock_dns_done(RDI = a socket, RAX = its host's address): from dns_done
 sock_dns_done:
@@ -1081,7 +1208,7 @@ sock_dns_done:
     mov rsi, rax
     lea rdi, [rbx + SK_ADDR]
     call addr_copy
-    call sk_connect
+    call sk_known
     pop rbx
     ret
 
@@ -1104,6 +1231,7 @@ sk_connect:
     mov [rbx + SK_TCP], rax
     mov [rax + TC_USER], rbx
     mov rdi, rax
+    call sk_local
     mov esi, 65535                      ; as much as SK_RX holds
     test dword [rbx + SK_FLAGS], SKF_TLS
     jz .flow
@@ -1116,6 +1244,35 @@ sk_connect:
     mov esi, NETW_NOROUTE
     xor edx, edx
     jmp sk_fail
+
+; sk_local(RBX = a socket, RDI = its connection): our address and port on
+; it, for RO_NET_ADDR. Preserves all.
+sk_local:
+    push rax
+    push rdi
+    push rsi
+    push r9
+    mov eax, [rdi + TC_LPORT]
+    mov [rbx + SK_LPORT], eax
+    cmp dword [rdi + TC_V6], 0
+    jne .v6
+    mov eax, [net_ip]
+    lea rdi, [rbx + SK_LADDR]
+    call addr_set4
+    jmp .out
+.v6:
+    lea rdi, [rdi + TC_RA]
+    call ip6_source                     ; R9 = ours, for there
+    jc .out
+    mov rsi, r9
+    lea rdi, [rbx + SK_LADDR]
+    call addr_copy
+.out:
+    pop r9
+    pop rsi
+    pop rdi
+    pop rax
+    ret
 
 ; sk_state(RBX, ESI = SKS_*): its state now, and who waits hears. Preserves
 ; all.
@@ -1455,6 +1612,10 @@ sk_accept:
     call addr_copy
     mov ecx, [r12 + TC_RPORT]
     mov [r13 + SK_PORT], ecx
+    xchg rbx, r13
+    mov rdi, r12
+    call sk_local
+    xchg rbx, r13
     mov dword [r13 + SK_STATE], SKS_CONNECT
     lea rax, [r12 + TC_RA]
     SPRINTF r13 + SK_HOST, "%A", rax

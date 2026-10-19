@@ -327,7 +327,9 @@ SK_RXBY         equ 304                 ; bytes received, ever
 SK_TXBY         equ 312                 ; sent
 SK_HOST         equ 320                 ; 256 bytes, NUL-ended
 SK_ADDR         equ 576                 ; the other side's address (16 bytes)
-SK_SIZE         equ 592
+SK_LADDR        equ 592                 ; ours, once it is connecting (16 bytes)
+SK_LPORT        equ 608                 ; dword: our port (a listener's own)
+SK_SIZE         equ 616
 
 ; a block of memory (kobj.asm), an object
 MO_BASE         equ 64                  ; its pages, in the vm region
@@ -435,12 +437,15 @@ RO_NET_CONNECT  equ 24                  ; handle = the network, handle2 + a0: a
                                         ; name or a dotted quad), a1 = port, a2 =
                                         ; NETF_* -> a socket, at once (RO_WAIT
                                         ; with a0 = 1 until it is open)
-RO_NET_LISTEN   equ 25                  ; handle, a0 = port -> a socket listening
-RO_NET_ACCEPT   equ 26                  ; handle = a socket listening -> a socket,
+RO_NET_LISTEN   equ 25                  ; handle, a0 = port (0: one of ours, any
+                                        ; that is free) -> a socket listening
+                                        ; (RO_WAIT with a0 = 1 until it does)
+RO_NET_ACCEPT   equ 26                 ; handle = a socket listening -> a socket,
                                         ; the oldest connection it took, or
                                         ; E_EMPTY (RO_WAIT on it waits for one)
 RO_NET_STATUS   equ 27                  ; handle = a socket -> SKS_* | NETW_* << 8
-                                        ; | TLS's error << 16
+                                        ; | TLS's error << 16 | NS_* (what RO_WAIT
+                                        ; would wait for, there now)
 RO_NET_SHUT     equ 28                  ; handle = a socket: a FIN once what was
                                         ; sent has gone (plain TCP)
 RO_NET_SUB      equ 29                  ; handle = the network, handle2 + a0: a
@@ -476,7 +481,10 @@ RO_FS_SUB       equ 42                  ; handle, handle2 + a0: a folder, a1 =
                                         ; rights -> a handle to it alone
 RO_WIN_POINTER  equ 43                  ; handle = a window, a0 = PTRM_*: the
                                         ; pointer over it, or held by it
-RO_COUNT        equ 44
+RO_NET_ADDR     equ 44                  ; handle = a socket, into handle2 + a0:
+                                        ; NA_SIZE bytes, its addresses -> 0;
+                                        ; E_EMPTY while its host is looked up
+RO_COUNT        equ 45
 
 ; files (fscap.asm)
 FS_PATH         equ 256                 ; a path's field
@@ -506,6 +514,21 @@ FEA_SYSTEM      equ 8
 ; RO_NET_CONNECT's a2
 NETF_TLS        equ 1
 NETF_INSECURE   equ 2                   ; with NETF_TLS: the certificate not checked
+NETF_LOOKUP     equ 4                   ; alone: the host only looked up; the socket
+                                        ; ends once its address is known (RO_WAIT,
+                                        ; a0 = 0), for RO_NET_ADDR to say
+
+; a socket's addresses (RO_NET_ADDR); 16 bytes each, IPv4 as ::ffff:a.b.c.d
+NA_PEER         equ 0                   ; the other side's (the host's, looked up)
+NA_LOCAL        equ 16                  ; ours (:: until it connects; a listener's)
+NA_PEER_PORT    equ 32                  ; dword
+NA_PORT         equ 36                  ; dword: ours (a listener's, once it listens)
+NA_SIZE         equ 40
+
+; RO_NET_STATUS's, besides the state
+NS_RECV         equ 1 << 24             ; something to receive, or never more
+NS_SEND         equ 1 << 25             ; room to send, or never again; a
+                                        ; listener: it listens, or failed
 
 ; a socket's state (RO_NET_STATUS)
 SKS_LOOKUP      equ 1                   ; its host is being looked up

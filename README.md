@@ -191,7 +191,8 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   like any other, through no Linux layer. With std too: the target is
   std's Hermit layer, whose calls the crate supplies on Axiom's own, so
   threads, `Mutex` and the rest of `std::sync`, `thread_local!`,
-  `Instant`, `SystemTime`, `std::fs`, `println!` and `HashMap` work. The
+  `Instant`, `SystemTime`, `std::fs`, `std::net`'s TCP, `println!` and
+  `HashMap` work. The
   kernel gives native programs thread-local storage (FS's base), futexes
   and the wall clock for it. `rhello`, `rdemo`, `rtone` and `rstd` come
   with it; `python tools/rust.py` builds them (rustup's nightly with

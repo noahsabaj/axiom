@@ -10,15 +10,16 @@
 //!
 //!   axiom::entry!(wants = axiom::wants::DESK);
 //!
-//! std's threads, clock, locks, thread_local!, files and args are there;
-//! its network is not yet. Without std it is #![no_std] and #![no_main],
-//! names its main, and says axiom::panic_handler!() (and has a
-//! #[global_allocator], to allocate):
+//! std's threads, clock, locks, thread_local!, files, args and TCP
+//! (std::net, with wants::NET) are there. Without std it is #![no_std]
+//! and #![no_main], names its main, and says axiom::panic_handler!() (and
+//! has a #[global_allocator], to allocate):
 //!
 //!   axiom::entry!(main, wants = axiom::wants::DESK);
 //!
 //! Either way, axiom's own modules reach what std doesn't: windows
-//! (axiom::window), sound (axiom::sound), the files' volumes.
+//! (axiom::window), sound (axiom::sound), the files' volumes, TLS
+//! (axiom::net).
 
 #![no_std]
 #![feature(thread_local)]
@@ -30,6 +31,7 @@ pub mod console;
 pub mod files;
 pub mod heap;
 pub mod mem;
+pub mod net;
 pub mod ring;
 pub mod rt;
 pub mod sound;
@@ -44,6 +46,7 @@ pub mod hermit;
 
 pub use files::Files;
 pub use heap::Heap;
+pub use net::Net;
 pub use rt::{Args, Termination, args, args_line, wants};
 pub use sound::Stream;
 pub use sys::{Error, Handle, Result, exit};
