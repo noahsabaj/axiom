@@ -21,6 +21,13 @@ hp1.py sent: EFI/AXIOM/BOOTX64.EFI and run.txt.
                                    (EFI/AXIOM/KERNEL.A or .B) and named in
                                    AxiomTry: the next start of Axiom tries
                                    it, for S seconds (600)
+    python3 hp1_node.py start      start.txt (sent) as EFI/AXIOM/START.TXT, the
+                                   lines Axiom types at every start; an
+                                   empty one: START.TXT removed
+    python3 hp1_node.py forget     AxiomTry and AxiomSlot deleted: Axiom
+                                   starts the kernel built into its loader
+    python3 hp1_node.py fsck       the EFI system partition checked, read
+                                   only (fsck.vfat -n), after Axiom wrote it
 
 Only BootNext is ever set; BootOrder is never written. Nothing here reads
 or prints anything but Axiom's own variables, the boot entries, and the
@@ -52,6 +59,7 @@ NV_BS_RT = (7).to_bytes(4, "little")
 WIFI_KEY = ESP / "EFI" / "AXIOM" / "WIFI.KEY"
 HOME = ESP / "Home" / "fleet"                   # Axiom's /Home/fleet
 HOME_FILES = ("node.json", "cert.pem", "key.pem")
+START = ESP / "EFI" / "AXIOM" / "START.TXT"     # src/kernel/start.asm
 
 
 def sh(*args, check=True):
@@ -122,6 +130,12 @@ def status():
     for name in ("KERNEL.A", "KERNEL.B"):
         f = ESP / "EFI" / "AXIOM" / name
         print(f"{f}:", f"{f.stat().st_size} bytes" if f.exists() else "not there")
+    print(f"{START}:", repr(START.read_text(errors="replace")) if START.exists() else "not there")
+    print(f"{WIFI_KEY}:", f"{WIFI_KEY.stat().st_size} bytes" if WIFI_KEY.exists() else "not there")
+    print(f"{HOME}:", ", ".join(n for n in HOME_FILES if (HOME / n).is_file()) or "none of "
+          + ", ".join(HOME_FILES))
+    st = os.statvfs(ESP)
+    print(f"{ESP}: {st.f_bavail * st.f_frsize >> 20} MiB free of {st.f_blocks * st.f_frsize >> 20} MiB")
     print("TCO:", tco())
 
 
@@ -152,6 +166,10 @@ def install():
             print(f"BootOrder changed from {order} to {after}!")
             return 1
     print(f"Axiom's entry {axiom}; BootOrder {order}, as it was")
+    kept = slot_var(SLOT)
+    if kept:
+        print(f"AxiomSlot names kernel {kept[0]}: Axiom starts that one, not the kernel in the "
+              "loader just installed (hp1.py forget)")
     return 0 if same else 1
 
 
@@ -378,6 +396,49 @@ def try_kernel():
     return 0
 
 
+def start():
+    """start.txt, as hp1.py sent it, as START.TXT: the lines Axiom types into
+    its first terminal at every start (axiom-1's: 'fleet &'). An empty one,
+    or none: START.TXT removed."""
+    sent = pathlib.Path("start.txt")
+    lines = [l.strip() for l in sent.read_text().splitlines()] if sent.exists() else []
+    lines = [l for l in lines if l]
+    if not lines:
+        START.unlink(missing_ok=True)
+        os.sync()
+        print(f"{START}: removed; Axiom types nothing at its start")
+        return 0
+    data = "".join(l + "\r\n" for l in lines).encode()
+    tmp = START.with_suffix(".NEW")
+    tmp.write_bytes(data)
+    os.sync()
+    tmp.replace(START)
+    os.sync()
+    ok = START.read_bytes() == data
+    print(f"{START}: {len(lines)} lines, {'as sent' if ok else 'NOT as sent'}: {lines}")
+    return 0 if ok else 1
+
+
+def forget():
+    """AxiomTry and AxiomSlot deleted: Axiom's next start is the kernel built
+    into its loader, as hp1.py install put it. The slots' files stay."""
+    for var in (TRY, SLOT):
+        efivar_delete(var)
+    print("AxiomTry, AxiomSlot: none; Axiom starts the kernel built into its loader")
+    return 0
+
+
+def fsck():
+    """The EFI system partition checked, read only (fsck.vfat -n), as Axiom
+    left it: its FAT code writes /Home/fleet, the slots and AXIOM.LOG."""
+    os.sync()
+    dev = sh("findmnt", "-no", "SOURCE", str(ESP)).strip()
+    proc = subprocess.run(["fsck.vfat", "-n", dev], capture_output=True, text=True)
+    print(f"fsck.vfat -n {dev}: exit {proc.returncode}")
+    print((proc.stdout + proc.stderr).strip())
+    return proc.returncode
+
+
 def cancel():
     efivar_delete(RUN)
     _, nxt, _, axiom = boot_entries()
@@ -390,4 +451,5 @@ def cancel():
 if __name__ == "__main__":
     what = sys.argv[1] if len(sys.argv) > 1 else "status"
     sys.exit({"status": status, "install": install, "run": run, "log": log,
-              "cancel": cancel, "wifi": wifi, "home": home, "try": try_kernel}[what]() or 0)
+              "cancel": cancel, "wifi": wifi, "home": home, "try": try_kernel,
+              "start": start, "forget": forget, "fsck": fsck}[what]() or 0)

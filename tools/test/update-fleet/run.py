@@ -15,6 +15,14 @@ after another, on that stick and one file of firmware variables:
     then `update kernel.bin 30` again, into slot B;
   - lapse: kernel B on trial, and no client: 30 s on, a restart;
   - back: kernel A again, B given up; the client's info says kernel A.
+    Then hp-1's way, tools/hw/axiom1.txt as hp1.py axiom1 --update runs
+    it, as test runs (harness.asm), queued for the next start:
+  - run1: the run waits for fleet; the client reaches it, and `update
+    kernel.bin 60` restarts it, the run's log kept (AxiomLog). (On hp-1
+    Ubuntu starts next, and queues the trial's run; here run1 queues it.)
+  - run2: kernel B's trial, in a run: the client's first job keeps it, and
+    `hello axiom1-done` ends the run;
+  - after: 'harness log' says so, and 'update' that kernel B is kept.
 Skipped (passing) if there is no nightly toolchain. Outputs go to
 build/test/update-fleet/.
 """
@@ -51,6 +59,20 @@ def result(ok, text):
     FAILS += 0 if ok else 1
     print(("PASS " if ok else "FAIL ") + text)
     return ok
+
+
+def axiom1_lines():
+    """tools/hw/axiom1.txt's lines, comments out."""
+    text = (ROOT / "tools" / "hw" / "axiom1.txt").read_text(encoding="utf-8")
+    return [l.strip() for l in text.splitlines() if l.strip() and not l.strip().startswith("#")]
+
+
+def queue(lines):
+    """What the boot's script types to queue a test run of these lines."""
+    script = ["type harness clear\\n", "until are gone"]
+    for line in lines:
+        script += [f"type harness queue {line}\\n", "until of script"]
+    return script
 
 
 def listening(log_path, started):
@@ -108,6 +130,47 @@ def client_back(log_path, started, pin):
         r["info"] = c.ask("info")[0]
         r["jobs"] = c.ask("jobs", ids=["u1", "u2"])[0]
         c.ask("start", job="bye", project="os", argv=["hello"], env={})     # (the boot's script waits for it)
+        c.close()
+    except Exception as e:  # noqa: BLE001
+        r["error"] = f"{type(e).__name__}: {e}"
+
+
+def job(c, name, *argv, project="axiom1"):
+    """A job in hp1.py axiom1's project -> (its log, its end)."""
+    c.ask("start", job=name, project=project, argv=list(argv), env={})
+    text, end = c.log(name)
+    return text.decode(errors="replace"), end.get("job", {})
+
+
+def client_run1(log_path, started, pin):
+    """As hp1.py axiom1 --update's first_contact: a job, info, the update."""
+    r = found["run1"] = {}
+    if not listening(log_path, started):
+        r["error"] = "the node never listened"
+        return
+    try:
+        c = ft.Conn(pin)
+        kernel = (ROOT / "build" / "kernel.bin").read_bytes()      # (fleet run --dir pushes first)
+        r["put"] = c.put("axiom1", {"README.txt": (b"axiom1\n", T0), "kernel.bin": (kernel, T0)})
+        r["first"] = job(c, "a1", "hello", "axiom1-first")
+        r["info"] = c.ask("info")[0]
+        r["update"] = job(c, "a2", "update", "kernel.bin", "60")
+        c.close()
+    except Exception as e:  # noqa: BLE001
+        r["error"] = f"{type(e).__name__}: {e}"
+
+
+def client_run2(log_path, started, pin):
+    """As hp1.py axiom1 --update's trial: the first job keeps it; the run ended."""
+    r = found["run2"] = {}
+    if not listening(log_path, started):
+        r["error"] = "the node never listened"
+        return
+    try:
+        c = ft.Conn(pin)
+        r["trial"] = job(c, "a3", "hello", "axiom1-trial")
+        r["info"] = c.ask("info")[0]
+        r["done"] = job(c, "a4", "hello", "axiom1-done")
         c.close()
     except Exception as e:  # noqa: BLE001
         r["error"] = f"{type(e).__name__}: {e}"
@@ -197,7 +260,9 @@ def main():
     result("update: kernel B was not kept within 30 s; the machine restarts, into kernel A" in log and ended,
            "30 s on, the machine restarts into kernel A")
 
-    log, ended = run("back", ["until fleet: job bye ended", "type poweroff\\n", "ended"],
+    lines = axiom1_lines()
+    run1 = [f"harness queue {l}" for l in lines] + lines     # (run2's queued by run1, as hp-1's Ubuntu would)
+    log, ended = run("back", ["until fleet: job bye ended", *queue(run1), "type reboot\\n", "ended"],
                      client_back, pin, args, 150)
     r = found.get("back", {})
     result("error" not in r, f"back: the client: {r.get('error', 'no exceptions')}")
@@ -207,6 +272,44 @@ def main():
            f"info: kernel A ({r.get('info', {}).get('os_version')!r})")
     jobs = {j["id"]: j["state"] for j in r.get("jobs", {}).get("jobs", [])}
     result(jobs == {"u1": "done", "u2": "done"}, f"the update jobs' records kept: {jobs}")
+    result(ended, "tools/hw/axiom1.txt queued as a test run; 'reboot' ends QEMU")
+
+    log, ended = run("run1", ["until update: restarting, for the trial", "ended"], client_run1, pin, args, 200)
+    r = found.get("run1", {})
+    result("error" not in r, f"run1: the client: {r.get('error', 'no exceptions')}")
+    at = log.find("harness: a test run")
+    result(0 <= at < log.find(f"fleet: node {NAME} listening"), "a test run, and START.TXT's fleet in it")
+    text, end = r.get("first", ("", {}))
+    result(end.get("state") == "done" and "axiom1-first" in text, f"hello axiom1-first: done ({text.strip()[:60]!r})")
+    result(r.get("info", {}).get("os_version") == "Axiom (kernel A)",
+           f"info: kernel A ({r.get('info', {}).get('os_version')!r})")
+    text, end = r.get("update", ("", {}))
+    result(end.get("state") == "done" and "is kernel B, tried at the next start" in text,
+           f"`update kernel.bin 60`: slot B ({text.strip()[:70]!r})")
+    result("update: restarting, for the trial" in log and "AxiomLog" in log.split("restarting, for the trial")[-1]
+           and ended, "the restart keeps the run's log (AxiomLog), as the run's end would")
+
+    log, ended = run("run2", ["until harness: the run is over", "ended"], client_run2, pin, args, 300)
+    r = found.get("run2", {})
+    result("error" not in r, f"run2: the client: {r.get('error', 'no exceptions')}")
+    result("harness: a test run" in log and "update: this is kernel B, on trial" in log,
+           "the trial's start is a test run too")
+    result("fleet: the kernel on trial is kept" in log and "update: kernel B is kept" in log,
+           "the client's first job keeps kernel B")
+    result(r.get("info", {}).get("os_version") == "Axiom (kernel B)",
+           f"info: kernel B ({r.get('info', {}).get('os_version')!r})")
+    text, end = r.get("done", ("", {}))
+    result(end.get("state") == "done" and "harness: the run is over" in log and ended,
+           "`hello axiom1-done` ends the run, and the machine restarts")
+
+    log, ended = run("after", ["until update: this is", "type harness log\\n", "until the end of the last run",
+                               "type update\\n", "until (AxiomSlot)", "type poweroff\\n", "ended"],
+                     None, pin, args, 150)
+    result("update: this is kernel B\n" in log and "update: kept: kernel B" in log,
+           "the start after: kernel B, kept")
+    old = log[log.find("harness: the last run's log"):]
+    result("update: kernel B is kept" in old and "hello axiom1-done" in old,
+           "'harness log' shows the trial's run")
     result(ended, "'poweroff' ends QEMU")
 
     print(f"{'all passed' if not FAILS else f'{FAILS} FAILED'}")

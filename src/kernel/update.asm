@@ -163,6 +163,10 @@ update_service:
     cmp rax, [upd_restart_at]
     jb .out
     KLOG "update: restarting, for the trial"
+    cmp byte [harness_on], 0
+    je .final
+    call harness_save                   ; a test run's log, as at its end
+.final:
     call log_final
     jmp power_reboot
 .on:

@@ -1,0 +1,13 @@
+# axiom-1: Axiom alone on hp-1, as fleet's node (hp1.py axiom1). START.TXT
+# has started fleet; the coordinator, from here, reaches it over Wi-Fi, and
+# ends the run with the job `hello axiom1-done`, or restarts the machine
+# into a trial with the job `update kernel.bin`.
+limit 900
+timeout 240
+until fleet: node
+update
+timeout 600
+until hello axiom1-done
+sleep 5
+update
+end

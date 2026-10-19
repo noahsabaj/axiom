@@ -521,6 +521,22 @@ kernel it ran before. A kernel that cannot bring up the network, TLS, the
 files or `fleet` is given up on its own. `tools/test/update-fleet` pushes
 a kernel, keeps it, and lets a second one lapse, in QEMU.
 
+On hp-1, the test before Ubuntu goes is one command from this PC:
+
+```
+python tools/hw/hp1.py axiom1 [--update]
+```
+
+It installs build/esp, makes `START.TXT` say `fleet &`, and starts
+`tools/hw/axiom1.txt` as a test run. While hp-1 runs Axiom, it reaches
+axiom-1 over fleet: a job, its info, then `hello axiom1-done`, which ends
+the run. With `--update`, `update kernel.bin` comes instead, and a second
+run is that kernel's trial, kept by the first job to reach it. Then the
+EFI partition is checked (`fsck.vfat -n`), `START.TXT` is removed and
+`AxiomSlot` forgotten (`--keep` keeps them), so later runs start what
+`install` put there. `tools/test/update-fleet` runs `axiom1.txt` the same
+way in QEMU.
+
 ## Layout
 
 ```
@@ -583,7 +599,8 @@ tools/test/             host-side tests for self-contained modules (tls: the
                         fleet's nodes, a client here pushing to it and
                         running jobs, across two boots; update-fleet: a
                         new kernel over fleet, kept by the client's
-                        hello, or given up without one); all.py runs them
+                        hello, or given up without one, and hp-1's
+                        axiom1.txt as test runs); all.py runs them
                         all at once, and qemu.py boots side by side
 tools/hw/hp1.py         test runs on hp-1, through fleet (hp1_node.py runs
                         there, as root)
