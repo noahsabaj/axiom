@@ -855,10 +855,17 @@ off. `log` shows the state; `log save`, `log on`, `log off`.
   (a0 = 0), or for neither ever to come. `RO_NET_STATUS` says the state
   (lookup, connect, handshake, open, ended, failed, listening) and why it
   failed (`NETW_*`: the lookup's reasons, no link, no route, refused,
-  reset, timed out, TLS with its alert, a port in use). `RO_NET_SHUT`
+  reset, timed out, TLS with its alert, a port in use, an identity that
+  will not do). `RO_NET_SHUT`
   sends a FIN once what was sent has gone; `RO_NET_LISTEN` and
   `RO_NET_ACCEPT` take connections, eight waiting at most (port 0: one the
-  main loop picks; `RO_WAIT`, a0 = 1, until it listens). `RO_NET_CONNECT`
+  main loop picks; `RO_WAIT`, a0 = 1, until it listens). With `NETF_TLS`
+  a listener's connections are TLS 1.3's server side, proving the identity
+  it was given (`NI_*`: a P-256 key and its certificates, copied into the
+  kernel and the key wiped when the listener goes; the main loop checks
+  that the key is the leaf's, else `NETW_IDENTITY`); each socket it takes
+  holds the listener, and is sent and received in plaintext once its
+  handshake is done. `RO_NET_CONNECT`
   with `NETF_LOOKUP` only looks the host up, the socket ending once its
   address is known; `RO_NET_ADDR` says a socket's addresses and ports (the
   other side's and ours), and `RO_NET_STATUS` also what `RO_WAIT` would
@@ -918,7 +925,7 @@ off. `log` shows the state; `log save`, `log on`, `log off`.
 
 ## TLS: `tls.asm`, `rand.asm`, `sha256.asm`, `aesgcm.asm`, `x25519.asm`, and certificates
 
-A TLS 1.3 client (RFC 8446) and the crypto under it.
+A TLS 1.3 client and server (RFC 8446) and the crypto under it.
 
 - **The client** (`tls.asm`): any number of connections, each a session
   (`TLS_SESSION`, about 100 KiB: keys, transcript, record and handshake
@@ -944,6 +951,18 @@ A TLS 1.3 client (RFC 8446) and the crypto under it.
   PSS 0x0804-0x0806; PKCS #1 v1.5 is refused there, as RFC 8446 says). With
   `http -k` the chain is not checked, only parsed for the leaf's key, so
   CertificateVerify still proves the server holds the key it sent.
+- **The server** (`tls_accept`): the same sessions, given an identity (a
+  P-256 key and its certificates, as TLS lists them) instead of a host.
+  The ClientHello must offer TLS 1.3, TLS_AES_128_GCM_SHA256, an X25519
+  share and ecdsa_secp256r1_sha256, else the matching alert (no
+  HelloRetryRequest). One flight answers it: ServerHello (with a
+  change_cipher_spec if the client sent a session id), then, sealed,
+  EncryptedExtensions, Certificate, a CertificateVerify signed by
+  `sig_sign`, and Finished; the client's Finished is checked in constant
+  time before its data is taken. No client certificates, resumption or
+  early data. Each side of a session keeps its keys as "what it sends
+  with" and "what it receives with", so the client's record layer and key
+  schedule serve both.
 - **Certificates** (`x509.asm`): X.509 v3 in DER. The leaf must name the
   host in a subjectAltName (DNS, with a wildcard only as the whole first
   label, or an IPv4 address; no Common Name fallback), be in date, and allow
@@ -963,12 +982,21 @@ A TLS 1.3 client (RFC 8446) and the crypto under it.
   4096-bit keys, PKCS #1 v1.5 and PSS (MGF1, salt as long as the hash);
   ECDSA on P-256 and P-384 in Jacobian coordinates with Shamir's trick;
   each with SHA-256, SHA-384 or SHA-512 (`sha512.asm`). `bignum.asm` is
-  Montgomery arithmetic (CIOS) on 64-bit limbs up to 4096 bits. Only public
-  values pass through it, so it is not constant-time, and need not be.
+  Montgomery arithmetic (CIOS) on 64-bit limbs up to 4096 bits, and not
+  constant-time. Signing, ECDSA P-256 (`sig_sign`, for the server), is
+  the one place a secret meets it, so the secret is blinded there: a
+  Montgomery ladder with a masked swap, on the nonce plus a random
+  multiple of the order (a fixed 320 bits), from the base point in random
+  projective coordinates; the nonce fresh from `rand.asm` each time, its
+  inverse taken blinded; the scratch wiped afterwards. `ec_public` gives a
+  key's public point.
 - `tools/test/pki/run.py` checks all of it on the host: SHA-384/512 against
   hashlib; Montgomery products, powers and inverses against Python's
   integers over 141 moduli; 264 RSA and 442 ECDSA signatures, from OpenSSL
-  and an independent reference, good and damaged; 43 chains made by OpenSSL
+  and an independent reference, good and damaged; P-256 public keys (RFC
+  6979's) and 60 signatures by `sig_sign`, strict DER, taken by the
+  reference, by `sig_verify` and by the openssl tool, a fresh nonce each
+  time; 43 chains made by OpenSSL
   (RSA and EC, intermediates, wildcards, addresses, every refusal) and 400
   damaged at random; the built-in roots compared with certifi; the chains
   of 20 real sites; register preservation. On this CPU an RSA-2048 check
@@ -995,9 +1023,20 @@ A TLS 1.3 client (RFC 8446) and the crypto under it.
   address, twenty years on and a clock in 2024 each refused with the
   right alert; a forged CertificateVerify and three in the wrong scheme
   refused; `--live` fetches from eight real sites, each verified.
+  As the server, to Python's ssl as the client: a chain to the test CA
+  checked by the client, whole, a byte at a time and in pieces; a
+  self-signed certificate pinned by its SHA-256 (as fleet pins a node's);
+  30 more handshakes with up to 30 KB each; every session at once, their
+  bytes interleaved; ClientHellos it must refuse, each with its alert (TLS
+  1.2 only, other suites, RSA signatures only, a P-256 share, a weak or
+  short X25519 share, compression, cut off); no session id, so no
+  change_cipher_spec; a tampered record; a client that does not trust the
+  certificate; a connection that will not take the flight.
 - In QEMU, `http https://example.com/` (verified to its root), and from
   `tools/httpsd.py`, whose test CA Axiom does not trust: refused, then a
-  300 KB file with `http -k` (saved, compared byte for byte).
+  300 KB file with `http -k` (saved, compared byte for byte). The server
+  in `tools/test/rust` (rstd net): a TLS listener from a PKCS #8 key and a
+  self-signed certificate, a TLS 1.3 client from the host pinning it.
 
 - **SHA-256** (`sha256.asm`): one call or init/update/final over a context
   the caller owns (copyable, so a transcript hash can be forked). Blocks go

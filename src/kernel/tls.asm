@@ -1,9 +1,9 @@
 ; =============================================================================
-;  tls.asm - a TLS 1.3 client (RFC 8446): any number of connections, each a
-;  session of its own, over whatever carries its bytes (http.asm puts them
-;  on TCP). It offers just
-;  TLS_AES_128_GCM_SHA256 and an X25519 key share, which every TLS 1.3
-;  server must take, and accepts no resumption and no early data.
+;  tls.asm - TLS 1.3 (RFC 8446), a client and a server: any number of
+;  connections, each a session of its own, over whatever carries its bytes
+;  (http.asm and socket.asm put them on TCP). It speaks just
+;  TLS_AES_128_GCM_SHA256 with an X25519 key share, which every TLS 1.3
+;  peer must take, and has no resumption and no early data.
 ;
 ;  The server proves who it is: its certificate chain must lead to a
 ;  trusted root and name the host (x509.asm), and its CertificateVerify
@@ -20,7 +20,15 @@
 ;        RCX = handlers; R8 = 1 not to check the certificate chain, else 0;
 ;        R9 = now, Unix seconds) -> CF if it could not begin (TLS_ERROR
 ;        says why); else the ClientHello is on its way
-;    tls_input(RSI = bytes from the server, RDX = how many)
+;    tls_accept(RSI = the identity; RDX = send; RCX = handlers; R9 = now)
+;        -> CF if it could not begin; else the session is a server's,
+;        waiting for the client's ClientHello. The identity (TID_*) is the
+;        P-256 private key, then the certificates as TLS's Certificate
+;        message lists them (each a 24-bit length, the DER, and 00 00 for
+;        no extensions), the leaf first; TLS_CHAIN_MAX bytes at most. It
+;        must stay while the session lasts. The client is not asked for a
+;        certificate; CertificateVerify is ECDSA P-256 with SHA-256.
+;    tls_input(RSI = bytes from the other side, RDX = how many)
 ;    tls_write(RSI = data, RDX = bytes) -> CF if not open, or not sent (then
 ;        the session is forgotten and TLS_ERROR says why)
 ;    tls_close    close_notify, if open; then forgotten
@@ -31,8 +39,9 @@
 ;  send(RDI = the session, RSI = bytes, EDX = how many) -> CF if it could
 ;  not take them all. The handlers, at TLO_*, each with RDI = the session:
 ;  READY (handshake done), DATA (RSI, EDX: plaintext, valid during the
-;  call), CLOSED (the server's close_notify), FAIL (EAX = error; TLS_ALERT
-;  holds the server's alert for TLE_ALERT, TLS_CERT_ERR the X5E_* for
+;  call), CLOSED (the other side's close_notify), FAIL (EAX = error;
+;  TLS_ALERT holds the other side's alert for TLE_ALERT, TLS_CERT_ERR the
+;  X5E_* for
 ;  TLE_CERT; the session is already forgotten). At READY, TLS_VERIFIED says
 ;  whether the chain was checked, and then TLS_ANCHOR names the root and
 ;  TLS_DEPTH counts the intermediates. Send and the handlers may change
@@ -75,7 +84,17 @@ TLE_OVERFLOW    equ 13
 TLE_CERT        equ 14                  ; tls_cert_err says why
 TLE_VERIFY      equ 15
 TLE_SIGALG      equ 16
-TLE_COUNT       equ 17
+TLE_C_VERSION   equ 17                  ; a server's: what the client offers will not do
+TLE_C_CIPHER    equ 18
+TLE_C_SIGALG    equ 19
+TLE_C_SHARE     equ 20
+TLE_COUNT       equ 21
+
+; the identity a server proves (tls_accept)
+TID_KEY         equ 0                   ; the P-256 private key, 32 bytes, big-endian
+TID_LEN         equ 32                  ; dword: bytes at TID_CHAIN
+TID_CHAIN       equ 40
+TLS_CHAIN_MAX   equ 16000
 
 TL_REC_MAX      equ 16384 + 256         ; a record's body, encrypted
 TL_PLAIN_MAX    equ 16384
@@ -95,12 +114,16 @@ S_tl_send:        resq 1
 S_tl_ops:         resq 1
 S_tl_now:         resq 1
 S_tl_insecure:    resb 1
+S_tl_server:      resb 1                  ; a server's session (tls_accept)
 alignb 8
+S_tl_id:          resq 1                  ; a server's identity
 S_tl_user:        resq 1                  ; the caller's
 S_tls_anchor:     resq 1                  ; the trusted root's name
 S_tls_depth:      resd 1                  ; intermediates under it
 alignb 16
 S_tl_wipe_start:
+; c_* is what this side sends with, s_* what it receives with: a client's
+; own and the server's, a server's the other way round (tl_mine)
 S_tl_c_gcm:       resb GCM_CTX
 S_tl_s_gcm:       resb GCM_CTX
 S_tl_hash:        resb SHA_CTX            ; the transcript
@@ -125,6 +148,8 @@ S_tl_nonce_buf:   resb 16
 S_tl_c_seq:       resq 1
 S_tl_s_seq:       resq 1
 S_tl_msg:         resb 64
+S_tl_sidlen:      resd 1                  ; a server's: the client's session id
+S_tl_peer_hs:     resb 32                 ; a server's: the client's handshake secret
 S_tl_have_key:    resb 1                  ; S_tl_skey is the server's
 alignb 8
 S_tl_skey:        resb KEY                ; its key, from x509.asm
@@ -138,6 +163,7 @@ S_tl_host:        resb 256
 S_tl_rbuf:        resb 5 + TL_REC_MAX
 S_tl_wbuf:        resb 5 + TL_PLAIN_MAX + 17 + 512
 S_tl_hbuf:        resb TL_HMAX
+S_tl_flight:      resb TLS_CHAIN_MAX + 384 ; a server's: EncryptedExtensions to Finished
 S_tl_wipe_end:
 endstruc
 
@@ -201,21 +227,8 @@ tls_start:
     mov r12, rsi
     mov r13, rdx
     mov r14, rcx
-    call tl_wipe
-    mov [rbp + S_tl_send], r13
-    mov [rbp + S_tl_ops], r14
+    call tl_begin
     mov [rbp + S_tl_insecure], r8b
-    mov [rbp + S_tl_now], r9
-    xor eax, eax
-    mov [rbp + S_tls_anchor], rax
-    mov [rbp + S_tls_depth], eax
-    mov [rbp + S_tls_error], eax
-    mov [rbp + S_tls_alert], eax
-    mov [rbp + S_tls_certs], eax
-    mov [rbp + S_tls_cert_bytes], eax
-    mov [rbp + S_tls_sigalg], eax
-    mov [rbp + S_tls_cert_err], eax
-    mov [rbp + S_tls_verified], eax
     test r12, r12                       ; the name, for SNI
     jz .named
     lea rdi, [rbp + S_tl_host]
@@ -261,6 +274,70 @@ tls_start:
     stc
 .out:
     TL_RESTORE
+    ret
+
+tls_accept:
+    TL_SAVE
+    mov rbp, rdi
+    mov r12, rsi
+    mov r13, rdx
+    mov r14, rcx
+    call tl_begin
+    mov byte [rbp + S_tl_server], 1
+    mov [rbp + S_tl_id], r12
+    cmp dword [r12 + TID_LEN], TLS_CHAIN_MAX
+    ja .big
+    lea rdi, [rbp + S_tl_priv]          ; our key pair, and our random
+    mov ecx, 32
+    call rand_bytes
+    jc .no_rng
+    lea rdi, [rbp + S_tl_random]
+    mov ecx, 32
+    call rand_bytes
+    jc .no_rng
+    lea rdi, [rbp + S_tl_pub]
+    lea rsi, [rbp + S_tl_priv]
+    call x25519_base
+    lea rdi, [rbp + S_tl_hash]
+    call sha256_init
+    mov dword [rbp + S_tls_state], TL_WAIT_SH   ; a server's: for the ClientHello
+    clc
+    jmp .out
+.big:
+    mov eax, TLE_TOOBIG
+    jmp .fail
+.no_rng:
+    mov eax, TLE_RNG
+.fail:
+    push rax
+    call tl_wipe
+    pop rax
+    mov [rbp + S_tls_error], eax
+    stc
+.out:
+    TL_RESTORE
+    ret
+
+; tl_begin(R13 = send, R14 = handlers, R9 = now): a session wiped and begun,
+; a client's
+tl_begin:
+    call tl_wipe
+    mov [rbp + S_tl_send], r13
+    mov [rbp + S_tl_ops], r14
+    mov [rbp + S_tl_now], r9
+    xor eax, eax
+    mov [rbp + S_tl_insecure], al
+    mov [rbp + S_tl_server], al
+    mov [rbp + S_tl_id], rax
+    mov [rbp + S_tls_anchor], rax
+    mov [rbp + S_tls_depth], eax
+    mov [rbp + S_tls_error], eax
+    mov [rbp + S_tls_alert], eax
+    mov [rbp + S_tls_certs], eax
+    mov [rbp + S_tls_cert_bytes], eax
+    mov [rbp + S_tls_sigalg], eax
+    mov [rbp + S_tls_cert_err], eax
+    mov [rbp + S_tls_verified], eax
     ret
 
 tls_input:
@@ -398,6 +475,12 @@ tls_error_text:
     xor eax, eax
 .known:
     lea rcx, [tl_error_texts]
+    test rdi, rdi
+    jz .text
+    cmp byte [rdi + S_tl_server], 0
+    je .text
+    lea rcx, [tl_error_texts_s]         ; a server's: the client did it
+.text:
     mov rax, [rcx + rax * 8]
     ret
 
@@ -550,6 +633,13 @@ tl_record:
     jne .bad
     jmp .ok
 .not_ccs:
+    cmp ebx, 21                         ; an alert in the clear during the
+    jne .clear                          ; handshake: the other side may not
+    cmp dword [rbp + S_tls_state], TL_OPEN      ; have its keys yet
+    jae .clear
+    cmp ecx, 2
+    je .alert
+.clear:
     cmp dword [rbp + S_tls_state], TL_WAIT_SH
     jne .sealed
     cmp ecx, TL_PLAIN_MAX
@@ -740,6 +830,8 @@ tl_hash_now:
 ; tl_message(RSI = message, ECX = its bytes with the header) -> CF
 tl_message:
     movzx eax, byte [rsi]
+    cmp byte [rbp + S_tl_server], 0
+    jne tl_server_message
     mov edx, [rbp + S_tls_state]
     cmp edx, TL_WAIT_SH
     je .sh
@@ -960,7 +1052,29 @@ tl_handshake_keys:
     call tl_hash_now
     EL rbp + S_tl_c_secret, rbp + S_tl_secret, str_tl_c_hs, rbp + S_tl_th, 32, 32
     EL rbp + S_tl_s_secret, rbp + S_tl_secret, str_tl_s_hs, rbp + S_tl_th, 32, 32
+    call tl_mine
     jmp tl_both_keys
+
+; tl_mine: on a server, the client's and the server's secrets swapped, so
+; that tl_c_secret is the one this side sends with
+tl_mine:
+    cmp byte [rbp + S_tl_server], 0
+    je .out
+    push rcx
+    push rdx
+    xor ecx, ecx
+.swap:
+    mov rax, [rbp + S_tl_c_secret + rcx * 8]
+    mov rdx, [rbp + S_tl_s_secret + rcx * 8]
+    mov [rbp + S_tl_s_secret + rcx * 8], rax
+    mov [rbp + S_tl_c_secret + rcx * 8], rdx
+    inc ecx
+    cmp ecx, 4
+    jb .swap
+    pop rdx
+    pop rcx
+.out:
+    ret
 
 ; tl_both_keys: keys and IVs from tl_c_secret and tl_s_secret, counting anew
 tl_both_keys:
@@ -1429,7 +1543,471 @@ tl_sni_len:
 .out:
     ret
 
+; -----------------------------------------------------------------------------
+;  The server's side. Its states: TL_WAIT_SH, waiting for the ClientHello
+;  (in the clear); TL_WAIT_FIN, our flight sent, waiting for the client's
+;  Finished; then TL_OPEN.
+; -----------------------------------------------------------------------------
+
+; tl_server_message(EAX = type, RSI, ECX = a whole handshake message) -> CF
+tl_server_message:
+    mov edx, [rbp + S_tls_state]
+    cmp edx, TL_WAIT_SH
+    je .hello
+    cmp edx, TL_WAIT_FIN
+    je .fin
+    cmp edx, TL_OPEN
+    jne .bad
+    cmp eax, 24
+    je tl_key_update
+    jmp .bad
+.hello:
+    cmp eax, 1
+    jne .bad
+    jmp tl_client_hello_in
+.fin:
+    cmp eax, 20
+    jne .bad
+    jmp tl_client_finished
+.bad:
+    mov eax, TLE_PROTO
+    jmp tl_fail
+
+; tl_client_hello_in(RSI, ECX = ClientHello) -> CF: what the client offers
+; checked; our ServerHello and flight sent, the handshake keys in use
+tl_client_hello_in:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    mov r14, rsi
+    mov r15d, ecx
+    cmp ecx, [rbp + S_tl_hlen]          ; the keys change after it, so nothing
+    jne .bad                            ; may follow it in the same record
+    lea r12, [rsi + 4]
+    lea r13, [rsi + rcx]
+    TL_NEED 35                          ; the version, the random, the id's length
+    movzx ecx, byte [r12 + 34]
+    cmp ecx, 32
+    ja .bad
+    add r12, 35
+    TL_NEED rcx
+    mov [rbp + S_tl_sidlen], ecx        ; the session id, to echo
+    mov rsi, r12
+    lea rdi, [rbp + S_tl_sessid]
+    add r12, rcx
+    rep movsb
+    xor ebx, ebx                        ; EBX: 1 AES-128-GCM, 2 TLS 1.3, 4 an
+    TL_NEED 2                           ; X25519 share, 8 ECDSA P-256
+    movzx eax, word [r12]               ; the cipher suites
+    xchg al, ah
+    add r12, 2
+    test eax, eax
+    jz .bad
+    test eax, 1
+    jnz .bad
+    TL_NEED rax
+    lea rdx, [r12 + rax]
+.suite:
+    cmp word [r12], 0x0113              ; 13 01
+    jne .next_suite
+    or ebx, 1
+.next_suite:
+    add r12, 2
+    cmp r12, rdx
+    jb .suite
+    TL_NEED 2                           ; compression: none, alone
+    cmp word [r12], 0x0001              ; 01 00
+    jne .bad
+    add r12, 2
+    cmp r12, r13                        ; no extensions: not TLS 1.3
+    je .exts_done
+    TL_NEED 2
+    movzx eax, word [r12]
+    xchg al, ah
+    add r12, 2
+    mov r10, r13
+    sub r10, r12
+    cmp rax, r10
+    jne .bad
+.ext:
+    cmp r12, r13
+    jae .exts_done
+    TL_NEED 4
+    movzx ecx, word [r12]
+    xchg cl, ch
+    movzx edx, word [r12 + 2]
+    xchg dl, dh
+    add r12, 4
+    TL_NEED rdx
+    lea r8, [r12 + rdx]                 ; R8 = its end
+    cmp ecx, 0x002b
+    je .versions
+    cmp ecx, 0x0033
+    je .shares
+    cmp ecx, 0x000d
+    je .sigalgs
+.next_ext:
+    mov r12, r8
+    jmp .ext
+.versions:                              ; a byte's length, then two each
+    test edx, edx
+    jz .bad
+    movzx eax, byte [r12]
+    inc eax
+    cmp eax, edx
+    jne .bad
+    lea rsi, [r12 + 1]
+.version:
+    lea rax, [rsi + 2]
+    cmp rax, r8
+    ja .next_ext
+    cmp word [rsi], 0x0403              ; 03 04
+    jne .next_version
+    or ebx, 2
+.next_version:
+    add rsi, 2
+    jmp .version
+.shares:                                ; a length, then group, length, key
+    cmp edx, 2
+    jb .bad
+    movzx eax, word [r12]
+    xchg al, ah
+    add eax, 2
+    cmp eax, edx
+    jne .bad
+    lea rsi, [r12 + 2]
+.share:
+    lea rax, [rsi + 4]
+    cmp rax, r8
+    ja .next_ext
+    movzx ecx, word [rsi + 2]
+    xchg cl, ch
+    lea rax, [rsi + rcx + 4]
+    cmp rax, r8
+    ja .bad
+    cmp word [rsi], 0x1d00              ; 00 1d: X25519
+    jne .next_share
+    cmp ecx, 32
+    jne .bad
+    push rsi
+    add rsi, 4
+    lea rdi, [rbp + S_tl_peer]
+    mov ecx, 32
+    rep movsb
+    pop rsi
+    or ebx, 4
+.next_share:
+    movzx ecx, word [rsi + 2]
+    xchg cl, ch
+    lea rsi, [rsi + rcx + 4]
+    jmp .share
+.sigalgs:
+    cmp edx, 2
+    jb .bad
+    movzx eax, word [r12]
+    xchg al, ah
+    add eax, 2
+    cmp eax, edx
+    jne .bad
+    lea rsi, [r12 + 2]
+.sigalg:
+    lea rax, [rsi + 2]
+    cmp rax, r8
+    ja .next_ext
+    cmp word [rsi], 0x0304              ; 04 03
+    jne .next_sigalg
+    or ebx, 8
+.next_sigalg:
+    add rsi, 2
+    jmp .sigalg
+.exts_done:
+    mov eax, TLE_C_VERSION
+    test ebx, 2
+    jz .fail
+    mov eax, TLE_C_CIPHER
+    test ebx, 1
+    jz .fail
+    mov eax, TLE_C_SIGALG
+    test ebx, 8
+    jz .fail
+    mov eax, TLE_C_SHARE
+    test ebx, 4
+    jz .fail
+    mov rsi, r14
+    mov ecx, r15d
+    call tl_transcript
+    lea rdi, [rbp + S_tl_shared]        ; the shared secret
+    lea rsi, [rbp + S_tl_priv]
+    lea rdx, [rbp + S_tl_peer]
+    call x25519
+    xor eax, eax
+    xor ecx, ecx
+    lea rdx, [rbp + S_tl_shared]
+.zero:
+    or al, [rdx + rcx]
+    inc ecx
+    cmp ecx, 32
+    jb .zero
+    test al, al
+    jz .weak
+    call tl_server_hello_out
+    jc .out
+    call tl_handshake_keys
+    call tl_flight
+    jmp .out
+.weak:
+    mov eax, TLE_KEYSHARE
+    jmp .fail
+.bad:
+    mov eax, TLE_PROTO
+.fail:
+    call tl_fail
+.out:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+; tl_server_hello_out -> CF: ServerHello in the clear, into the transcript;
+; then a change_cipher_spec if the client is in middlebox compatibility
+; mode (it sent a session id)
+tl_server_hello_out:
+    lea rdi, [rbp + S_tl_wbuf + 9]      ; after the record and message headers
+    mov word [rdi], 0x0303
+    add rdi, 2
+    lea rsi, [rbp + S_tl_random]
+    mov ecx, 32
+    rep movsb
+    mov ecx, [rbp + S_tl_sidlen]
+    mov [rdi], cl
+    inc rdi
+    lea rsi, [rbp + S_tl_sessid]
+    rep movsb
+    lea rsi, [tl_sh_rest]
+    mov ecx, tl_sh_rest_len
+    rep movsb
+    lea rsi, [rbp + S_tl_pub]
+    mov ecx, 32
+    rep movsb
+    lea rcx, [rbp + S_tl_wbuf + 9]
+    mov rax, rdi
+    sub rax, rcx                        ; EAX = the message's body
+    mov byte [rbp + S_tl_wbuf + 5], 2   ; ServerHello
+    mov byte [rbp + S_tl_wbuf + 6], 0
+    mov edx, eax
+    xchg dl, dh
+    mov [rbp + S_tl_wbuf + 7], dx
+    mov dword [rbp + S_tl_wbuf], 0x00030316     ; 16 03 03: handshake
+    lea edx, [rax + 4]
+    xchg dl, dh
+    mov [rbp + S_tl_wbuf + 3], dx
+    push rax
+    lea rsi, [rbp + S_tl_wbuf + 5]
+    lea ecx, [rax + 4]
+    call tl_transcript
+    pop rax
+    lea rsi, [rbp + S_tl_wbuf]
+    lea ecx, [rax + 9]
+    call tl_send_raw
+    jc .send
+    cmp dword [rbp + S_tl_sidlen], 0
+    je .done
+    lea rsi, [tl_ccs]
+    mov ecx, 6
+    call tl_send_raw
+    jc .send
+.done:
+    clc
+    ret
+.send:
+    mov eax, TLE_SEND
+    jmp tl_fail
+
+; tl_put24(RDI = where, EAX = a number below 2^24): big-endian, 3 bytes
+tl_put24:
+    mov [rdi + 2], al
+    mov [rdi + 1], ah
+    shr eax, 16
+    mov [rdi], al
+    ret
+
+; tl_flight -> CF: EncryptedExtensions, Certificate, CertificateVerify and
+; Finished, under our handshake key, each into the transcript; then the
+; application secrets, ours in use, the client's kept for its Finished
+tl_flight:
+    push rbx
+    push r12
+    push r13
+    lea rbx, [rbp + S_tl_flight]        ; RBX = where the next message goes
+    mov dword [rbx], 0x02000008         ; EncryptedExtensions, with none
+    mov word [rbx + 4], 0
+    mov rsi, rbx
+    mov ecx, 6
+    call tl_transcript
+    add rbx, 6
+    mov r12, [rbp + S_tl_id]            ; Certificate: no context, the list
+    mov r13d, [r12 + TID_LEN]
+    mov byte [rbx], 11
+    lea eax, [r13 + 4]
+    lea rdi, [rbx + 1]
+    call tl_put24
+    mov byte [rbx + 4], 0
+    mov eax, r13d
+    lea rdi, [rbx + 5]
+    call tl_put24
+    lea rdi, [rbx + 8]
+    lea rsi, [r12 + TID_CHAIN]
+    mov ecx, r13d
+    rep movsb
+    mov rsi, rbx
+    lea ecx, [r13 + 8]
+    call tl_transcript
+    lea rbx, [rbx + r13 + 8]
+    call tl_hash_now                    ; CertificateVerify: 64 spaces, the
+    lea rdi, [rbp + S_tl_cvbuf]         ; context, 0, the hash, signed
+    mov ecx, 64
+    mov al, ' '
+    rep stosb
+    lea rsi, [str_tl_cv]
+    mov ecx, str_tl_cv_len
+    rep movsb
+    lea rsi, [rbp + S_tl_th]
+    mov ecx, 32
+    rep movsb
+    lea rdi, [rbx + 8]
+    lea rsi, [r12 + TID_KEY]
+    lea rdx, [rbp + S_tl_cvbuf]
+    mov ecx, 64 + str_tl_cv_len + 32
+    call sig_sign
+    jc .rng
+    mov byte [rbx], 15
+    mov byte [rbx + 1], 0
+    lea ecx, [rax + 4]
+    xchg cl, ch
+    mov [rbx + 2], cx
+    mov word [rbx + 4], 0x0304          ; 04 03: ECDSA P-256, SHA-256
+    mov ecx, eax
+    xchg cl, ch
+    mov [rbx + 6], cx
+    lea r13d, [rax + 8]
+    mov rsi, rbx
+    mov ecx, r13d
+    call tl_transcript
+    add rbx, r13
+    call tl_hash_now                    ; Finished, with ours
+    lea rsi, [rbp + S_tl_c_secret]
+    call tl_mac
+    mov dword [rbx], 0x20000014
+    lea rsi, [rbp + S_tl_mac_buf]
+    lea rdi, [rbx + 4]
+    mov ecx, 32
+    rep movsb
+    mov rsi, rbx
+    mov ecx, 36
+    call tl_transcript
+    add rbx, 36
+    lea r12, [rbp + S_tl_flight]        ; sent, in records of 16 KiB at most
+    sub rbx, r12
+.record:
+    mov ecx, TL_PLAIN_MAX
+    cmp rbx, rcx
+    cmovb ecx, ebx
+    sub rbx, rcx
+    mov rsi, r12
+    add r12, rcx
+    mov al, 22
+    call tl_seal_send
+    jc .send
+    test rbx, rbx
+    jnz .record
+    call tl_hash_now                    ; tl_th = up to our Finished
+    lea rsi, [rbp + S_tl_s_secret]      ; the client's handshake secret, for
+    lea rdi, [rbp + S_tl_peer_hs]       ; its Finished
+    mov ecx, 32
+    rep movsb
+    EL rbp + S_tl_tmp, rbp + S_tl_secret, str_tl_derived, tl_empty_hash, 32, 32
+    lea rdi, [rbp + S_tl_secret]        ; the master secret
+    lea rsi, [rbp + S_tl_tmp]
+    mov edx, 32
+    lea rcx, [tl_zero32]
+    mov r8d, 32
+    call hkdf_extract
+    EL rbp + S_tl_c_secret, rbp + S_tl_secret, str_tl_c_ap, rbp + S_tl_th, 32, 32
+    EL rbp + S_tl_s_secret, rbp + S_tl_secret, str_tl_s_ap, rbp + S_tl_th, 32, 32
+    call tl_mine
+    call tl_client_keys                 ; ours now; the client's once it has finished
+    mov dword [rbp + S_tls_state], TL_WAIT_FIN
+    clc
+    jmp .out
+.rng:
+    mov eax, TLE_RNG
+    call tl_fail
+    jmp .out
+.send:
+    mov eax, TLE_SEND
+    call tl_fail
+.out:
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+; tl_client_finished(RSI, ECX) -> CF: the client's Finished checked; its
+; application key in use; READY
+tl_client_finished:
+    push rbx
+    push r12
+    mov r12, rsi
+    mov ebx, ecx
+    cmp ecx, 4 + 32
+    jne .bad
+    call tl_hash_now
+    lea rsi, [rbp + S_tl_peer_hs]
+    call tl_mac
+    xor eax, eax                        ; compared in constant time
+    xor ecx, ecx
+    lea rsi, [rbp + S_tl_mac_buf]
+.cmp:
+    mov dl, [rsi + rcx]
+    xor dl, [r12 + 4 + rcx]
+    or al, dl
+    inc ecx
+    cmp ecx, 32
+    jb .cmp
+    test al, al
+    jnz .wrong
+    mov rsi, r12
+    mov ecx, ebx
+    call tl_transcript
+    call tl_server_keys                 ; what it sends with from here on
+    mov dword [rbp + S_tls_state], TL_OPEN
+    mov rax, [rbp + S_tl_ops]
+    mov rdi, rbp
+    call [rax + TLO_READY]
+    clc
+    jmp .out
+.wrong:
+    mov eax, TLE_FINISHED
+    call tl_fail
+    jmp .out
+.bad:
+    mov eax, TLE_PROTO
+    call tl_fail
+.out:
+    pop r12
+    pop rbx
+    ret
+
 section .rodata
+tl_sh_rest:     db 0x13, 0x01, 0x00                ; AES-128-GCM, no compression
+                db 0x00, 0x2e                      ; the extensions:
+                db 0x00, 0x2b, 0x00, 0x02, 0x03, 0x04  ; TLS 1.3
+                db 0x00, 0x33, 0x00, 0x24, 0x00, 0x1d, 0x00, 0x20  ; our X25519 share
+tl_sh_rest_len equ $ - tl_sh_rest
 tl_ch_suites:   db 0x00, 0x02, 0x13, 0x01  ; TLS_AES_128_GCM_SHA256
                 db 0x01, 0x00              ; no compression
 tl_ch_suites_len equ $ - tl_ch_suites
@@ -1465,6 +2043,7 @@ str_tl_cv_len   equ $ - str_tl_cv
 
 ; the alert we send for each error (0xFF: none)
 tl_alert_for:   db 0xFF, 80, 10, 70, 40, 40, 20, 51, 0xFF, 80, 40, 0xFF, 47, 22, 42, 51, 47
+                db 70, 40, 40, 40
 
 str_tle_0:      db 'no error', 0
 str_tle_rng:    db 'no hardware random numbers (RDSEED or RDRAND) for keys', 0
@@ -1483,9 +2062,24 @@ str_tle_overflow: db 'a record longer than TLS allows', 0
 str_tle_cert:   db 'the certificate will not do', 0
 str_tle_verify: db "the server's signature over the handshake is wrong (it does not hold its certificate's key)", 0
 str_tle_sigalg: db 'the server signed the handshake in a way that does not suit its key', 0
+str_tle_c_version: db 'the client does not speak TLS 1.3', 0
+str_tle_c_cipher: db 'the client does not offer AES-128-GCM', 0
+str_tle_c_sigalg: db 'the client does not take ECDSA P-256 signatures', 0
+str_tle_c_share: db 'the client sends no X25519 key share', 0
+str_tle_s_proto: db 'the client broke the TLS protocol', 0
+str_tle_s_finished: db "the client's Finished does not match the handshake", 0
+str_tle_s_alert: db 'the client sent an alert', 0
+str_tle_s_keyshare: db "the client's key share is no good", 0
 align 8
 tl_error_texts: dq str_tle_0, str_tle_rng, str_tle_proto, str_tle_version
                 dq str_tle_cipher, str_tle_hrr, str_tle_mac, str_tle_finished
                 dq str_tle_alert, str_tle_toobig, str_tle_clientcert, str_tle_send
                 dq str_tle_keyshare, str_tle_overflow, str_tle_cert, str_tle_verify
-                dq str_tle_sigalg
+                dq str_tle_sigalg, str_tle_c_version, str_tle_c_cipher, str_tle_c_sigalg
+                dq str_tle_c_share
+tl_error_texts_s: dq str_tle_0, str_tle_rng, str_tle_s_proto, str_tle_version
+                dq str_tle_cipher, str_tle_hrr, str_tle_mac, str_tle_s_finished
+                dq str_tle_s_alert, str_tle_toobig, str_tle_clientcert, str_tle_send
+                dq str_tle_s_keyshare, str_tle_overflow, str_tle_cert, str_tle_verify
+                dq str_tle_sigalg, str_tle_c_version, str_tle_c_cipher, str_tle_c_sigalg
+                dq str_tle_c_share

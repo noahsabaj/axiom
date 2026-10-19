@@ -997,6 +997,9 @@ ring_exec:
 .net_listen:
     mov edi, [rbx + SQ_HANDLE]
     mov rsi, [rbx + SQ_A0]
+    mov edx, [rbx + SQ_HANDLE2]
+    mov rcx, [rbx + SQ_A1]
+    mov r8, [rbx + SQ_A2]
     call h_net_listen
     jmp .out
 .net_accept:

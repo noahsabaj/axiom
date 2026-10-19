@@ -1,6 +1,7 @@
 //! The network, for a program given it (wants::NET, or +net): TCP
 //! connections by host and port, through TLS if asked, and ports listened
-//! on, as the kernel's sockets (socket.asm) have them.
+//! on, plain or as TLS's server (an Identity), as the kernel's sockets
+//! (socket.asm) have them.
 //!
 //! A socket has 64 KiB each way in the kernel, which the kernel moves to
 //! and from TCP. Nothing here waits unless it says so: `send` takes what
@@ -14,7 +15,14 @@
 //!
 //! A host is a name, an IPv4 address or an IPv6 one; a capability may
 //! reach only some hosts, or one port (Net::sub).
+//!
+//! A TLS listener's connections are TLS 1.3, the kernel the server: each
+//! is sent and received in plaintext once its handshake is done
+//! (wait_send). What it proves it is, an Identity, is a P-256 key and its
+//! certificates, from PEM (a cert.pem and a key.pem, PKCS #8 or SEC1).
 
+#[cfg(feature = "alloc")]
+use alloc::vec::Vec;
 use core::net::{IpAddr, Ipv6Addr};
 
 use crate::ring::{self, State};
@@ -105,6 +113,38 @@ impl Net {
         ring::call(&e).map(|v| Socket { h: v.0 as Handle })
     }
 
+    /// A port listened on, as `listen`, its connections TLS 1.3 with `id`
+    /// (the kernel's checks that its key is its leaf certificate's, once it
+    /// tries: else NETW_IDENTITY). The key is not left in the io block.
+    #[cfg(feature = "alloc")]
+    pub fn listen_tls(self, port: u16, id: &Identity) -> Result<Socket> {
+        let len: usize = id.certs.iter().map(|c| c.len() + 5).sum();
+        if id.certs.is_empty() || id.certs.iter().any(|c| c.is_empty()) || len > NI_MAX {
+            return Err(Error::ARG);
+        }
+        let mut r = ring::lock();
+        let (p, io) = r.io(NI_CERTS + len)?;
+        let b = unsafe { core::slice::from_raw_parts_mut(p, NI_CERTS + len) };
+        b[..NI_CERTS].fill(0);
+        b[NI_KEY..NI_KEY + 32].copy_from_slice(&id.key);
+        b[NI_LEN..NI_LEN + 4].copy_from_slice(&(len as u32).to_le_bytes());
+        let mut at = NI_CERTS;
+        for c in &id.certs {
+            b[at..at + 3].copy_from_slice(&(c.len() as u32).to_be_bytes()[1..]);
+            b[at + 3..at + 3 + c.len()].copy_from_slice(c);
+            b[at + 3 + c.len()..at + 5 + c.len()].fill(0);
+            at += c.len() + 5;
+        }
+        let mut e = Entry::new(RO_NET_LISTEN, self.h);
+        e.a0 = port as u64;
+        e.handle2 = io;
+        e.a1 = 0;
+        e.a2 = NETF_TLS;
+        let got = r.call(&e);
+        wipe(&mut b[NI_KEY..NI_KEY + 32]);
+        got.map(|v| Socket { h: v.0 as Handle })
+    }
+
     /// A narrower one: hosts matching `pattern` ("api.example.com",
     /// "*.example.com", "" for any), one port (0: any), with only `rights`
     /// (RT_NET_*, RT_DUP, RT_GIVE...).
@@ -167,6 +207,7 @@ pub fn why_text(why: u32) -> &'static str {
         NETW_TIMEOUT => "timed out",
         NETW_TLS => "TLS failed",
         NETW_INUSE => "the port is listened on already",
+        NETW_IDENTITY => "the certificates will not do, or the key is not theirs",
         _ => "failed",
     }
 }
@@ -329,6 +370,174 @@ impl Drop for Socket {
     fn drop(&mut self) {
         ring::close(self.h);
     }
+}
+
+/// Zeroes, written so that they are.
+fn wipe(b: &mut [u8]) {
+    for x in b.iter_mut() {
+        unsafe { core::ptr::write_volatile(x, 0) };
+    }
+}
+
+/// What a TLS listener proves it is: a P-256 private key and the
+/// certificates that go with it, the leaf first (its key the key's). The
+/// key is wiped when this goes.
+#[cfg(feature = "alloc")]
+pub struct Identity {
+    key: [u8; 32],
+    certs: Vec<Vec<u8>>,
+}
+
+#[cfg(feature = "alloc")]
+impl Identity {
+    /// The key, big-endian, and the certificates' DER.
+    pub fn new(key: [u8; 32], certs: Vec<Vec<u8>>) -> Identity {
+        Identity { key, certs }
+    }
+
+    /// From PEM: `certs`' CERTIFICATE blocks, in order; `key`'s PRIVATE KEY
+    /// (PKCS #8, an EC key on P-256) or EC PRIVATE KEY (SEC1) -> ARG if
+    /// either is not there or will not do.
+    pub fn from_pem(certs: &str, key: &str) -> Result<Identity> {
+        let certs = pem_blocks(certs, "CERTIFICATE").ok_or(Error::ARG)?;
+        if certs.is_empty() {
+            return Err(Error::ARG);
+        }
+        let mut found = None;
+        for (label, pkcs8) in [("PRIVATE KEY", true), ("EC PRIVATE KEY", false)] {
+            let Some(mut blocks) = pem_blocks(key, label) else { return Err(Error::ARG) };
+            if let Some(der) = blocks.first() {
+                found = if pkcs8 { pkcs8_key(der) } else { sec1_key(der) };
+            }
+            for b in blocks.iter_mut() {
+                wipe(b);
+            }
+            if !blocks.is_empty() {
+                break;
+            }
+        }
+        let key = found.ok_or(Error::ARG)?;
+        Ok(Identity { key, certs })
+    }
+
+    /// The certificates, the leaf first.
+    pub fn certs(&self) -> &[Vec<u8>] {
+        &self.certs
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl Drop for Identity {
+    fn drop(&mut self) {
+        wipe(&mut self.key);
+    }
+}
+
+/// Each `-----BEGIN label-----` block in `text`, decoded -> None if one
+/// is not base64 or has no end.
+#[cfg(feature = "alloc")]
+fn pem_blocks(text: &str, label: &str) -> Option<Vec<Vec<u8>>> {
+    let begin = alloc::format!("-----BEGIN {}-----", label);
+    let end = alloc::format!("-----END {}-----", label);
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(i) = rest.find(&begin) {
+        rest = &rest[i + begin.len()..];
+        let j = rest.find(&end)?;
+        out.push(base64(&rest[..j])?);
+        rest = &rest[j + end.len()..];
+    }
+    Some(out)
+}
+
+/// Base64's bytes, white space skipped -> None if it is not base64.
+#[cfg(feature = "alloc")]
+fn base64(text: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(text.len() * 3 / 4);
+    let (mut acc, mut bits, mut pad) = (0u32, 0u32, 0u32);
+    for c in text.bytes() {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            b'=' => {
+                pad += 1;
+                continue;
+            }
+            b' ' | b'\t' | b'\r' | b'\n' => continue,
+            _ => return None,
+        };
+        if pad > 0 {
+            return None;
+        }
+        acc = (acc << 6 | v as u32) & 0xFFFF;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    (pad <= 2).then_some(out)
+}
+
+/// The DER element at the start of `b` -> its tag, its contents, and what
+/// follows it.
+fn der(b: &[u8]) -> Option<(u8, &[u8], &[u8])> {
+    let (&tag, b) = b.split_first()?;
+    let (&l, mut b) = b.split_first()?;
+    let len = if l < 0x80 {
+        l as usize
+    } else {
+        let n = (l & 0x7F) as usize;
+        if n == 0 || n > 2 || b.len() < n {
+            return None;
+        }
+        let len = b[..n].iter().fold(0usize, |a, &x| a << 8 | x as usize);
+        b = &b[n..];
+        len
+    };
+    (b.len() >= len).then(|| (tag, &b[..len], &b[len..]))
+}
+
+const OID_EC_PUBLIC_KEY: &[u8] = &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01];
+const OID_P256: &[u8] = &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07];
+
+/// PKCS #8's PrivateKeyInfo, an EC key on P-256 -> the key.
+fn pkcs8_key(d: &[u8]) -> Option<[u8; 32]> {
+    let (0x30, body, _) = der(d)? else { return None };
+    let (0x02, version, rest) = der(body)? else { return None };
+    if version != [0] && version != [1] {
+        return None;
+    }
+    let (0x30, alg, rest) = der(rest)? else { return None };
+    let (0x06, oid, params) = der(alg)? else { return None };
+    let (0x06, curve, _) = der(params)? else { return None };
+    if oid != OID_EC_PUBLIC_KEY || curve != OID_P256 {
+        return None;
+    }
+    let (0x04, inner, _) = der(rest)? else { return None };
+    sec1_key(inner)
+}
+
+/// SEC1's ECPrivateKey -> the key (on P-256, if it names its curve).
+fn sec1_key(d: &[u8]) -> Option<[u8; 32]> {
+    let (0x30, body, _) = der(d)? else { return None };
+    let (0x02, version, rest) = der(body)? else { return None };
+    let (0x04, k, rest) = der(rest)? else { return None };
+    if version != [1] || k.is_empty() || k.len() > 32 {
+        return None;
+    }
+    if let Some((0xA0, params, _)) = der(rest) {
+        let (0x06, curve, _) = der(params)? else { return None };
+        if curve != OID_P256 {
+            return None;
+        }
+    }
+    let mut key = [0u8; 32];
+    key[32 - k.len()..].copy_from_slice(k);
+    Some(key)
 }
 
 /// The address as text, as RO_NET_CONNECT takes a host: a.b.c.d, or IPv6's.

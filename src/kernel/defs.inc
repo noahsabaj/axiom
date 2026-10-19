@@ -329,7 +329,10 @@ SK_HOST         equ 320                 ; 256 bytes, NUL-ended
 SK_ADDR         equ 576                 ; the other side's address (16 bytes)
 SK_LADDR        equ 592                 ; ours, once it is connecting (16 bytes)
 SK_LPORT        equ 608                 ; dword: our port (a listener's own)
-SK_SIZE         equ 616
+SK_IDENT        equ 616                 ; TLS: a listener's identity (TID_*), or
+                                        ; the one a socket it took serves with
+SK_PARENT       equ 624                 ; that socket's listener (a reference)
+SK_SIZE         equ 632
 
 ; a block of memory (kobj.asm), an object
 MO_BASE         equ 64                  ; its pages, in the vm region
@@ -438,8 +441,10 @@ RO_NET_CONNECT  equ 24                  ; handle = the network, handle2 + a0: a
                                         ; NETF_* -> a socket, at once (RO_WAIT
                                         ; with a0 = 1 until it is open)
 RO_NET_LISTEN   equ 25                  ; handle, a0 = port (0: one of ours, any
-                                        ; that is free) -> a socket listening
-                                        ; (RO_WAIT with a0 = 1 until it does)
+                                        ; that is free), a2 = NETF_TLS or 0; for
+                                        ; TLS, handle2 + a1: the identity (NI_*)
+                                        ; -> a socket listening (RO_WAIT with
+                                        ; a0 = 1 until it does)
 RO_NET_ACCEPT   equ 26                 ; handle = a socket listening -> a socket,
                                         ; the oldest connection it took, or
                                         ; E_EMPTY (RO_WAIT on it waits for one)
@@ -511,12 +516,21 @@ FEA_RO          equ 2
 FEA_HIDDEN      equ 4
 FEA_SYSTEM      equ 8
 
-; RO_NET_CONNECT's a2
+; RO_NET_CONNECT's a2 (and RO_NET_LISTEN's: NETF_TLS)
 NETF_TLS        equ 1
 NETF_INSECURE   equ 2                   ; with NETF_TLS: the certificate not checked
 NETF_LOOKUP     equ 4                   ; alone: the host only looked up; the socket
                                         ; ends once its address is known (RO_WAIT,
                                         ; a0 = 0), for RO_NET_ADDR to say
+
+; what a TLS listener proves it is (RO_NET_LISTEN): its connections are
+; TLS 1.3, signed with the key (ECDSA P-256), sending the certificates
+NI_KEY          equ 0                   ; the private key, 32 bytes, big-endian
+NI_LEN          equ 32                  ; dword: bytes at NI_CERTS
+NI_CERTS        equ 40                  ; the certificates, the leaf first, each a
+                                        ; 24-bit big-endian length, its DER and
+                                        ; two zero bytes (as TLS lists them)
+NI_MAX          equ 16000               ; bytes at NI_CERTS, at most
 
 ; a socket's addresses (RO_NET_ADDR); 16 bytes each, IPv4 as ::ffff:a.b.c.d
 NA_PEER         equ 0                   ; the other side's (the host's, looked up)
@@ -554,6 +568,8 @@ NETW_RESET      equ 11
 NETW_TIMEOUT    equ 12
 NETW_TLS        equ 13                  ; TLS's error says why
 NETW_INUSE      equ 14                  ; the port is listened on already
+NETW_IDENTITY   equ 15                  ; a TLS listener's: the certificates will
+                                        ; not do, or the key is not the leaf's
 
 TS_NEW          equ 0
 TS_READY        equ 1

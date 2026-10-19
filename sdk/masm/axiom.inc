@@ -173,6 +173,10 @@ FEA_SYSTEM      EQU 8
 NETF_TLS        EQU 1
 NETF_INSECURE   EQU 2  ; with NETF_TLS: the certificate not checked
 NETF_LOOKUP     EQU 4  ; alone: the host only looked up; the socket
+NI_KEY          EQU 0  ; the private key, 32 bytes, big-endian
+NI_LEN          EQU 32  ; dword: bytes at NI_CERTS
+NI_CERTS        EQU 40  ; the certificates, the leaf first, each a
+NI_MAX          EQU 16000  ; bytes at NI_CERTS, at most
 NA_PEER         EQU 0  ; the other side's (the host's, looked up)
 NA_LOCAL        EQU 16  ; ours (:: until it connects; a listener's)
 NA_PEER_PORT    EQU 32  ; dword
@@ -201,6 +205,7 @@ NETW_RESET      EQU 11
 NETW_TIMEOUT    EQU 12
 NETW_TLS        EQU 13  ; TLS's error says why
 NETW_INUSE      EQU 14  ; the port is listened on already
+NETW_IDENTITY   EQU 15  ; a TLS listener's: the certificates will
 USER_START      EQU 0200000h  ; the start block, read-only
 USER_IMAGE      EQU 0400000h  ; the program, its header first
 USER_IMAGE_MAX  EQU 16 SHL 20

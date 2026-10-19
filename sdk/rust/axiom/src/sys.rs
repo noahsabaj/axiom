@@ -86,7 +86,10 @@ pub const RT_SK_RECV: u32 = 1 << 9;
 // the network (socket.asm): RO_NET_CONNECT's a2 (NETF_*); a socket's state,
 // why it failed, and what RO_WAIT would find there now (RO_NET_STATUS:
 // SKS_* | NETW_* << 8 | TLS's error << 16 | NS_*); its addresses (RO_NET_ADDR,
-// NA_*: 16 bytes each, IPv4 as ::ffff:a.b.c.d)
+// NA_*: 16 bytes each, IPv4 as ::ffff:a.b.c.d); what a TLS listener proves
+// it is (RO_NET_LISTEN with NETF_TLS, NI_*: a P-256 key, 32 bytes, then
+// the certificates' bytes, a dword, then each a 24-bit big-endian length,
+// its DER and two zero bytes, the leaf first)
 pub const NETF_TLS: u64 = 1;
 pub const NETF_INSECURE: u64 = 2;
 pub const NETF_LOOKUP: u64 = 4;
@@ -111,6 +114,7 @@ pub const NETW_RESET: u32 = 11;
 pub const NETW_TIMEOUT: u32 = 12;
 pub const NETW_TLS: u32 = 13;
 pub const NETW_INUSE: u32 = 14;
+pub const NETW_IDENTITY: u32 = 15;
 pub const NS_RECV: u64 = 1 << 24;
 pub const NS_SEND: u64 = 1 << 25;
 pub const NA_PEER: usize = 0;
@@ -118,6 +122,10 @@ pub const NA_LOCAL: usize = 16;
 pub const NA_PEER_PORT: usize = 32;
 pub const NA_PORT: usize = 36;
 pub const NA_SIZE: usize = 40;
+pub const NI_KEY: usize = 0;
+pub const NI_LEN: usize = 32;
+pub const NI_CERTS: usize = 40;
+pub const NI_MAX: usize = 16000;
 pub const SK_HOST_MAX: usize = 256;
 pub const SK_BUF: usize = 65536;
 

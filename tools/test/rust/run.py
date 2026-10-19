@@ -39,16 +39,22 @@ screen.
     back whole by another (try_clone), its addresses, peek, a read's
     timeout, nonblocking, shutdown and the end; connect_timeout to nobody;
     loopback and UDP refused; port 0 one of ours; a port listened on, a
-    client from here (forwarded to it) answered; by name (axiom.test, a DNS
+    client from here (forwarded to it) answered; TLS's server side
+    (axiom::net::Identity from a PKCS #8 key and a certificate made here,
+    put on the stick): a key not the certificate's refused (NETW_IDENTITY),
+    bad PEM refused, then a TLS 1.3 client from here, its certificate
+    pinned as fleet pins a node's, answered; by name (axiom.test, a DNS
     server here on 127.0.0.1:53, if it can be had), and a name that isn't;
     no sockets left.
 Skipped (passing) if there is no nightly toolchain. Outputs go to
 build/test/rust/.
 """
+import hashlib
 import pathlib
 import re
 import shutil
 import socket
+import ssl
 import struct
 import subprocess
 import sys
@@ -140,9 +146,59 @@ def free_port():
     return p
 
 
-ECHO, SERVE = free_port(), free_port()
+ECHO, SERVE, TLS_SERVE = free_port(), free_port(), free_port()
 LISTEN = 7777                           # the guest's, SERVE forwarded to it
+TLS_LISTEN = LISTEN + 1                 # its TLS listener's, TLS_SERVE to it
 heard = []                              # what the guest told the client here
+heard_tls = []                          # and the TLS client
+
+
+def node_identity():
+    """A P-256 key (PKCS #8, as fleet's install.py writes key.pem) and a
+    self-signed certificate for it, as fleet makes a node's -> their paths."""
+    key, cert = OUT / "node.key", OUT / "node.pem"
+    subprocess.run(["openssl", "genpkey", "-algorithm", "EC", "-pkeyopt", "ec_paramgen_curve:P-256",
+                    "-out", str(key)], check=True, capture_output=True)
+    subprocess.run(["openssl", "req", "-new", "-x509", "-key", str(key), "-out", str(cert), "-days", "30",
+                    "-subj", "/CN=fleet node test", "-sha256"], check=True, capture_output=True)
+    return key, cert
+
+
+def tls_client(log_path, started, cert):
+    """Once the guest's TLS listener listens: TLS 1.3 to it, its certificate
+    pinned by its SHA-256 (fleet's protocol, section 7), a line, the answer."""
+    want = hashlib.sha256(ssl.PEM_cert_to_DER_cert(cert.read_text())).hexdigest()
+    deadline = time.time() + 300
+    while time.time() < deadline:
+        try:
+            if log_path.stat().st_mtime >= started and \
+                    "rstd: net tls listening on" in log_path.read_text(errors="replace"):
+                break
+        except OSError:
+            pass
+        time.sleep(0.3)
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    try:
+        raw = socket.create_connection(("127.0.0.1", TLS_SERVE), timeout=30)
+        with ctx.wrap_socket(raw) as c:
+            got = hashlib.sha256(c.getpeercert(binary_form=True)).hexdigest()
+            info = (c.version(), c.cipher()[0], got == want)
+            c.sendall(b"hello over TLS\n")
+            back = b""
+            while True:
+                try:
+                    b = c.recv(4096)
+                except ssl.SSLError as e:
+                    back += f" [{e.reason}]".encode()
+                    break
+                if not b:
+                    break
+                back += b
+        heard_tls.append((info, back))
+    except OSError as e:
+        heard_tls.append(repr(e))
 
 
 def echo_server():
@@ -262,10 +318,18 @@ def check_net(log, dns):
         (f"rstd: net listening on 0.0.0.0:{LISTEN}", "TcpListener::bind, local_addr"),
         ('rstd: net accepted from 10.0.2.2, said "hello from the host"', "accept, a line read"),
         (f"net: a program listens on port {LISTEN}", "the kernel said so"),
+        ('rstd: net tls, another key: failed true, "the certificates will not do, or the key is not theirs"; '
+         'bad PEM [Some(Error(-10: ', "TLS listener: a key not the certificate's refused; bad PEM refused"),
+        (f"rstd: net tls listening on port {TLS_LISTEN}, failed false, 1 certificate",
+         "TLS listener: Identity::from_pem (PKCS #8), listen_tls"),
+        ('rstd: net tls accepted from 10.0.2.2, open true, said "hello over TLS"',
+         "TLS listener: accepted, the handshake done, a line read"),
         ("rstd: net done", "done"),
     ]:
         result(has(line), f"rstd net: {what}")
     result(heard == [b"you said: hello from the host\n"], f"rstd net: the client here was answered ({heard})")
+    result(heard_tls == [(("TLSv1.3", "TLS_AES_128_GCM_SHA256", True), b"you said, over TLS: hello over TLS\n")],
+           f"rstd net: the TLS client here: TLS 1.3, the certificate pinned, answered ({heard_tls})")
     if dns:
         result(has(f"rstd: net axiom.test is [10.0.2.2:{ECHO}]"), "rstd net: to_socket_addrs by the kernel's DNS")
         result(has('rstd: net by name, echoed "by name"'), "rstd net: connected by name")
@@ -495,12 +559,15 @@ def main():
     stick_std = OUT / "stick-std.img"
     shutil.copyfile(stick, stick_std)
     stick_net = OUT / "stick-net.img"
-    shutil.copyfile(stick, stick_net)
+    key, cert = node_identity()
+    subprocess.run([sys.executable, str(ROOT / "tools" / "mkstick.py"), str(stick_net), "--file",
+                    f"NODE.PEM={cert}", "--file", f"NODE.KEY={key}"], cwd=ROOT, check=True, capture_output=True)
     echo_server()
     dns = dns_server()
     started = time.time()
     threading.Thread(target=client, args=(OUT / "rust-net.log", started), daemon=True).start()
-    fwd = f"user,hostfwd=tcp:127.0.0.1:{SERVE}-:{LISTEN}"
+    threading.Thread(target=tls_client, args=(OUT / "rust-net.log", started, cert), daemon=True).start()
+    fwd = f"user,hostfwd=tcp:127.0.0.1:{SERVE}-:{LISTEN},hostfwd=tcp:127.0.0.1:{TLS_SERVE}-:{TLS_LISTEN}"
     logs = boot_all(OUT, {
         "rust": (script(""), ["--smp", "4", "--demo", "--extra", TABLET, "--stick",
                               stick.relative_to(ROOT).as_posix()], 120, 2),

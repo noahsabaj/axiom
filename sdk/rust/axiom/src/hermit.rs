@@ -46,9 +46,9 @@ use crate::net::{self, Net};
 use crate::heap::SYSTEM;
 use crate::sync::SpinLock;
 use crate::sys::{
-    self, Entry, Error, Handle, NETW_BADNAME, NETW_BUSY, NETW_DNS, NETW_DOWN, NETW_INUSE, NETW_NOADDR,
-    NETW_NOANSWER, NETW_NOHOST, NETW_NOROUTE, NETW_NOSERVER, NETW_REFUSED, NETW_RESET, NETW_TIMEOUT, RO_WAIT,
-    SK_BUF, SKS_LISTEN,
+    self, Entry, Error, Handle, NETW_BADNAME, NETW_BUSY, NETW_DNS, NETW_DOWN, NETW_IDENTITY, NETW_INUSE,
+    NETW_NOADDR, NETW_NOANSWER, NETW_NOHOST, NETW_NOROUTE, NETW_NOSERVER, NETW_REFUSED, NETW_RESET,
+    NETW_TIMEOUT, RO_WAIT, SK_BUF, SKS_LISTEN,
 };
 use crate::{console, ring, thread, time};
 
@@ -1104,6 +1104,7 @@ fn why_errno(why: u32) -> i32 {
         NETW_DOWN => ENETDOWN,
         NETW_NOROUTE => ENETUNREACH,
         NETW_INUSE => EADDRINUSE,
+        NETW_IDENTITY => EINVAL,
         NETW_NOSERVER..=NETW_NOANSWER => EHOSTUNREACH,
         _ => EIO,
     }

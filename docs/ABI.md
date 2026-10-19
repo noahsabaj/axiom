@@ -352,7 +352,7 @@ requests still waiting with that data.
 | 14 | `RO_RECV` | handle, into handle2 + a0, a1 bytes at most | its bytes, `E_EMPTY`, or `E_RANGE` (too big; it stays) |
 | 15 | `RO_KILL` | handle = a task | |
 | 16–23 | `RO_ST_*` | the store: put, get, delete, commit, abort, sub, rollback, list | (defs.inc) |
-| 24–29 | `RO_NET_*` | connect (`NETF_LOOKUP`: only a lookup), listen (port 0: any of ours), accept, status (with `NS_*`), shut, sub | (defs.inc) |
+| 24–29 | `RO_NET_*` | connect (`NETF_LOOKUP`: only a lookup), listen (port 0: any of ours; `NETF_TLS`: TLS 1.3's server side, with the identity at handle2 + a1, `NI_*`), accept, status (with `NS_*`), shut, sub | (defs.inc) |
 | 30 | `RO_WIN_SHOW` | handle = a window, a0 = x, a1 = y, a2 = w \| h << 32; a2 = 0: all of it | |
 | 31 | `RO_WIN_TITLE` | handle, handle2 + a0: a1 bytes of UTF-8 | |
 | 32, 33 | | reserved for the settings (`RO_SET_LIST`, `RO_SET_CHANGE`, on their branch) | `E_ARG` here |

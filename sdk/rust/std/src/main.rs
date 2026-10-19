@@ -19,7 +19,10 @@
 //! one thread, read back by another; peek, a read's timeout, nonblocking,
 //! shutdown, its addresses), a connection nobody answers, what isn't here
 //! (loopback, UDP), port 0, then <port> listened on for a client from the
-//! host; dns: axiom.test by name too.
+//! host; then <port> + 1 as TLS's server (axiom::net::Identity, from the
+//! stick's NODE.PEM and NODE.KEY), for a TLS client from the host, after
+//! a key that is not the certificate's is refused; dns: axiom.test by name
+//! too.
 
 use std::cell::Cell;
 use std::collections::BTreeSet;
@@ -380,6 +383,67 @@ fn home() {
 }
 
 /// std::net, against the test's servers on the host (10.0.2.2).
+/// TLS's server side on `port`: the kernel's, through axiom::net.
+fn tls_server(port: u16) {
+    use axiom::Error;
+    use axiom::net::{self, Identity, Net};
+    let certs = fs::read_to_string("/NODE.PEM").expect("NODE.PEM");
+    let key = fs::read_to_string("/NODE.KEY").expect("NODE.KEY");
+    let id = Identity::from_pem(&certs, &key).expect("an identity");
+    let junk = "-----BEGIN PRIVATE KEY-----\nnot base64!\n-----END PRIVATE KEY-----\n";
+    let bad = [Identity::from_pem(&certs, junk).err(), Identity::from_pem("", &key).err()];
+    let n = Net::get().expect("the network");
+
+    let wrong = Identity::new([7; 32], id.certs().to_vec());
+    let w = n.listen_tls(port, &wrong).expect("listen_tls");
+    let _ = w.wait_send(None);
+    let s = w.status().unwrap();
+    println!("rstd: net tls, another key: failed {}, {:?}; bad PEM {:?}", s.failed(), net::why_text(s.why), bad);
+    drop(w);
+
+    let l = n.listen_tls(port, &id).expect("listen_tls");
+    l.wait_send(None).unwrap();
+    let s = l.status().unwrap();
+    println!("rstd: net tls listening on port {}, failed {}, {} certificate", l.addrs().unwrap().port, s.failed(),
+             id.certs().len());
+    let c = loop {
+        match l.accept() {
+            Ok(c) => break c,
+            Err(Error::EMPTY) => l.wait_recv(None).unwrap(),
+            Err(e) => panic!("accept: {:?}", e),
+        }
+    };
+    let _ = c.wait_send(None);                      // until its handshake is done
+    let s = c.status().unwrap();
+    let mut line = Vec::new();
+    let mut b = [0u8; 256];
+    while !line.contains(&b'\n') {
+        match c.recv(&mut b) {
+            Ok(got) => line.extend_from_slice(&b[..got]),
+            Err(Error::EMPTY) => c.wait_recv(None).unwrap(),
+            Err(e) => {
+                println!("rstd: net tls recv {:?}", e);
+                break;
+            }
+        }
+    }
+    let line = String::from_utf8_lossy(&line).into_owned();
+    let answer = format!("you said, over TLS: {}", line);
+    let mut sent = 0;
+    while sent < answer.len() {
+        match c.send(&answer.as_bytes()[sent..]) {
+            Ok(k) => sent += k,
+            Err(Error::FULL) => c.wait_send(None).unwrap(),
+            Err(e) => panic!("send: {:?}", e),
+        }
+    }
+    let from = net::ip(c.addrs().unwrap().peer);
+    println!("rstd: net tls accepted from {}, open {}, said {:?}", from, s.state == axiom::sys::SKS_OPEN,
+             line.trim_end());
+    drop(c);
+    drop(l);
+}
+
 fn network(args: &[String]) {
     use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
     let echo: u16 = args[0].parse().expect("the echo server's port");
@@ -453,6 +517,7 @@ fn network(args: &[String]) {
     println!("rstd: net accepted from {}, said {:?}", from.ip(), line.trim_end());
     drop(c);
     drop(l);
+    tls_server(serve + 1);
 
     if dns {
         let found: Vec<SocketAddr> = ("axiom.test", echo).to_socket_addrs().expect("lookup").collect();

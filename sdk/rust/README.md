@@ -81,7 +81,10 @@ What std has on Axiom:
   address gives the kernel the name, so a capability to that host reaches
   it. There is no loopback (binding or connecting to 127.0.0.1 says so)
   and no UDP. The program wants `wants::NET`. TLS is `axiom::net`'s
-  (`Net::connect` with `Tls::Checked`), outside std.
+  (`Net::connect` with `Tls::Checked`), outside std, and so is its
+  server side: `Net::listen_tls` with an `Identity` (a P-256 key and its
+  certificates, `Identity::from_pem` from a cert.pem and a key.pem, PKCS
+  #8 or SEC1).
 - **`std::process::exit`** ends the program, every thread, with its code.
   A panic aborts: the program ends, 134. There is no unwinding.
 

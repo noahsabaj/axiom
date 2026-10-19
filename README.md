@@ -100,8 +100,9 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   `CLAUDE.KEY` on the boot stick.
 - **TLS 1.3**, written here: SHA-256 on the SHA extensions, HMAC, HKDF,
   AES-128-GCM on AES-NI and PCLMULQDQ, X25519, keys from RDSEED, the
-  client handshake, and certificates: X.509, SHA-384/512, RSA (PKCS #1 v1.5
-  and PSS) and ECDSA on P-256 and P-384. The crypto is checked against the published vectors at
+  client and server handshakes, and certificates: X.509, SHA-384/512, RSA
+  (PKCS #1 v1.5 and PSS) and ECDSA on P-256 and P-384, signing with P-256
+  (blinded). The crypto is checked against the published vectors at
   every boot; `crypto` repeats the check and times each.
 - **A shell of its own** over a USB keyboard, a PS/2 keyboard or the serial
   port. A command is a thing, then an action: `files`, `files show
