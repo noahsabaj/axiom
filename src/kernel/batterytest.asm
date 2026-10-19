@@ -41,10 +41,17 @@ section .text
 
 ; battery test: every check said; CF if one failed
 battery_test:
+    cmp byte [ec_fake], 0
+    je .start
+    KLOG "battery test: not while simulated ('battery simulate'): restart first"
+    stc
+    ret
+.start:
     push rbx
     push r12
     push r13
     push r14
+    mov byte [fk_own_clock], 1
     lea rsi, [bat_state]                ; the real state aside
     lea rdi, [bt_saved]
     mov ecx, bat_state_end - bat_state
@@ -64,6 +71,7 @@ battery_test:
     mov byte [ec_from], EC_FROM_BOARD
     lea rax, [bat_test_fields]
     mov [bat_board], rax
+    mov byte [bat_hold], 1              ; (bat_tick decides only when held)
     mov dword [bt_count], 0
     mov dword [bt_passed], 0
 
@@ -247,6 +255,7 @@ battery_test:
     BT nz, "an EC that does not answer: no reading, and said so"
 
     mov byte [ec_fake], 0               ; the real state again
+    mov byte [fk_own_clock], 0
     mov dword [ec_busy], 0
     mov ax, [bt_ec_cmd]
     mov [ec_cmd], ax
@@ -269,6 +278,38 @@ battery_test:
     pop r13
     pop r12
     pop rbx
+    ret
+
+; battery simulate: where no EC is known (QEMU), the simulated one from now
+; on, on the real clock: its battery stays at 90% (3600 of 4000), on its
+; charger, read each minute as a real one is; for what reads the battery
+; (SYS_INFO's SI_BATTERY, fleet's info). Until the next start.
+battery_simulate:
+    cmp byte [ec_fake], 0
+    jne .already
+    cmp byte [ec_from], 0
+    jne .real
+    call fake_reset
+    mov byte [fk_own_clock], 0
+    mov byte [ec_fake], 1
+    lea rax, [bat_test_fields]
+    mov [bat_board], rax
+    movzx edi, word [rax + BB_CMD]
+    movzx esi, word [rax + BB_DATA]
+    call ec_use
+    mov rax, [bat_board]
+    mov qword [bat_fail], 0
+    mov qword [bat_next], 0             ; the first reading now
+    KLOG "battery: simulated from now on: %s, its battery at 90%% on its charger", qword [rax + BB_MODEL]
+    clc
+    ret
+.already:
+    KLOG "battery: simulated already"
+    clc
+    ret
+.real:
+    KLOG "battery: not simulated: an embedded controller is known here"
+    stc
     ret
 
 ; bt_result(EAX = passed, RSI = what). Preserves others.
@@ -547,6 +588,7 @@ bt_max:         resd 1
 bt_ec_cmd:      resw 1
 bt_ec_data:     resw 1
 bt_ec_from:     resb 1
+fk_own_clock:   resb 1                  ; 1: bat_clock reads fk_now ('battery test')
 alignb 8
 fk_block:                               ; the simulated EC
 fk_now:         resq 1                  ; its clock (TSC units)

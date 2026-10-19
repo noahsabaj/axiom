@@ -21,9 +21,11 @@ cert.pem and key.pem. Two boots, one after the other, on that stick:
     admin, --cwd and a word with a space refused; spin past its
     --timeout (failed, why); spin stopped; a program pushed into the project
     and run from there; one left running;
-  - the second: `fleet` again: a new `since`; the job left running is lost,
-    the others as they ended, their logs still there; the push's files
-    still need nothing.
+  - the second: `battery simulate`, then `fleet` again: a new `since`; info
+    with the battery, {percent: 90, plugged: true}, as fleet's own laptops
+    report theirs (the first boot's: null, no battery); the job left
+    running is lost, the others as they ended, their logs still there; the
+    push's files still need nothing.
 Skipped (passing) if there is no nightly toolchain. Outputs go to
 build/test/fleet/.
 """
@@ -275,6 +277,7 @@ def client_two(log_path, started, pin):
     try:
         c = Conn(pin)
         r["hello"] = c.hello
+        r["info"] = c.ask("info")[0]
         r["jobs"] = c.ask("jobs", ids=["forever", "j1", "slow"])[0]
         r["j1 log"] = c.log("j1")
         r["manifest"] = c.ask("manifest", project="demo", files=entries(FILES))[0]
@@ -284,8 +287,9 @@ def client_two(log_path, started, pin):
         r["error"] = repr(e)
 
 
-def script(last):
-    return ["until log: kept in", "until dhcp: address", "wait 0.5",
+def script(last, battery=False):
+    simulate = ["type battery simulate\\n", "until battery: simulated from now on"] if battery else []
+    return ["until log: kept in", "until dhcp: address", "wait 0.5", *simulate,
             "type fleet\\n", f"until fleet: node {NAME} listening", f"until fleet: job {last} ended", "wait 1"]
 
 
@@ -404,6 +408,9 @@ def check(log1, log2):
     result("error" not in r, f"the second boot's client: {r.get('error', 'no exceptions')}")
     result(r.get("hello", {}).get("since", 0) > first.get("hello", {}).get("since", 0),
            f"since: a new start ({r.get('hello', {}).get('since')})")
+    battery = r.get("info", {}).get("battery")
+    result(has(log2, "battery: simulated from now on") and battery == {"percent": 90, "plugged": True},
+           f"a battery (simulated): in info, as fleet's own nodes report one: {battery}")
     j = by_id(r.get("jobs", {}).get("jobs", []))
     result(j.get("forever", {}).get("state") == "lost" and j.get("j1", {}).get("state") == "done"
            and j.get("slow", {}).get("state") == "failed", f"after a restart: {j}")
@@ -437,13 +444,13 @@ def main():
     fwd = f"user,hostfwd=tcp:127.0.0.1:{FORWARD}-:{PORT}"
     args = ["--smp", "2", "--nic", "rtl8139", "--netdev", fwd, "--stick", stick.relative_to(ROOT).as_posix()]
     logs = []
-    for client, last in ((client_one, "last"), (client_two, "last2")):
+    for client, last, battery in ((client_one, "last", False), (client_two, "last2", True)):
         name = f"fleet-{len(logs) + 1}"
         (OUT / f"{name}.log").unlink(missing_ok=True)    # (the last run's would do for this one's)
         started = time.time()
         t = threading.Thread(target=client, args=(OUT / f"{name}.log", started, pin), daemon=True)
         t.start()
-        log, _, took = boot(OUT, name, script(last), *args, timeout=150, slots=1)
+        log, _, took = boot(OUT, name, script(last, battery), *args, timeout=150, slots=1)
         print(f"      ({name} {took:.0f} s)")
         t.join(5)
         logs.append(log)

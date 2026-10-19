@@ -278,6 +278,11 @@ SI_CPUS         EQU 1  ; CPUs running
 SI_RAM          EQU 2  ; bytes of memory Axiom has
 SI_RAM_FREE     EQU 3  ; of those, bytes free
 SI_UPTIME       EQU 4  ; milliseconds since power-on
+SI_BATTERY      EQU 5  ; the battery as last read (each minute), or E_EMPTY
+SI_BAT_PERCENT  EQU 0FFh  ; SI_BATTERY: its charge, in percent
+SI_BAT_PLUGGED  EQU 1 SHL 8  ; on its charger
+SI_BAT_HELD     EQU 1 SHL 9  ; kept between 75% and 80% ('battery hold')
+SI_BAT_MODE_SHIFT EQU 16  ; bits 19:16: 0 charging as the firmware likes, 2 run from the battery, 5 not charging
 SN_WRITE        EQU 0  ; dword: frames written, in all (the program's)
 SN_READ         EQU 4  ; dword: frames taken to play, in all
 SN_FRAMES       EQU 8  ; dword: the ring's, a power of two

@@ -33,6 +33,13 @@ pub const SI_CPUS: u64 = 1;
 pub const SI_RAM: u64 = 2;
 pub const SI_RAM_FREE: u64 = 3;
 pub const SI_UPTIME: u64 = 4;
+/// SYS_INFO's: the battery as last read (each minute): its percent, with
+/// the flags below and its charge mode at bits 19:16; negative with none.
+pub const SI_BATTERY: u64 = 5;
+pub const SI_BAT_PERCENT: u64 = 0xFF;
+pub const SI_BAT_PLUGGED: u64 = 1 << 8;
+pub const SI_BAT_HELD: u64 = 1 << 9;
+pub const SI_BAT_MODE_SHIFT: u32 = 16;
 
 // what a ring entry asks for (RO_*)
 pub const RO_NOP: u8 = 0;
@@ -359,6 +366,36 @@ pub fn ram() -> (u64, u64) {
 /// Milliseconds since the machine was switched on.
 pub fn uptime_ms() -> u64 {
     unsafe { syscall(SYS_INFO, SI_UPTIME, 0, 0, 0, 0) }.0.max(0) as u64
+}
+
+/// A laptop's battery, as Axiom last read it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Battery {
+    /// 0 to 100.
+    pub percent: u8,
+    /// On its charger (also while Axiom runs it from the battery on purpose).
+    pub plugged: bool,
+    /// Kept between 75% and 80% ('battery hold').
+    pub held: bool,
+    /// HP's charge mode: 0 charging as the firmware likes, 2 running from
+    /// the battery, 5 not charging.
+    pub mode: u8,
+}
+
+/// The battery, where Axiom reads one; None on a machine without one, or
+/// whose charge Axiom cannot read.
+pub fn battery() -> Option<Battery> {
+    let r = unsafe { syscall(SYS_INFO, SI_BATTERY, 0, 0, 0, 0) }.0;
+    if r < 0 {
+        return None;
+    }
+    let r = r as u64;
+    Some(Battery {
+        percent: (r & SI_BAT_PERCENT) as u8,
+        plugged: r & SI_BAT_PLUGGED != 0,
+        held: r & SI_BAT_HELD != 0,
+        mode: ((r >> SI_BAT_MODE_SHIFT) & 0x0F) as u8,
+    })
 }
 
 /// Others run first.

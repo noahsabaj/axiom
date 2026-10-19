@@ -198,7 +198,13 @@ Notes:
   RTC read at boot (taken as UTC) and kept by the TSC; `SI_CPUS` (1) is
   the CPUs running; `SI_RAM` (2) and `SI_RAM_FREE` (3) the bytes of memory
   Axiom has and of those free; `SI_UPTIME` (4) the milliseconds since
-  power-on. Anything else is `E_ARG`.
+  power-on; `SI_BATTERY` (5) a laptop's battery as last read (each
+  minute): its percent in bits 7:0, `SI_BAT_PLUGGED` (bit 8) on its
+  charger, `SI_BAT_HELD` (bit 9) kept between 75% and 80% (`battery
+  hold`), and HP's charge mode in bits 19:16 (0 as the firmware likes,
+  2 run from the battery, which counts as plugged, 5 not charging); or
+  `E_EMPTY` where there is no battery whose charge Axiom reads, or the
+  last reading failed. Anything else is `E_ARG`.
 - **`SYS_SPAWN`**: the text is at most 255 bytes, and programs nest eight
   deep. The gifts move to the child before it runs. The child is the
   caller's own: the caller's task handle can `RO_KILL` it (`RO_JOIN` on

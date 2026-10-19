@@ -22,6 +22,8 @@
 ;  lowers nothing in 10 minutes puts it back to normal charging (or holds it
 ;  where it is, for the last), as every restart and power-off does
 ;  (battery_leave): with Axiom gone, the firmware charges as it likes.
+;  Held or not, wherever the charge can be read the tick reads it, and
+;  programs see the last reading (SYS_INFO's SI_BATTERY; fleet's info).
 ; =============================================================================
 
 BAT_LOW         equ 75                  ; at or below: charge
@@ -132,14 +134,53 @@ bat_ports:
 .out:
     ret
 
-; battery_service: from the main loop. The hold's tick, when it is time.
+; battery_service: from the main loop. The minute's tick, when it is time:
+; a reading wherever the charge can be read (programs see the last one,
+; SI_BATTERY), and the hold's decision.
 battery_service:
     cmp byte [bat_hold], 0
-    je .out
+    jne .due
+    push rdi
+    push rsi
+    mov edi, 1
+    call bat_usable
+    pop rsi
+    pop rdi
+    jc .out
+.due:
     RDTSC64
     cmp rax, [bat_next]
     jb .out
     call bat_tick
+.out:
+    ret
+
+; bat_info -> RAX: SYS_INFO's SI_BATTERY: the last reading's percent, with
+; SI_BAT_PLUGGED, SI_BAT_HELD and the mode << SI_BAT_MODE_SHIFT; E_EMPTY
+; with none (no battery Axiom reads here, or the last reading failed).
+; Running down on purpose counts as on its charger: HP's EC reports the
+; charger gone then. Any thread. Clobbers RDX.
+bat_info:
+    mov rax, E_EMPTY
+    cmp dword [bat_ticks], 0
+    je .out
+    cmp qword [bat_fail], 0
+    jne .out
+    mov eax, [bat_percent]
+    movzx edx, byte [bat_ac]
+    cmp byte [bat_mode], BM_DISCHARGE
+    jne .plugged
+    mov edx, 1
+.plugged:
+    shl edx, 8
+    or eax, edx
+    movzx edx, byte [bat_hold]
+    shl edx, 9
+    or eax, edx
+    movzx edx, byte [bat_mode]
+    and edx, 0x0F
+    shl edx, SI_BAT_MODE_SHIFT
+    or eax, edx
 .out:
     ret
 
@@ -168,10 +209,11 @@ battery_leave:
 .out:
     ret
 
-; bat_clock -> RAX = now (TSC; the simulated EC's clock in 'battery test').
+; bat_clock -> RAX = now (TSC; the simulated EC's own clock in 'battery
+; test').
 ; Clobbers RDX.
 bat_clock:
-    cmp byte [ec_fake], 0
+    cmp byte [fk_own_clock], 0
     jne .fake
     RDTSC64
     ret
@@ -179,8 +221,9 @@ bat_clock:
     mov rax, [fk_now]
     ret
 
-; bat_tick: the hold's minute. The charge read, and the mode it calls for
-; set; with no reading, normal charging. The main thread's.
+; bat_tick: the minute. The charge read, and, held, the mode it calls for
+; set; with no reading, normal charging if Axiom asked for another. The
+; main thread's.
 bat_tick:
     push rbx
     push r12
@@ -217,6 +260,8 @@ bat_tick:
 .not_down:
     mov qword [bat_down_at], 0
 .decide:
+    cmp byte [bat_hold], 0
+    je .next                            ; read only: the hold is off
     mov edi, [bat_percent]
     movzx esi, byte [bat_ac]
     movzx edx, byte [bat_mode]
@@ -250,7 +295,12 @@ bat_tick:
     cmp rsi, [bat_fail]
     je .safe
     mov [bat_fail], rsi
+    cmp byte [bat_hold], 0
+    je .unheld
     KLOG "battery: no reading (%s): normal charging until there is one", rsi
+    jmp .safe
+.unheld:
+    KLOG "battery: no reading (%s)", rsi
 .safe:
     cmp byte [bat_changed], 0
     je .next
@@ -810,6 +860,7 @@ battery_actions:
     ACTION  'mode',  battery_mode, 'normal|inhibit|discharge', 'how it charges, set by hand (the hold off)', 0
     ACTION  'ec',    battery_ec,   '', "the embedded controller's 256 registers, read", 0
     ACTION  'test',  battery_test, '', 'a self-test, against a simulated EC', 0
+    ACTION  'simulate', battery_simulate, '', 'where there is no EC (QEMU): a simulated one and its battery from now on, for what reads the battery', 0
     dq 0, 0, 0, 0, 0
 
 section .rodata

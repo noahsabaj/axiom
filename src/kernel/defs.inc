@@ -775,6 +775,11 @@ SI_CPUS         equ 1                   ; CPUs running
 SI_RAM          equ 2                   ; bytes of memory Axiom has
 SI_RAM_FREE     equ 3                   ; of those, bytes free
 SI_UPTIME       equ 4                   ; milliseconds since power-on
+SI_BATTERY      equ 5                   ; the battery as last read (each minute), or E_EMPTY
+SI_BAT_PERCENT  equ 0xFF                ; SI_BATTERY: its charge, in percent
+SI_BAT_PLUGGED  equ 1 << 8              ; on its charger
+SI_BAT_HELD     equ 1 << 9              ; kept between 75% and 80% ('battery hold')
+SI_BAT_MODE_SHIFT equ 16                ; bits 19:16: 0 charging as the firmware likes, 2 run from the battery, 5 not charging
 
 ; a stream's memory (SYS_SOUND_NEW): this header, then SN_FRAMES frames at
 ; SN_DATA, each a left and a right sample, 16 bits signed, SN_RATE a second.

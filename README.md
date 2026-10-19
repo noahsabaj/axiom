@@ -549,7 +549,14 @@ battery hold [off]                # a tick each minute: stop or start charging
 battery mode normal|inhibit|discharge   # by hand, the hold off
 battery ec                        # the embedded controller's 256 registers
 battery test                      # the hold against a simulated EC
+battery simulate                  # no EC here (QEMU): a battery at 90% from now on
 ```
+
+Wherever the charge can be read, it is read each minute, held or not, and
+programs see the last reading: `SYS_INFO`'s `SI_BATTERY` (the Rust SDK's
+`axiom::sys::battery()`). FLEET.AXE reports it in `info` as fleet's own
+laptops do, `battery: {percent, plugged}`, which fleet's placement uses (a
+laptop off its charger takes no job unless `--allow-battery`).
 
 On HP's boards the embedded controller (ec.asm: its two I/O ports, from the
 ECDT or the board table) takes a charge mode in one register: 0 charges as

@@ -298,7 +298,12 @@ impl Node {
             ("commit_gb", Null),
             ("commit_free_gb", Null),
             ("gpus", List(vec![])),
-            ("battery", Null),
+            (
+                "battery",
+                axiom::sys::battery().map_or(Null, |b| {
+                    obj([("percent", Int(b.percent as i128)), ("plugged", Bool(b.plugged))])
+                }),
+            ),
             ("disk_free_gb", boot.map_or(Null, |v| gb(v.free))),
             ("disk_total_gb", boot.map_or(Null, |v| gb(v.bytes))),
             ("temp_c", Null),

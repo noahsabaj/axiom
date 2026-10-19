@@ -681,7 +681,8 @@ futex_result:
 ; sys_info(EDI = SI_*) -> RAX: SI_CLOCK, microseconds since 1970 (the RTC
 ; read at boot, taken as UTC, kept since by the TSC); SI_CPUS, CPUs running;
 ; SI_RAM and SI_RAM_FREE, bytes of memory and of it free; SI_UPTIME,
-; milliseconds since power-on
+; milliseconds since power-on; SI_BATTERY, the battery as last read
+; (bat_info)
 sys_info:
     cmp edi, SI_CLOCK
     je .clock
@@ -693,7 +694,13 @@ sys_info:
     je .ram_free
     cmp edi, SI_UPTIME
     je .uptime
+    cmp edi, SI_BATTERY
+    je .battery
     mov rax, E_ARG
+    xor edx, edx
+    ret
+.battery:
+    call bat_info
     xor edx, edx
     ret
 .ram:

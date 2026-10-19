@@ -8,11 +8,13 @@ board table needs in a DSDT.
   - none: a board the table does not have: the battery left alone, no EC;
     'battery test' passes against the simulated EC (batterytest.asm): the
     EC protocol, HP's charge modes, both ways of reading the charge, and
-    the hold over 40 simulated minutes.
+    the hold over 40 simulated minutes; 'battery simulate': a battery read
+    at 90% on its charger from then on, and 'battery test' refused.
   - hp1: QEMU's SMBIOS says HP 87FE (hp-1's board): the board found, its
     EC's ports from the table, an EC that does not answer (QEMU has none)
     said so; the hold refused, its charge readings still unknown; 'battery
-    test' passes there too and gives the board back.
+    test' passes there too and gives the board back; 'battery simulate'
+    refused.
   - ecmap: on a DSDT made here (no QEMU; --ecmap: only this): the EC's
     ports and fields, what _BST, _BIF and _PSR reach through the methods
     they call, a scope it cannot read passed over and said so; and which
@@ -49,7 +51,10 @@ def script():
             "type battery ec\\n", "wait 0.5",
             "type battery test\\n", "until battery test: ",
             "until passed", "wait 0.5",
-            "type battery\\n", "wait 1"]
+            "type battery\\n", "wait 1",
+            "type battery simulate\\n", "wait 1",
+            "type battery\\n", "wait 0.5",
+            "type battery test\\n", "wait 1"]
 
 
 def after(log, text):
@@ -204,6 +209,10 @@ def main():
            and "battery: 75%: normal" in log, "the hold's changes said, as they happen")
     result("no lower: held where it is instead" in log,
            "a run-down that lowers nothing: said so")
+    tail = after(log, "battery: simulated from now on: a simulated EC (registers)")
+    result("battery: 90% (3600 of 4000), on its charger; charging: normal" in tail,
+           "'battery simulate': a battery at 90%, on its charger, read")
+    result("battery test: not while simulated" in tail, "'battery test' refused while simulated")
 
     log = logs["hp1"][0]
     print("hp1:")
@@ -222,6 +231,8 @@ def main():
     tail = after(log, "battery test: " + (m.group(0)[14:] if m else "?"))
     result("battery: HP Laptop 15-dy2xxx (HP 87FE), its EC at 66/62" in tail,
            "after the test, the board and its EC given back")
+    result("battery: not simulated: an embedded controller is known here" in log,
+           "'battery simulate' refused where an EC is known")
 
     print(f"{'ALL PASSED' if FAILS == 0 else f'{FAILS} FAILED'}")
     return 1 if FAILS else 0
