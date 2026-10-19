@@ -2,8 +2,8 @@
 """Axiom on hp-1, a laptop of the fleet with no one at it, from here.
 
     python tools/hw/hp1.py status              what hp-1 has; changes nothing
-    python tools/hw/hp1.py install             build/esp's loader onto its EFI
-                                               system partition, and a boot entry
+    python tools/hw/hp1.py install             build/esp's loader and programs onto
+                                               its EFI partition, and a boot entry
     python tools/hw/hp1.py run LINE...         one test run, its log printed
     python tools/hw/hp1.py run --file FILE     (the lines in a file)
     python tools/hw/hp1.py log                 AxiomLog, if a run left one
@@ -42,12 +42,17 @@ def fleet(*args, timeout=600, check=True):
 
 
 def stage(script=None):
-    """What goes to hp-1: hp1_node.py, the loader, and the run's script."""
+    """What goes to hp-1: hp1_node.py, the loader and the programs (in
+    EFI/AXIOM, where the loader is too), and the run's script."""
     STAGE.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(ROOT / "tools" / "hw" / "hp1_node.py", STAGE / "hp1_node.py")
-    loader = ROOT / "build" / "esp" / "EFI" / "BOOT" / "BOOTX64.EFI"
+    esp = ROOT / "build" / "esp" / "EFI"
     (STAGE / "EFI" / "AXIOM").mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(loader, STAGE / "EFI" / "AXIOM" / "BOOTX64.EFI")
+    for f in [esp / "BOOT" / "BOOTX64.EFI", *sorted((esp / "AXIOM").glob("*"))]:
+        if f.is_file():
+            to = STAGE / "EFI" / "AXIOM" / f.name
+            if not to.exists() or to.read_bytes() != f.read_bytes():
+                shutil.copyfile(f, to)
     (STAGE / "run.txt").write_text(script or "", encoding="utf-8", newline="\n")
 
 

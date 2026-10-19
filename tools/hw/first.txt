@@ -11,6 +11,9 @@ iommu
 usb
 disks
 nvme
+vol
+files
+run hello
 net
 sound
 date

@@ -1783,7 +1783,12 @@ cmd_pci:
     movzx r8d, word [rbx + PE_VENDOR]
     movzx r9d, word [rbx + PE_DEVICE]
     lea r10, [ui_buf2]
-    KLOG "  %02x:%02x.%u  %04x:%04x  %s", rax, rcx, rdx, r8, r9, r10
+    lea r11, [str_sh_vmd]
+    cmp byte [rbx + PE_SEG], 0
+    jne .say
+    lea r11, [str_sh_novmd]
+.say:
+    KLOG "  %s%02x:%02x.%u  %04x:%04x  %s", r11, rax, rcx, rdx, r8, r9, r10
     add rbx, PCI_ENTRY
     inc r12d
     jmp .next
@@ -1906,6 +1911,8 @@ cmd_poweroff:
 
 section .rodata
 str_prompt:     db 'axiom> ', 0
+str_sh_vmd:     db 'vmd ', 0
+str_sh_novmd:   db 0
 str_ctrl_c:     db '^C', 10, 0
 str_sh_claude:  db 'claude', 0
 str_sh_key:     db 'key', 0
