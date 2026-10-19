@@ -12,6 +12,10 @@
                                                Axiom: its key (PMK) made on hp-1
                                                from Ubuntu's saved passphrase, into
                                                EFI/AXIOM/WIFI.KEY; neither printed
+    python tools/hw/hp1.py home [--file DIR]   what `fleet add axiom-1 --self-managed`
+                                               made (build/hw/axiom-1) onto its EFI
+                                               partition as /Home/fleet, for
+                                               FLEET.AXE; not printed
 
 hp-1 still runs Ubuntu, and fleet reaches it there. A test run: the lines go
 into the UEFI variable AxiomRun, BootNext is set to Axiom's boot entry and
@@ -39,6 +43,10 @@ STAGE = ROOT / "build" / "hw" / "hp1"
 # from linux-firmware (not in this tree); src/kernel/rtwfw.asm reads it
 FIRMWARE = ROOT / "build" / "hw" / "RTW8821C.BIN"
 NODE = "hp-1"
+# axiom-1, fleet's node that hp-1 becomes: `fleet add axiom-1 --self-managed
+# --out build/hw/axiom-1` makes these, for sdk/rust/fleet's /Home/fleet
+AXIOM_1 = ROOT / "build" / "hw" / "axiom-1"
+HOME_FILES = ("node.json", "cert.pem", "key.pem")
 
 
 def fleet(*args, timeout=600, check=True):
@@ -71,6 +79,25 @@ def node(what, script=None, check=True):
     proc = fleet("run", "--on", NODE, "--dir", str(STAGE), "--name", "axiom-hp1", "--admin",
                  "--allow-battery", "--", "python3", "hp1_node.py", what, check=check)
     return proc.stdout + proc.stderr
+
+
+def home(src):
+    """What `fleet add axiom-1 --self-managed --out SRC` made, onto hp-1's EFI
+    system partition as /Home/fleet (hp1_node.py home); the staged copy
+    deleted here and there. Nothing of it is printed."""
+    src = pathlib.Path(src)
+    missing = [n for n in HOME_FILES if not (src / n).is_file()]
+    if missing:
+        sys.exit(f"hp1.py: {src} has no {', '.join(missing)}")
+    to = STAGE / "Home" / "fleet"
+    to.mkdir(parents=True, exist_ok=True)
+    try:
+        for n in HOME_FILES:
+            shutil.copyfile(src / n, to / n)
+        print(node("home").strip())
+    finally:
+        shutil.rmtree(STAGE / "Home", ignore_errors=True)
+    return 0
 
 
 def boot_id():
@@ -123,7 +150,8 @@ def log():
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("what", choices=("status", "install", "run", "log", "cancel", "wifi"))
+    ap.add_argument("what", choices=("status", "install", "run", "log", "cancel", "wifi",
+                                     "home"))
     ap.add_argument("lines", nargs="*", help="run: the script's lines")
     ap.add_argument("--file", help="run: the script, from this file")
     ap.add_argument("--wait", type=int, default=900, help="run: seconds to wait for hp-1 "
@@ -137,6 +165,8 @@ def main():
         return run(script, opts.wait)
     if opts.what == "log":
         return log()
+    if opts.what == "home":
+        return home(opts.file or AXIOM_1)
     print(node(opts.what).strip())
     return 0
 

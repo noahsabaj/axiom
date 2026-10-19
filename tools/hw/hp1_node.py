@@ -15,17 +15,21 @@ hp1.py sent: EFI/AXIOM/BOOTX64.EFI and run.txt.
                                    its SSID and WPA2 key (PMK), made from
                                    netplan's wpa_supplicant configuration,
                                    into EFI/AXIOM/WIFI.KEY
+    python3 hp1_node.py home       Home/fleet (sent) onto the EFI system
+                                   partition, for Axiom's fleet program
 
 Only BootNext is ever set; BootOrder is never written. Nothing here reads
 or prints anything but Axiom's own variables, the boot entries, and the
 TCO watchdog's registers, but for `wifi`: it reads the network's saved
 passphrase and writes only the key made from it, and prints neither, nor
-the network's name.
+the network's name; and `home`, which copies fleet's files for axiom-1 and
+prints only their sizes.
 """
 import hashlib
 import os
 import pathlib
 import re
+import shutil
 import subprocess
 import sys
 
@@ -39,6 +43,8 @@ LABEL = "Axiom"
 SMBUS = pathlib.Path("/sys/bus/pci/devices/0000:00:1f.4")
 NV_BS_RT = (7).to_bytes(4, "little")
 WIFI_KEY = ESP / "EFI" / "AXIOM" / "WIFI.KEY"
+HOME = ESP / "Home" / "fleet"                   # Axiom's /Home/fleet
+HOME_FILES = ("node.json", "cert.pem", "key.pem")
 
 
 def sh(*args, check=True):
@@ -270,6 +276,36 @@ def wifi():
     return 0 if ok else 1
 
 
+def home():
+    """Home/fleet as hp1.py sent it (what `fleet add axiom-1 --self-managed`
+    made: node.json, cert.pem, key.pem) onto the EFI system partition, for
+    Axiom's fleet program; the copy sent here deleted. Prints names and
+    sizes only."""
+    sent = pathlib.Path("Home") / "fleet"
+    try:
+        HOME.mkdir(parents=True, exist_ok=True)
+        ok = True
+        for name in HOME_FILES:
+            src = sent / name
+            if not src.is_file():
+                print(f"{name}: not sent")
+                ok = False
+                continue
+            data = src.read_bytes()
+            dst = HOME / name
+            tmp = dst.with_suffix(".NEW")
+            tmp.write_bytes(data)
+            os.sync()
+            tmp.replace(dst)
+            os.sync()
+            same = dst.read_bytes() == data
+            ok = ok and same
+            print(f"{dst}: {len(data)} bytes, {'as sent' if same else 'NOT as sent'}")
+        return 0 if ok else 1
+    finally:
+        shutil.rmtree("Home", ignore_errors=True)
+
+
 def cancel():
     efivar_delete(RUN)
     _, nxt, _, axiom = boot_entries()
@@ -282,4 +318,4 @@ def cancel():
 if __name__ == "__main__":
     what = sys.argv[1] if len(sys.argv) > 1 else "status"
     sys.exit({"status": status, "install": install, "run": run, "log": log,
-              "cancel": cancel, "wifi": wifi}[what]() or 0)
+              "cancel": cancel, "wifi": wifi, "home": home}[what]() or 0)
