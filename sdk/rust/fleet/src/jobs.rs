@@ -358,11 +358,17 @@ impl Jobs {
         let mut last_save = began;
         let mut saved = 0;
         let mut why: Option<String> = None;
-        let mut b = vec![0u8; chan::MSG_MAX];
+        let mut b = vec![0u8; chan::MSG_MAX + 1];
         loop {
-            match ours.recv(&mut b) {
+            match ours.recv(&mut b[..chan::MSG_MAX]) {
                 Ok(n) => {
-                    job.append(&b[..n]);
+                    // A write is a line at least, as on the console (con_lines).
+                    if n > 0 && b[n - 1] != b'\n' {
+                        b[n] = b'\n';
+                        job.append(&b[..n + 1]);
+                    } else {
+                        job.append(&b[..n]);
+                    }
                     last_out = Instant::now();
                 }
                 Err(Error::EMPTY) => {

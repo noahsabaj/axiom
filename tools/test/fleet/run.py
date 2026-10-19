@@ -383,7 +383,7 @@ def check(log1, log2):
     result(run.get("state") == "running" and st.get("state") == "stopped" and st.get("id") == "stopme",
            f"stop: {run.get('state')}, then {st}")
     text, end = r.get("pushed log", (b"", {}))
-    result(r.get("put program", {}).get("ok") is True and b"hello: arguments: from a push" in text
+    result(r.get("put program", {}).get("ok") is True and b"hello: arguments: from a push\n" in text
            and end.get("job", {}).get("state") == "done", f"a program pushed and run: {text[-60:]!r}")
     ib = r.get("info busy", {})
     result(ib.get("jobs_running") == 1 and ib.get("projects_running") == ["demo"] and ib.get("projects") == ["demo"],
