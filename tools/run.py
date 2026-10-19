@@ -304,6 +304,9 @@ def main():
                     "[button]' drags, 'wheel X Y N' turns the wheel N notches)")
     opts = ap.parse_args()
     fresh = opts.port == 0
+    sys.path.insert(0, str(ROOT / "tools"))
+    import space
+    space.check()                       # stops before the disk fills
 
     if opts.stick:
         # the loader on a USB stick image, as on real hardware; writes stay

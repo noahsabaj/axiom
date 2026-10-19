@@ -36,6 +36,9 @@ def main():
     ap.add_argument("--define", action="append", default=[], metavar="NAME",
                     help="a NASM define for the kernel")
     opts = ap.parse_args()
+    sys.path.insert(0, str(ROOT / "tools"))
+    import space
+    space.check()                       # stops before the disk fills
 
     BUILD.mkdir(exist_ok=True)
     boot = BUILD / "esp" / "EFI" / "BOOT"

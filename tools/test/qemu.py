@@ -30,6 +30,10 @@ else:
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 SLOTS = ROOT / "build" / "test" / "slots"
 
+sys.path.insert(0, str(ROOT / "tools"))
+import space  # noqa: E402
+space.check()                       # before a suite writes its disk images
+
 
 def idle_threads():
     """How many of the host's threads are idle now (whatever else is
