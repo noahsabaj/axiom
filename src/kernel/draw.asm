@@ -35,7 +35,20 @@ SH_EDGE         equ 40                  ; M + L bytes: from the outer edge in
 SH_L            equ 48                  ; how far inside the edge it still fades
 SH_SIZE         equ 56
 
-BLUR_W          equ 4096                ; widest a frosted area may be
+BLUR_W          equ 4096                ; widest a frosted area may be, at half size
+
+; a pane of frosted glass (glass_make, glass_paint): its blur, kept
+GL_X            equ 0                   ; the rectangle it covers
+GL_Y            equ 8
+GL_W            equ 16                  ; (0: none)
+GL_H            equ 24
+GL_B            equ 32                  ; the blur's radius, 1..64
+GL_M            equ 40                  ; how far around it a change reaches it
+GL_STALE        equ 48                  ; byte: what is behind it changed,
+GL_FRESH        equ 49                  ; byte: to be made as it is composed
+GL_TAKEN        equ 50                  ; byte: GL_STALE, as desk_update took it
+GL_SF           equ 56                  ; SF_SIZE: its pixels, blurred
+GL_SIZE         equ GL_SF + SF_SIZE
 
 ; MIX and SCALE, the mixing of colors, are in macros.inc
 
@@ -1200,13 +1213,17 @@ shade_table:
     ret
 
 ; -----------------------------------------------------------------------------
-;  Frosted glass: what is behind a rounded rectangle, blurred
+;  Frosted glass: what is behind a rounded rectangle, blurred. A pane (GL_*)
+;  keeps its blur until what is behind it changes, so drawing it again is a
+;  copy. The blur is made at half the size: each 2x2 block of what is behind
+;  (and three blurs' reach around it) averaged, three box blurs across and
+;  down there, then back to full size between the half size's pixels.
 ; -----------------------------------------------------------------------------
 
-; gfx_frost(RDI x, RSI y, RDX w, RCX h, R8 = corner radius, R9 = blur radius
-; 1..64): the target behind it blurred (three box blurs of that radius:
-; what is within 3 R9 of it must be drawn already)
-gfx_frost:
+; glass_make(RDI = a pane): what the target holds behind its rectangle,
+; blurred into its pixels (GL_SF). What is within GL_B * 3 of it must be
+; drawn already. Preserves all.
+glass_make:
     push rax
     push rbx
     push rcx
@@ -1221,104 +1238,116 @@ gfx_frost:
     push r13
     push r14
     push r15
-    mov r12, rdi
-    mov r13, rsi
-    mov r14, rdx
-    mov r15, rcx
-    mov [frost_r], r8
-    mov [frost_b], r9
-    lea rax, [r9 + r9 * 2]              ; the margin it reads
-    mov rdi, r12                        ; the area copied: the target's, not
-    sub rdi, rax                        ; the clip's
-    mov rsi, r13
-    sub rsi, rax
-    lea rdx, [r14 + rax * 2]
-    lea rcx, [r15 + rax * 2]
-    test rdi, rdi
+    mov rbx, rdi
+    mov rax, [rbx + GL_X]               ; the pane within the target
+    test rax, rax
+    jns .px0
+    add [rbx + GL_W], rax
+    mov qword [rbx + GL_X], 0
+.px0:
+    mov rax, [rbx + GL_Y]
+    test rax, rax
+    jns .py0
+    add [rbx + GL_H], rax
+    mov qword [rbx + GL_Y], 0
+.py0:
+    mov rax, [tg_w]
+    sub rax, [rbx + GL_X]
+    cmp [rbx + GL_W], rax
+    jle .px1
+    mov [rbx + GL_W], rax
+.px1:
+    mov rax, [tg_h]
+    sub rax, [rbx + GL_Y]
+    cmp [rbx + GL_H], rax
+    jle .py1
+    mov [rbx + GL_H], rax
+.py1:
+    cmp qword [rbx + GL_W], 0
+    jle .out
+    cmp qword [rbx + GL_H], 0
+    jle .out
+    mov rax, [rbx + GL_B]               ; the area read: three blurs' reach
+    lea rax, [rax + rax * 2]            ; around, within the target
+    mov r12, [rbx + GL_X]
+    sub r12, rax
     jns .x0
-    add rdx, rdi
-    xor edi, edi
+    xor r12d, r12d
 .x0:
-    test rsi, rsi
+    mov r13, [rbx + GL_Y]
+    sub r13, rax
     jns .y0
-    add rcx, rsi
-    xor esi, esi
+    xor r13d, r13d
 .y0:
-    lea rax, [rdi + rdx]
-    sub rax, [tg_w]
+    mov r14, [rbx + GL_X]
+    add r14, [rbx + GL_W]
+    add r14, rax
+    cmp r14, [tg_w]
     jle .x1
-    sub rdx, rax
+    mov r14, [tg_w]
 .x1:
-    lea rax, [rsi + rcx]
-    sub rax, [tg_h]
+    mov r15, [rbx + GL_Y]
+    add r15, [rbx + GL_H]
+    add r15, rax
+    cmp r15, [tg_h]
     jle .y1
-    sub rcx, rax
+    mov r15, [tg_h]
 .y1:
-    test rdx, rdx
+    sub r14, r12
     jle .out
-    test rcx, rcx
+    sub r15, r13
     jle .out
-    cmp rdx, BLUR_W
+    mov [gl_ax], r12
+    mov [gl_ay], r13
+    mov [gl_aw], r14
+    mov [gl_ah], r15
+    lea rax, [r14 + 1]                  ; half the size, rounded up; rows
+    shr rax, 1                          ; padded to four pixels
+    cmp rax, BLUR_W
     ja .out
-    mov [frost_x], rdi
-    mov [frost_y], rsi
-    push rdi
-    push rsi
-    lea rdi, [frost_a]
-    mov rsi, rdx
+    mov [gl_hw], rax
+    lea rcx, [r15 + 1]
+    shr rcx, 1
+    mov [gl_hh], rcx
+    lea rsi, [rax + 3]
+    and rsi, -4
     mov rdx, rcx
+    lea rdi, [frost_a]
     call sf_size
-    jc .no_memory
-    lea rdi, [frost_b_sf]
-    mov rsi, [frost_a + SF_W]
-    mov rdx, [frost_a + SF_H]
-    call sf_size
-.no_memory:
-    pop rsi
-    pop rdi
     jc .out
-    ; copy it in
-    mov rax, rsi
-    imul rax, [tg_pitch]
-    lea rsi, [rax + rdi * 4]
-    add rsi, [tg_ptr]
-    mov rdi, [frost_a + SF_PTR]
-    mov rbx, [frost_a + SF_H]
-.copy:
-    push rsi
-    push rdi
-    mov rcx, [frost_a + SF_W]
-    rep movsd
-    pop rdi
-    pop rsi
-    add rsi, [tg_pitch]
-    add rdi, [frost_a + SF_PITCH]
-    dec rbx
-    jnz .copy
-    ; blur: across, then down into the other surface, three times
-    mov rbx, 3
+    lea rdi, [frost_b_sf]
+    call sf_size
+    jc .out
+    mov rax, [gl_hw]                    ; blurred: the pixels that are
+    mov [frost_a + SF_W], rax           ; there (the pitch keeps the rest)
+    mov [frost_b_sf + SF_W], rax
+    lea rdi, [rbx + GL_SF]              ; and the result, its size
+    mov rsi, [rbx + GL_W]
+    mov rdx, [rbx + GL_H]
+    call sf_size
+    jc .out
+    call gl_down
+    mov r12, [rbx + GL_B]               ; half the radius, at half the size
+    shr r12, 1
+    jnz .radius
+    inc r12d
+.radius:
+    mov r13d, 3
 .pass:
     lea rdi, [frost_a]
-    mov rsi, [frost_b]
+    mov rsi, r12
     call blur_rows
     lea rdi, [frost_a]
     lea rsi, [frost_b_sf]
-    mov rdx, [frost_b]
+    mov rdx, r12
     call blur_cols
     lea rdi, [frost_b_sf]               ; the result back into a
     lea rsi, [frost_a]
     call sf_swap
-    dec rbx
+    dec r13d
     jnz .pass
-    ; and out, through the rounded rectangle
-    mov rdi, r12
-    mov rsi, r13
-    mov rdx, r14
-    mov rcx, r15
-    mov r10, [frost_r]
-    mov r11d, RC_ALL
-    lea rbx, [span_frost]
-    call rr_walk
+    mov rdi, rbx
+    call gl_up
 .out:
     pop r15
     pop r14
@@ -1336,27 +1365,251 @@ gfx_frost:
     pop rax
     ret
 
-; span_frost: rr_walk's span: frost_a's pixels at R12, R13
-span_frost:
+; gl_down: the target's area (gl_ax, gl_ay, gl_aw, gl_ah) at half its size
+; into frost_a, each pixel the mean of a 2x2 block (at the right and the
+; bottom, of what is there). Clobbers RAX, RCX, RDX, RSI, RDI, R8-R11.
+gl_down:
+    xor r8d, r8d                        ; its rows
+.row:
+    cmp r8, [gl_hh]
+    jae .done
+    lea rax, [r8 + r8]                  ; the two rows it is made of
+    lea rcx, [rax + 1]
+    cmp rcx, [gl_ah]
+    jb .two
+    mov rcx, rax
+.two:
+    add rax, [gl_ay]
+    imul rax, [tg_pitch]
+    mov r9, [gl_ax]
+    lea r9, [rax + r9 * 4]
+    add r9, [tg_ptr]
+    add rcx, [gl_ay]
+    imul rcx, [tg_pitch]
+    mov r10, [gl_ax]
+    lea r10, [rcx + r10 * 4]
+    add r10, [tg_ptr]
+    mov r11, r8
+    imul r11, [frost_a + SF_PITCH]
+    add r11, [frost_a + SF_PTR]
+    mov rdx, [gl_aw]                    ; whole blocks
+    shr rdx, 1
+    jz .last
+.block:
+    movq xmm0, [r9]
+    movq xmm1, [r10]
+    pavgb xmm0, xmm1                    ; down,
+    pshuflw xmm1, xmm0, 0xEE
+    pavgb xmm0, xmm1                    ; and across
+    movd [r11], xmm0
+    add r9, 8
+    add r10, 8
+    add r11, 4
+    dec rdx
+    jnz .block
+.last:
+    test byte [gl_aw], 1                ; a column left alone
+    jz .next
+    movd xmm0, [r9]
+    movd xmm1, [r10]
+    pavgb xmm0, xmm1
+    movd [r11], xmm0
+.next:
+    inc r8
+    jmp .row
+.done:
+    ret
+
+; gl_up(RDI = a pane): frost_a, the area blurred at half its size, back at
+; full size into the pane's pixels: each between the half size's two
+; nearest pixels, down and across (a quarter of one, three of the other).
+; Clobbers RAX, RCX, RDX, RSI, RDI, R8-R11.
+gl_up:
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, [gl_hw]                    ; groups of four, across
+    add r12, 3
+    shr r12, 2
+    xor r8d, r8d                        ; its rows
+.row:
+    cmp r8, [rbx + GL_H]
+    jae .done
+    mov rax, [rbx + GL_Y]               ; where in the half size: row k, and
+    add rax, r8                         ; above (even) or below (odd)
+    sub rax, [gl_ay]
+    mov rcx, rax
+    shr rcx, 1
+    mov rdx, rcx
+    test al, 1
+    jnz .below
+    dec rdx
+    jns .rows
+    xor edx, edx
+    jmp .rows
+.below:
+    inc rdx
+    cmp rdx, [gl_hh]
+    jb .rows
+    dec rdx
+.rows:
+    imul rcx, [frost_a + SF_PITCH]
+    add rcx, [frost_a + SF_PTR]
+    imul rdx, [frost_a + SF_PITCH]
+    add rdx, [frost_a + SF_PTR]
+    lea rdi, [gl_line + 4]              ; the row between them, a pixel to
+    mov r9, r12                         ; spare at either end
+.down:
+    movdqu xmm0, [rcx]
+    movdqu xmm1, [rdx]
+    pavgb xmm1, xmm0
+    pavgb xmm1, xmm0
+    movdqu [rdi], xmm1
+    add rcx, 16
+    add rdx, 16
+    add rdi, 16
+    dec r9
+    jnz .down
+    lea rsi, [gl_line + 4]
+    mov eax, [rsi]                      ; the spares: the end pixels again
+    mov [rsi - 4], eax
+    mov rax, [gl_hw]
+    mov ecx, [rsi + rax * 4 - 4]
+    mov [rsi + rax * 4], ecx
+    mov rdi, r8                         ; then across, into the pane's row
+    imul rdi, [rbx + GL_SF + SF_PITCH]
+    add rdi, [rbx + GL_SF + SF_PTR]
+    mov r10, [rbx + GL_X]               ; R10: where in the half size, doubled
+    sub r10, [gl_ax]
+    mov rcx, [rbx + GL_W]
+    test r10b, 1                        ; odd first: its own
+    jz .pairs
+    mov rax, r10
+    shr rax, 1
+    movd xmm0, [rsi + rax * 4]
+    movd xmm1, [rsi + rax * 4 + 4]
+    pavgb xmm1, xmm0
+    pavgb xmm1, xmm0
+    movd [rdi], xmm1
+    add rdi, 4
+    inc r10
+    dec rcx
+.pairs:
+    cmp rcx, 2
+    jb .single
+    mov rax, r10                        ; even then odd: from k - 1, k, k + 1
+    shr rax, 1
+    movd xmm0, [rsi + rax * 4]
+    movd xmm1, [rsi + rax * 4 - 4]
+    movd xmm2, [rsi + rax * 4 + 4]
+    pavgb xmm1, xmm0
+    pavgb xmm1, xmm0
+    pavgb xmm2, xmm0
+    pavgb xmm2, xmm0
+    punpckldq xmm1, xmm2
+    movq [rdi], xmm1
+    add rdi, 8
+    add r10, 2
+    sub rcx, 2
+    jmp .pairs
+.single:
+    test rcx, rcx                       ; an even one left
+    jz .next
+    mov rax, r10
+    shr rax, 1
+    movd xmm0, [rsi + rax * 4]
+    movd xmm1, [rsi + rax * 4 - 4]
+    pavgb xmm1, xmm0
+    pavgb xmm1, xmm0
+    movd [rdi], xmm1
+.next:
+    inc r8
+    jmp .row
+.done:
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+; glass_draw(RAX = a pane, RDI x, RSI y, RDX w, RCX h, R10 = corner
+; radius): that rounded rectangle, within the pane's, of its pixels
+glass_draw:
+    push rbx
+    push rdi
+    push rsi
+    push rdx
+    push rcx
+    push r11
+    cmp qword [rax + GL_SF + SF_PTR], 0
+    je .out
+    mov [gl_cur], rax
+    mov rbx, [rax + GL_X]               ; within the pane's pixels
+    cmp rdi, rbx
+    jge .left
+    add rdx, rdi
+    sub rdx, rbx
+    mov rdi, rbx
+.left:
+    mov rbx, [rax + GL_Y]
+    cmp rsi, rbx
+    jge .top
+    add rcx, rsi
+    sub rcx, rbx
+    mov rsi, rbx
+.top:
+    mov rbx, [rax + GL_X]
+    add rbx, [rax + GL_SF + SF_W]
+    sub rbx, rdi
+    cmp rdx, rbx
+    jle .right
+    mov rdx, rbx
+.right:
+    mov rbx, [rax + GL_Y]
+    add rbx, [rax + GL_SF + SF_H]
+    sub rbx, rsi
+    cmp rcx, rbx
+    jle .bottom
+    mov rcx, rbx
+.bottom:
+    test rdx, rdx
+    jle .out
+    test rcx, rcx
+    jle .out
+    mov r11d, RC_ALL
+    lea rbx, [span_glass]
+    call rr_walk
+.out:
+    pop r11
+    pop rcx
+    pop rdx
+    pop rsi
+    pop rdi
+    pop rbx
+    ret
+
+; span_glass: rr_walk's span: the pane gl_cur's pixels at R12, R13
+span_glass:
     push rbx
     push r8
     push r9
-    push r12
-    push r13
     push r14
-    push r15
+    mov r8, [gl_cur]
     mov rax, r13                        ; the source pixel
-    sub rax, [frost_y]
-    imul rax, [frost_a + SF_PITCH]
+    sub rax, [r8 + GL_Y]
+    imul rax, [r8 + GL_SF + SF_PITCH]
     mov rbx, r12
-    sub rbx, [frost_x]
+    sub rbx, [r8 + GL_X]
     lea rbx, [rax + rbx * 4]
-    add rbx, [frost_a + SF_PTR]
+    add rbx, [r8 + GL_SF + SF_PTR]
+    test rsi, rsi
+    jnz .px
+    mov rsi, rbx                        ; all of each: a copy
+    rep movsd
+    jmp .out
 .px:
     mov r8d, [rbx]
     add rbx, 4
-    test rsi, rsi
-    jz .all
     movzx eax, byte [rsi]
     add rsi, rdx
     test eax, eax
@@ -1378,13 +1631,146 @@ span_frost:
     add rdi, 4
     dec rcx
     jnz .px
-    pop r15
+.out:
     pop r14
-    pop r13
-    pop r12
     pop r9
     pop r8
     pop rbx
+    ret
+
+; gl_touch(RAX = a pane, RDI x, RSI y, RDX w, RCX h): if the rectangle
+; meets what the pane's blur reads (GL_M around it), what is behind it
+; changed (GL_STALE, until desk_update takes it). Under dmg_lock. Preserves
+; all but the flags.
+gl_touch:
+    cmp qword [rax + GL_W], 0
+    jle .none
+    push r8
+    push r9
+    mov r8, [rax + GL_X]                ; what it reads: its left, against
+    sub r8, [rax + GL_M]                ; the rectangle's right
+    lea r9, [rdi + rdx]
+    cmp r9, r8
+    jle .out
+    add r8, [rax + GL_W]                ; its right
+    add r8, [rax + GL_M]
+    add r8, [rax + GL_M]
+    cmp rdi, r8
+    jge .out
+    mov r8, [rax + GL_Y]                ; its top
+    sub r8, [rax + GL_M]
+    lea r9, [rsi + rcx]
+    cmp r9, r8
+    jle .out
+    add r8, [rax + GL_H]                ; its bottom
+    add r8, [rax + GL_M]
+    add r8, [rax + GL_M]
+    cmp rsi, r8
+    jge .out
+    mov byte [rax + GL_STALE], 1
+.out:
+    pop r9
+    pop r8
+.none:
+    ret
+
+; gl_grow(RAX = a pane, RDI x, RSI y, RDX w, RCX h) -> the rectangle grown
+; to all the pane reads, if what is behind it changed (GL_TAKEN) and the
+; rectangle meets that (then GL_FRESH: it is made again as this is
+; composed). Preserves others.
+gl_grow:
+    cmp byte [rax + GL_TAKEN], 0
+    je .out
+    cmp qword [rax + GL_W], 0
+    jle .out
+    push r8
+    push r9
+    push r10
+    push r11
+    mov r8, [rax + GL_X]                ; all it reads: R8..R10, R9..R11
+    sub r8, [rax + GL_M]
+    mov r9, [rax + GL_Y]
+    sub r9, [rax + GL_M]
+    mov r10, [rax + GL_X]
+    add r10, [rax + GL_W]
+    add r10, [rax + GL_M]
+    mov r11, [rax + GL_Y]
+    add r11, [rax + GL_H]
+    add r11, [rax + GL_M]
+    add rdx, rdi                        ; does it meet it?
+    add rcx, rsi
+    cmp rdx, r8
+    jle .apart
+    cmp rdi, r10
+    jge .apart
+    cmp rcx, r9
+    jle .apart
+    cmp rsi, r11
+    jge .apart
+    cmp rdi, r8                         ; the union
+    jle .x0
+    mov rdi, r8
+.x0:
+    cmp rsi, r9
+    jle .y0
+    mov rsi, r9
+.y0:
+    cmp rdx, r10
+    jge .x1
+    mov rdx, r10
+.x1:
+    cmp rcx, r11
+    jge .y1
+    mov rcx, r11
+.y1:
+    mov byte [rax + GL_TAKEN], 0        ; made again as this is composed
+    mov byte [rax + GL_FRESH], 1
+.apart:
+    sub rdx, rdi
+    sub rcx, rsi
+    push rax
+    call gfx_clip_screen_signed
+    pop rax
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+.out:
+    ret
+
+; glass_paint(RAX = a pane, RDI x, RSI y, RDX w, RCX h, R10 = corner
+; radius): the rounded rectangle, of the pane's blur: made again first if
+; the back buffer behind it is new (GL_FRESH)
+glass_paint:
+    cmp byte [rax + GL_FRESH], 0
+    je glass_draw
+    mov byte [rax + GL_FRESH], 0
+    push rdi
+    mov rdi, rax
+    call glass_make
+    pop rdi
+    jmp glass_draw
+
+; gfx_frost(RDI x, RSI y, RDX w, RCX h, R8 = corner radius, R9 = blur radius
+; 1..64): the target behind it blurred, once (what is within 3 R9 of it must
+; be drawn already)
+gfx_frost:
+    push rax
+    push r10
+    lea rax, [frost_gl]
+    mov [rax + GL_X], rdi
+    mov [rax + GL_Y], rsi
+    mov [rax + GL_W], rdx
+    mov [rax + GL_H], rcx
+    mov [rax + GL_B], r9
+    push rdi
+    mov rdi, rax
+    call glass_make
+    pop rdi
+    mov r10, r8
+    call glass_draw
+    pop r10
+    pop rax
     ret
 
 ; sf_swap(RDI, RSI = two surfaces): they trade places. Preserves all.
@@ -1406,8 +1792,9 @@ sf_swap:
     pop rax
     ret
 
-; blur_rows(RDI = a surface, RSI = radius): each row, a box blur across, in
-; place. Clobbers RAX, RCX, RDX, RSI, RDI, R8-R11.
+; blur_rows(RDI = a surface, RSI = radius): each row's first SF_W pixels,
+; a box blur across, in place, the four bytes of a pixel at once.
+; Clobbers RAX, RCX, RDX, RSI, RDI, R8-R11.
 blur_rows:
     push rbx
     push rbp
@@ -1420,13 +1807,20 @@ blur_rows:
     mov r14, [rdi + SF_W]
     mov r15, [rdi + SF_PITCH]
     mov rbp, rsi                        ; b
-    lea rcx, [rsi * 2 + 1]
-    mov eax, 65536                      ; 1 / (2b + 1), 16.16
+    lea rcx, [rsi * 2 + 1]              ; 1 / (2b + 1), 0.16; and half of
+    mov eax, 65536                      ; 2b + 1, to round
     xor edx, edx
     div ecx
-    mov r11d, eax
+    movd xmm7, eax
+    pshuflw xmm7, xmm7, 0
+    mov eax, ecx
+    shr eax, 1
+    movd xmm5, eax
+    pshuflw xmm5, xmm5, 0
+    pxor xmm6, xmm6
 .row:
-    ; the row into blur_line with b copies of each end beside it
+    ; the row into blur_line with b copies of each end beside it (and one
+    ; more, read past the last)
     lea rdi, [blur_line]
     mov eax, [r12]
     mov rcx, rbp
@@ -1435,61 +1829,39 @@ blur_rows:
     mov rcx, r14
     rep movsd
     mov eax, [rsi - 4]
-    mov rcx, rbp
+    lea rcx, [rbp + 1]
     rep stosd
-    ; sums of the first window: 2b + 1 pixels
-    xor r8d, r8d                        ; blue
-    xor r9d, r9d                        ; green
-    xor r10d, r10d                      ; red
+    pxor xmm0, xmm0                     ; the sums of the first window
     lea rsi, [blur_line]
     lea rcx, [rbp * 2 + 1]
 .sum:
-    lodsd
-    movzx edx, al
-    add r8d, edx
-    movzx edx, ah
-    add r9d, edx
-    shr eax, 16
-    movzx edx, al
-    add r10d, edx
+    movd xmm1, [rsi]
+    punpcklbw xmm1, xmm6
+    paddw xmm0, xmm1
+    add rsi, 4
     dec rcx
     jnz .sum
     lea rsi, [blur_line]                ; leaving the window
+    lea r8, [rsi + rbp * 8 + 4]         ; coming in: 2b + 1 on
     mov rdi, r12
-    mov rbx, r14
-.out_px:
-    mov eax, r10d                       ; the pixel: the sums / (2b + 1)
-    imul eax, r11d
-    shr eax, 16
-    shl eax, 16
-    mov edx, r9d
-    imul edx, r11d
-    shr edx, 16
-    shl edx, 8
-    or eax, edx
-    mov edx, r8d
-    imul edx, r11d
-    shr edx, 16
-    or eax, edx
-    stosd
-    mov eax, [rsi + rbp * 8 + 4]        ; the pixel coming in: 2b + 1 on
-    movzx edx, al
-    add r8d, edx
-    movzx edx, ah
-    add r9d, edx
-    shr eax, 16
-    movzx edx, al
-    add r10d, edx
-    lodsd                               ; and the one going out
-    movzx edx, al
-    sub r8d, edx
-    movzx edx, ah
-    sub r9d, edx
-    shr eax, 16
-    movzx edx, al
-    sub r10d, edx
-    dec rbx
-    jnz .out_px
+    mov rcx, r14
+.px:
+    movdqa xmm2, xmm0                   ; the pixel: the sums / (2b + 1)
+    paddw xmm2, xmm5
+    pmulhuw xmm2, xmm7
+    packuswb xmm2, xmm2
+    movd [rdi], xmm2
+    movd xmm1, [r8]
+    punpcklbw xmm1, xmm6
+    paddw xmm0, xmm1
+    movd xmm1, [rsi]
+    punpcklbw xmm1, xmm6
+    psubw xmm0, xmm1
+    add rdi, 4
+    add rsi, 4
+    add r8, 4
+    dec rcx
+    jnz .px
     add r12, r15
     dec r13
     jnz .row
@@ -1502,7 +1874,8 @@ blur_rows:
     ret
 
 ; blur_cols(RDI = from, RSI = to (the same size), RDX = radius): a box
-; blur down each column. Clobbers RAX, RCX, RDX, RSI, RDI, R8-R11.
+; blur down each column, four columns at a time (SF_W rounded up to four:
+; the pitch holds them). Clobbers RAX, RCX, RDX, RSI, RDI, R8-R11.
 blur_cols:
     push rbx
     push rbp
@@ -1512,7 +1885,9 @@ blur_cols:
     push r15
     mov r12, [rdi + SF_PTR]             ; from
     mov r13, [rsi + SF_PTR]             ; to
-    mov r14, [rdi + SF_W]
+    mov r14, [rdi + SF_W]               ; groups of four columns
+    add r14, 3
+    shr r14, 2
     mov r15, [rdi + SF_PITCH]
     mov rbx, [rdi + SF_H]
     mov rbp, rdx                        ; b
@@ -1520,13 +1895,21 @@ blur_cols:
     mov eax, 65536
     xor edx, edx
     div ecx
-    mov [blur_inv], eax
+    movd xmm7, eax
+    pshuflw xmm7, xmm7, 0
+    punpcklqdq xmm7, xmm7
+    mov eax, ecx
+    shr eax, 1
+    movd xmm5, eax
+    pshuflw xmm5, xmm5, 0
+    punpcklqdq xmm5, xmm5
+    pxor xmm6, xmm6
     ; the sums for row 0: row 0 counted b + 1 times, rows 1..b once
     lea rdi, [blur_sums]
     xor eax, eax
     mov rcx, r14
     shl rcx, 2
-    rep stosd
+    rep stosq
     mov r8, -1                          ; k: row -b..b, clamped
     sub r8, rbp
 .init:
@@ -1540,16 +1923,16 @@ blur_cols:
     lea rdi, [blur_sums]
     mov rcx, r14
 .init_px:
-    mov edx, [rax]
-    add rax, 4
-    movzx esi, dl
-    add [rdi], esi
-    movzx esi, dh
-    add [rdi + 4], esi
-    shr edx, 16
-    movzx esi, dl
-    add [rdi + 8], esi
-    add rdi, 16
+    movdqu xmm0, [rax]
+    movdqa xmm1, xmm0
+    punpcklbw xmm0, xmm6
+    punpckhbw xmm1, xmm6
+    paddw xmm0, [rdi]
+    paddw xmm1, [rdi + 16]
+    movdqa [rdi], xmm0
+    movdqa [rdi + 16], xmm1
+    add rax, 16
+    add rdi, 32
     dec rcx
     jnz .init_px
     jmp .init
@@ -1574,44 +1957,35 @@ blur_cols:
     add rdi, r13
     lea rsi, [blur_sums]
     mov rcx, r14
-    mov r11d, [blur_inv]
 .px:
-    mov eax, [rsi + 8]                  ; out: the sums / (2b + 1)
-    imul eax, r11d
-    shr eax, 16
-    shl eax, 16
-    mov edx, [rsi + 4]
-    imul edx, r11d
-    shr edx, 16
-    shl edx, 8
-    or eax, edx
-    mov edx, [rsi]
-    imul edx, r11d
-    shr edx, 16
-    or eax, edx
-    mov [rdi], eax
-    add rdi, 4
-    mov eax, [r9]                       ; then the next window
-    add r9, 4
-    mov edx, [r10]
-    add r10, 4
-    push rcx
-    movzx ecx, al
-    add [rsi], ecx
-    movzx ecx, dl
-    sub [rsi], ecx
-    movzx ecx, ah
-    add [rsi + 4], ecx
-    movzx ecx, dh
-    sub [rsi + 4], ecx
-    shr eax, 16
-    shr edx, 16
-    movzx ecx, al
-    add [rsi + 8], ecx
-    movzx ecx, dl
-    sub [rsi + 8], ecx
-    pop rcx
-    add rsi, 16
+    movdqa xmm0, [rsi]                  ; out: the sums / (2b + 1)
+    movdqa xmm1, [rsi + 16]
+    movdqa xmm2, xmm0
+    movdqa xmm3, xmm1
+    paddw xmm2, xmm5
+    paddw xmm3, xmm5
+    pmulhuw xmm2, xmm7
+    pmulhuw xmm3, xmm7
+    packuswb xmm2, xmm3
+    movdqu [rdi], xmm2
+    movdqu xmm2, [r9]                   ; then the next window
+    movdqa xmm3, xmm2
+    punpcklbw xmm2, xmm6
+    punpckhbw xmm3, xmm6
+    paddw xmm0, xmm2
+    paddw xmm1, xmm3
+    movdqu xmm2, [r10]
+    movdqa xmm3, xmm2
+    punpcklbw xmm2, xmm6
+    punpckhbw xmm3, xmm6
+    psubw xmm0, xmm2
+    psubw xmm1, xmm3
+    movdqa [rsi], xmm0
+    movdqa [rsi + 16], xmm1
+    add rsi, 32
+    add rdi, 16
+    add r9, 16
+    add r10, 16
     dec rcx
     jnz .px
     inc r8
@@ -2472,16 +2846,20 @@ rr_cache_p:     resq RR_CACHE
 RING_MAX        equ 64 * 64
 ring_corner:    resb RING_MAX
 alignb 8
-frost_r:        resq 1
-frost_b:        resq 1
-frost_x:        resq 1
-frost_y:        resq 1
-frost_a:        resb SF_SIZE            ; the area, then blurred
+frost_a:        resb SF_SIZE            ; an area at half size, blurred
 frost_b_sf:     resb SF_SIZE            ; and the other half of each pass
-blur_inv:       resd 1
+frost_gl:       resb GL_SIZE            ; gfx_frost's pane
+gl_cur:         resq 1                  ; the pane span_glass draws
+gl_ax:          resq 1                  ; the area glass_make reads
+gl_ay:          resq 1
+gl_aw:          resq 1
+gl_ah:          resq 1
+gl_hw:          resq 1                  ; at half size
+gl_hh:          resq 1
 alignb 16
 blur_sums:      resd BLUR_W * 4
 blur_line:      resd BLUR_W + 2 * 64 + 4
+gl_line:        resd BLUR_W + 8
 grad_w:         resq 1
 grad_h:         resq 1
 grad_c:         resd 4

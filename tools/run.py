@@ -307,7 +307,7 @@ def main():
                     "the log after the last text typed, 'shot FILE' takes a screenshot, "
                     "'type TEXT' types down the serial port, 'press TEXT' on the "
                     "keyboard, 'abs X Y [button]' points (and clicks), 'drag X1 Y1 X2 Y2 "
-                    "[button]' drags, 'wheel X Y N' turns the wheel N notches, 'key NAME "
+                    "[button]' drags, 'glide X1 Y1 X2 Y2 STEPS MS [button]' moves it smoothly, 'wheel X Y N' turns the wheel N notches, 'key NAME "
                     "down|up' presses or lets go of one key)")
     opts = ap.parse_args()
     fresh = opts.port == 0 and not opts.vars
@@ -422,6 +422,26 @@ def main():
                     qmp.abs(x1 + (x2 - x1) * i // 8, y1 + (y2 - y1) * i // 8)
                 time.sleep(0.1)
                 qmp.abs(x2, y2, [(b, False)])
+            elif line.startswith("glide "):
+                # glide X1 Y1 X2 Y2 STEPS MS [button]: the pointer from one
+                # point to the other in STEPS even steps over MS milliseconds,
+                # the button held all the way if one is named
+                qmp = qmp or Qmp(MONITOR[1] + 1)
+                parts = line.split()
+                x1, y1, x2, y2, steps, ms = (int(v) for v in parts[1:7])
+                held = [(parts[7], True)] if len(parts) > 7 else []
+                qmp.abs(x1, y1)
+                time.sleep(0.05)
+                if held:
+                    qmp.abs(x1, y1, held)
+                start = time.monotonic()
+                for i in range(1, steps + 1):
+                    due = start + ms / 1000 * i / steps
+                    time.sleep(max(0.0, due - time.monotonic()))
+                    qmp.abs(x1 + (x2 - x1) * i // steps, y1 + (y2 - y1) * i // steps)
+                if held:
+                    time.sleep(0.05)
+                    qmp.abs(x2, y2, [(parts[7], False)])
             elif line.startswith("wheel "):
                 # wheel X Y N: the pointer there, the wheel turned N notches
                 # (up positive)

@@ -657,6 +657,8 @@ mn_close:
     je .out
     call mn_damage
     mov qword [mn_which], -1
+    mov qword [mn_gl + GL_W], 0         ; no glass
+    mov dword [mn_gl + GL_STALE], 0
     call desk_bar_damage
 .out:
     ret
@@ -1154,6 +1156,23 @@ mn_measure:
     mov rax, [m_bar_h]
     add rax, [mn_drop]
     mov [mn_y], rax
+    lea rax, [mn_gl]                    ; its glass, made again
+    mov [rax + GL_X], rdi
+    mov rcx, [mn_y]
+    mov [rax + GL_Y], rcx
+    mov [rax + GL_W], r12
+    mov [rax + GL_H], r13
+    mov rcx, [m_blur]
+    mov [rax + GL_B], rcx
+    lea rcx, [rcx + rcx * 2]            ; what it reads: three blurs around,
+    mov rdi, [sh_other + SH_M]          ; and its shadow
+    add rdi, [sh_other + SH_OY]
+    cmp rcx, rdi
+    jge .reach
+    mov rcx, rdi
+.reach:
+    mov [rax + GL_M], rcx
+    mov byte [rax + GL_STALE], 1
     pop r13
     pop r12
     pop rbx
@@ -1267,79 +1286,16 @@ mn_damage:
     push rsi
     push rdx
     push rcx
+    push r8
     call mn_area
-    call desk_damage
+    lea r8, [mn_gl]                     ; its own: its glass is as it was
+    call desk_damage_own
+    pop r8
     pop rcx
     pop rdx
     pop rsi
     pop rdi
 .out:
-    ret
-
-; mn_glass(RDI x, RSI y, RDX w, RCX h) -> the rectangle grown to hold all
-; of the open menu and what its blur reads, if it touches that (as
-; desk_glass, the dock). Preserves others.
-mn_glass:
-    cmp qword [mn_which], -1
-    je .none
-    push r8
-    push r9
-    push r10
-    push r11
-    mov rax, [m_blur]
-    imul rax, rax, 3
-    cmp rax, [sh_other + SH_M]
-    jge .margin
-    mov rax, [sh_other + SH_M]
-.margin:
-    mov r8, [mn_x]
-    sub r8, rax
-    mov r9, [mn_y]
-    sub r9, rax
-    mov r10, [mn_x]
-    add r10, [mn_w]
-    add r10, rax
-    mov r11, [mn_y]
-    add r11, [mn_h]
-    add r11, rax
-    add r11, [sh_other + SH_OY]
-    lea rax, [rdi + rdx]                ; does it touch?
-    cmp rax, r8
-    jle .out
-    cmp rdi, r10
-    jge .out
-    lea rax, [rsi + rcx]
-    cmp rax, r9
-    jle .out
-    cmp rsi, r11
-    jge .out
-    add rdx, rdi
-    add rcx, rsi
-    cmp rdi, r8
-    jle .x0
-    mov rdi, r8
-.x0:
-    cmp rsi, r9
-    jle .y0
-    mov rsi, r9
-.y0:
-    cmp rdx, r10
-    jge .x1
-    mov rdx, r10
-.x1:
-    cmp rcx, r11
-    jge .y1
-    mov rcx, r11
-.y1:
-    sub rdx, rdi
-    sub rcx, rsi
-    call gfx_clip_screen_signed
-.out:
-    pop r11
-    pop r10
-    pop r9
-    pop r8
-.none:
     ret
 
 ; mn_paint: the open menu, where the clip meets it (desk_compose, last):
@@ -1371,9 +1327,9 @@ mn_paint:
     mov rcx, [mn_h]
     lea r8, [sh_other]
     call gfx_shadow
-    mov r8, [mn_r]
-    mov r9, [m_blur]
-    call gfx_frost
+    lea rax, [mn_gl]
+    mov r10, [mn_r]
+    call glass_paint
     mov r8d, [th_c + TC_TIP]
     mov r9d, [th_c + TC_TIP_A]
     sub r9d, 45
@@ -2079,6 +2035,8 @@ mn_query_n:     resq 1
 st_bat:         resq 1                  ; the battery, as last read (bat_info)
 st_due:        resq 1                  ; st_tick: when next,
 st_seen:        resq 1                  ; and what it saw
+alignb 8
+mn_gl:          resb GL_SIZE            ; the open menu's glass
 st_pts:         resd 2 * POLY_MAX
 mn_ink:         resd 1
 mn_text:        resb MN_TEXT

@@ -13,8 +13,9 @@
 ;  What changed on the screen is a list of rectangles; desk_update composes
 ;  each into the back buffer - the wallpaper, the windows bottom to top,
 ;  the dock, the menu bar - and copies it to the screen. The dock is frosted
-;  glass: what is behind it, blurred, so a rectangle that touches it is
-;  composed with all the dock and what the blur reads around it.
+;  glass: what is behind it, blurred (a pane, draw.asm), kept until what is
+;  behind it changes; then a rectangle that touches it is composed with all
+;  the dock and what the blur reads around it, and the blur made again.
 ;
 ;  The dock: the apps (DOCK_APPS of them, each launched or brought forward
 ;  by a click), then programs with windows that are not among them, then,
@@ -117,6 +118,22 @@ APP_SYSTEM      equ 6
 APP_MANDEL      equ 7
 
 DOUBLE_MS       equ 400                 ; two clicks this close are a double click
+
+; how long composing takes, by part ('win speed')
+DS_WALL         equ 0                   ; the wallpaper and the widgets
+DS_WINS         equ 1                   ; the windows
+DS_DOCK         equ 2                   ; the dock and the name over it
+DS_BAR          equ 3                   ; the menu bar and an open menu
+DS_BLIT         equ 4                   ; to the screen
+DS_PARTS        equ 5
+
+; DS_LAP part: the time since the last lap is that part's. Preserves all.
+%macro DS_LAP 1
+    push rdi
+    mov edi, %1
+    call ds_lap
+    pop rdi
+%endmacro
 
 section .text
 
@@ -1399,6 +1416,16 @@ span_round:
 ; desk_damage(RDI x, RSI y, RDX w, RCX h on the screen): to be composed
 ; again. Any thread. Preserves all.
 desk_damage:
+    push r8
+    xor r8d, r8d
+    call desk_damage_own
+    pop r8
+    ret
+
+; desk_damage_own(RDI x, RSI y, RDX w, RCX h, R8 = a pane of glass or 0):
+; as desk_damage, by the pane's own drawing: what is behind it is as it
+; was. Any thread. Preserves all.
+desk_damage_own:
     push rax
     push rdi
     push rsi
@@ -1413,6 +1440,16 @@ desk_damage:
     lea rdi, [dmg_lock]
     call spin_lock
     pop rdi
+    lea rax, [dock_gl]                  ; what is behind the glass changed
+    cmp rax, r8
+    je .dock
+    call gl_touch
+.dock:
+    lea rax, [mn_gl]
+    cmp rax, r8
+    je .menu
+    call gl_touch
+.menu:
     mov rax, [dmg_n]
     cmp rax, DMG_MAX
     jb .add
@@ -1543,6 +1580,9 @@ desk_update:
 .work:
     push rbx
     push r12
+    push r13
+    RDTSC64
+    mov r13, rax                        ; when it began
     sub rsp, DMG_MAX * 32
     pushfq                              ; take the list
     cli
@@ -1555,6 +1595,12 @@ desk_update:
     lea rdi, [rsp + 8]
     rep movsb
     mov qword [dmg_n], 0
+    mov al, [dock_gl + GL_STALE]        ; and what changed behind the glass
+    or [dock_gl + GL_TAKEN], al
+    mov byte [dock_gl + GL_STALE], 0
+    mov al, [mn_gl + GL_STALE]
+    or [mn_gl + GL_TAKEN], al
+    mov byte [mn_gl + GL_STALE], 0
     lea rdi, [dmg_lock]
     call spin_unlock
     popfq
@@ -1572,69 +1618,155 @@ desk_update:
     mov rcx, [rax + 24]
     sub rcx, rsi
     call desk_glass                     ; all the glass it touches, with it
-    call mn_glass
+    mov rax, rdx                        ; its pixels, counted
+    imul rax, rcx
+    add [ds_px], rax
     call desk_compose
     inc rbx
     jmp .rect
 .done:
     add rsp, DMG_MAX * 32
+    RDTSC64                             ; how long it took
+    sub rax, r13
+    add [ds_cycles], rax
+    inc qword [ds_frames]
+    cmp rax, [ds_max]
+    jbe .longest
+    mov [ds_max], rax
+.longest:
+    pop r13
     pop r12
     pop rbx
     ret
 
-; desk_glass(RDI x, RSI y, RDX w, RCX h) -> the rectangle grown to hold all
-; of the dock and what its blur reads, if it touches that. Preserves others.
+; ds_lap(EDI = a part, DS_*): the time since the last lap is its. Preserves
+; all.
+ds_lap:
+    push rax
+    push rdx
+    RDTSC64
+    mov rdx, rax
+    sub rax, [ds_last]
+    mov [ds_last], rdx
+    lea rdx, [ds_parts]
+    add [rdx + rdi * 8], rax
+    pop rdx
+    pop rax
+    ret
+
+; ds_say: how fast the desk composed since it was last asked; then from 0
+ds_say:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    mov rax, [ds_cycles]                ; each frame's, in hundredths of a ms
+    mov ecx, 100
+    mul rcx
+    div qword [tsc_per_ms]
+    xor edx, edx
+    mov rcx, [ds_frames]
+    test rcx, rcx
+    jz .mean
+    div rcx
+.mean:
+    mov rbx, rax
+    mov rax, [ds_max]
+    mov ecx, 100
+    mul rcx
+    div qword [tsc_per_ms]
+    mov r12, rax
+    mov rax, [ds_px]                    ; pixels, in tenths of a million
+    xor edx, edx
+    mov ecx, 100000
+    div rcx
+    KLOG "desk: %u frames, %h ms each, the longest %h ms, %t Mpx composed", qword [ds_frames], rbx, r12, rax
+    xor ecx, ecx                        ; each part's share
+    xor ebx, ebx
+.sum:
+    lea rax, [ds_parts]
+    add rbx, [rax + rcx * 8]
+    inc ecx
+    cmp ecx, DS_PARTS
+    jb .sum
+    test rbx, rbx
+    jnz .shares
+    inc ebx
+.shares:
+    xor ecx, ecx
+    lea r8, [ds_share]
+.share:
+    lea rax, [ds_parts]
+    mov rax, [rax + rcx * 8]
+    mov edx, 100
+    mul rdx
+    div rbx
+    mov [r8 + rcx * 8], rax
+    inc ecx
+    cmp ecx, DS_PARTS
+    jb .share
+    KLOG "desk: wallpaper %u%%, windows %u%%, dock %u%%, bar and menus %u%%, to the screen %u%%", qword [ds_share], qword [ds_share + 8], qword [ds_share + 16], qword [ds_share + 24], qword [ds_share + 32]
+    lea rdi, [ds_frames]                ; from 0
+    xor eax, eax
+    mov ecx, DS_PARTS + 4
+    rep stosq
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+; desk_glass(RDI x, RSI y, RDX w, RCX h) -> the rectangle grown to hold
+; all a pane of glass reads, if what is behind it changed and the rectangle
+; touches that (the pane is made again as it is composed). Preserves others.
 desk_glass:
-    push r8
-    push r9
-    push r10
-    push r11
-    mov rax, [m_blur]
-    imul rax, rax, 3
-    mov r8, [dock_x]                    ; the dock and its margin
-    sub r8, rax
-    mov r9, [m_dock_y]
-    sub r9, rax
-    mov r10, [dock_x]
-    add r10, [dock_w]
-    add r10, rax
-    mov r11, [scr_h]
-    cmp qword [dock_w], 0
+    push rax
+    lea rax, [dock_gl]
+    call gl_grow
+    lea rax, [mn_gl]
+    call gl_grow
+    lea rax, [dock_gl]                  ; (the menu's may reach the dock's)
+    call gl_grow
+    pop rax
+    ret
+
+; dock_pane: the dock's pane of glass where the dock is; made again if that
+; changed. Preserves all.
+dock_pane:
+    push rax
+    push rcx
+    lea rax, [dock_gl]
+    mov rcx, [m_blur]
+    mov [rax + GL_B], rcx
+    lea rcx, [rcx + rcx * 2]
+    mov [rax + GL_M], rcx
+    mov rcx, [dock_x]
+    cmp rcx, [rax + GL_X]
+    jne .moved
+    mov rcx, [dock_w]
+    cmp rcx, [rax + GL_W]
+    jne .moved
+    mov rcx, [m_dock_y]
+    cmp rcx, [rax + GL_Y]
+    jne .moved
+    mov rcx, [m_dock_h]
+    cmp rcx, [rax + GL_H]
     je .out
-    lea rax, [rdi + rdx]                ; does it touch?
-    cmp rax, r8
-    jle .out
-    cmp rdi, r10
-    jge .out
-    lea rax, [rsi + rcx]
-    cmp rax, r9
-    jle .out
-    add rdx, rdi                        ; to edges, then the union
-    add rcx, rsi
-    cmp rdi, r8
-    jle .x0
-    mov rdi, r8
-.x0:
-    cmp rsi, r9
-    jle .y0
-    mov rsi, r9
-.y0:
-    cmp rdx, r10
-    jge .x1
-    mov rdx, r10
-.x1:
-    cmp rcx, r11
-    jge .y1
-    mov rcx, r11
-.y1:
-    sub rdx, rdi
-    sub rcx, rsi
-    call gfx_clip_screen_signed
+.moved:
+    mov rcx, [dock_x]
+    mov [rax + GL_X], rcx
+    mov rcx, [dock_w]
+    mov [rax + GL_W], rcx
+    mov rcx, [m_dock_y]
+    mov [rax + GL_Y], rcx
+    mov rcx, [m_dock_h]
+    mov [rax + GL_H], rcx
+    mov byte [rax + GL_STALE], 1
 .out:
-    pop r11
-    pop r10
-    pop r9
-    pop r8
+    pop rcx
+    pop rax
     ret
 
 ; desk_compose(RDI x, RSI y, RDX w, RCX h): that part of the screen, again
@@ -1648,9 +1780,16 @@ desk_compose:
     mov r13, rsi
     mov r14, rdx
     mov r15, rcx
+    push rax
+    push rdx
+    RDTSC64
+    mov [ds_last], rax
+    pop rdx
+    pop rax
     call gfx_target_back
     call gfx_set_clip
     call wall_draw                      ; the wallpaper
+    DS_LAP DS_WALL
     xor ebx, ebx                        ; windows, bottom to top
 .window:
     cmp rbx, [desk_zn]
@@ -1682,17 +1821,20 @@ desk_compose:
     inc rbx
     jmp .window
 .dock:
+    DS_LAP DS_WINS
     lea rax, [r13 + r15]                ; the dock, if it is in it
     cmp rax, [m_dock_y]
     jle .tip
     call dock_paint
 .tip:
     call tip_paint
+    DS_LAP DS_DOCK
     cmp r13, [m_bar_h]                  ; the menu bar
     jge .menu
     call bar_paint
 .menu:
     call mn_paint                       ; an open menu, over all
+    DS_LAP DS_BAR
 .shown:
     call gfx_target_back                ; the clip off again
     mov rdi, r12
@@ -1700,6 +1842,7 @@ desk_compose:
     mov rdx, r14
     mov rcx, r15
     call gfx_blit
+    DS_LAP DS_BLIT
     pop r15
     pop r14
     pop r13
@@ -2608,6 +2751,7 @@ dock_layout:
     inc rbx
     jmp .x
 .placed:
+    call dock_pane                      ; its glass,
     call dock_damage                    ; and where it is now
     pop r14
     pop r13
@@ -2663,7 +2807,10 @@ dock_damage:
     mov rdx, [scr_w]
     mov rcx, [scr_h]
     sub rcx, rsi
-    call desk_damage
+    push r8
+    lea r8, [dock_gl]                   ; its own: its glass is as it was
+    call desk_damage_own
+    pop r8
 .out:
     pop rcx
     pop rdx
@@ -2682,9 +2829,9 @@ dock_paint:
     mov rsi, [m_dock_y]
     mov rdx, [dock_w]
     mov rcx, [m_dock_h]
-    mov r8, [m_dock_r]
-    mov r9, [m_blur]
-    call gfx_frost
+    lea rax, [dock_gl]
+    mov r10, [m_dock_r]
+    call glass_paint
     mov r8d, [th_c + TC_DOCK]
     mov r9d, [th_c + TC_DOCK_A]
     mov r10, [m_dock_r]
@@ -3559,6 +3706,13 @@ cmd_win:
     je .list
     call arg_split
     mov r12, rsi                        ; the verb
+    push rdi
+    mov rdi, r12
+    lea rsi, [str_win_speed]
+    call streq
+    pop rdi
+    test eax, eax
+    jnz .speed
     mov rsi, rdi
     call arg_split
     mov r13, rdi                        ; what follows the number
@@ -3674,8 +3828,11 @@ cmd_win:
 .no_window:
     KLOG "desk: no window %u ('win' lists them)", rbx
     jmp .out
+.speed:
+    call ds_say
+    jmp .out
 .usage:
-    KLOG "usage: win [move <n> <x> <y> | size <n> <w> <h> | raise <n> | min <n> | zoom <n> | close <n>]"
+    KLOG "usage: win [move <n> <x> <y> | size <n> <w> <h> | raise <n> | min <n> | zoom <n> | close <n> | speed]"
 .out:
     pop r13
     pop r12
@@ -3742,6 +3899,7 @@ str_win_raise:  db 'raise', 0
 str_win_min:    db 'min', 0
 str_win_zoom:   db 'zoom', 0
 str_win_close:  db 'close', 0
+str_win_speed:  db 'speed', 0
 str_win_shown:  db 'shown', 0
 str_win_hidden: db 'minimised', 0
 str_win_away:   db 'away', 0
@@ -3821,10 +3979,19 @@ m_tip_gap:      resq 1
 m_bar_pad:      resq 1
 m_gap:          resq 1                  ; between windows placed
 m_mark:         resq 1                  ; Axiom's mark in the bar
+ds_frames:      resq 1                  ; 'win speed': frames composed,
+ds_cycles:      resq 1                  ; the time it took,
+ds_max:         resq 1                  ; the longest,
+ds_px:          resq 1                  ; pixels composed,
+ds_parts:       resq DS_PARTS           ; the time by part (cleared with those)
+ds_share:       resq DS_PARTS
+ds_last:        resq 1
 f_body:         resd 1                  ; fonts: text,
 f_title:        resd 1                  ; titles,
 f_small:        resd 1                  ; small
 alignb 8
+alignb 8
+dock_gl:        resb GL_SIZE            ; the dock's glass
 sh_focus:       resb SH_SIZE            ; the shadow of the window with the keys
 sh_other:       resb SH_SIZE            ; of the others
 bar_sf:         resb SF_SIZE            ; the menu bar's glass
