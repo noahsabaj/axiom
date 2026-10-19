@@ -18,9 +18,11 @@ AxiomLog, and restarts; BootNext is spent, so Ubuntu comes back, and the log
 is read from there. A hang ends in the watchdog's reset, a panic in a restart.
 
 Only BootNext is ever set, never BootOrder. A restart waits until no fleet
-job runs on hp-1. The log is also saved to build/hw/hp1-last.log.
+job starts or runs on hp-1, and none waiting in fleet's queue may go there.
+The log is also saved to build/hw/hp1-last.log.
 """
 import argparse
+import json
 import pathlib
 import shutil
 import subprocess
@@ -72,8 +74,17 @@ def boot_id():
 
 
 def jobs_running():
+    """What a restart would lose: jobs starting or running on hp-1, and jobs
+    waiting in fleet's queue that may go there (the hive would start them)."""
     out = fleet("jobs", "--on", NODE, timeout=120).stdout
-    return [l for l in out.splitlines()[1:] if l.split()[3:4] == ["running"]]
+    busy = [l for l in out.splitlines()[1:] if l.split()[3:4] in (["running"], ["starting"])]
+    queue = json.loads(fleet("queue", "--json", timeout=120).stdout or "{}")
+    for job in queue.get("jobs", []):
+        if job.get("state") in ("done", "failed", "stopped", "lost", "cancelled"):
+            continue
+        if job.get("node") == NODE or NODE in (job.get("nodes") or []):
+            busy.append(f"queued for {NODE}: {job.get('id')} ({job.get('state')})")
+    return busy
 
 
 def run(script, wait):
