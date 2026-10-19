@@ -1842,7 +1842,11 @@ sk_accept:
     lea rax, [r12 + TC_RA]
     SPRINTF r13 + SK_HOST, "%A", rax
     mov rdi, r12
-    mov esi, 65535
+    mov esi, 65535                      ; as much as SK_RX holds
+    test dword [r13 + SK_FLAGS], SKF_TLS
+    jz .flow
+    mov esi, SK_CIN_BUF                 ; TLS: as much as SK_CIN does
+.flow:
     call tcp_flow
     xchg rbx, r13
     call sk_link

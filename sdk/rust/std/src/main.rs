@@ -438,8 +438,9 @@ fn tls_server(port: u16) {
         }
     }
     let from = net::ip(c.addrs().unwrap().peer);
-    println!("rstd: net tls accepted from {}, open {}, said {:?}", from, s.state == axiom::sys::SKS_OPEN,
-             line.trim_end());
+    let said = line.trim_end();
+    println!("rstd: net tls accepted from {}, open {}, said {:?}, {} bytes", from, s.state == axiom::sys::SKS_OPEN,
+             &said[..said.len().min(14)], line.len());
     drop(c);
     drop(l);
 }
