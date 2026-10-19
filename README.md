@@ -468,7 +468,9 @@ panic on trial does, and a hang in the watchdog's reset, and the loader
 starts the kept kernel again. Each variable holds its file's size and
 FNV-1a hash: a slot whose file is missing or damaged is passed over, for
 the kept one, then the built-in one. `update` says which kernel this is;
-`tools/test/update` runs every way a trial ends in QEMU.
+`tools/test/update` runs every way a trial ends in QEMU. On hp-1,
+`python tools/hw/hp1.py try` writes build/kernel.bin into a slot and
+`AxiomTry` from Ubuntu, for the next `hp1.py run`.
 
 ### One of fleet's nodes
 
