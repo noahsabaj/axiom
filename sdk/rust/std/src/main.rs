@@ -9,7 +9,7 @@
 //! test's servers on the host.
 //!
 //!   rstd [fs <folder> | ro <folder> | home | net <echo> <port> [dns] |
-//!         panic | exit | code]
+//!         spawn | panic | exit | code]
 //!
 //! fs needs a volume that can be written (vol <n> rw); ro checks that one
 //! that can't says so; home: what is in the boot volume's /Home is written
@@ -22,7 +22,10 @@
 //! host; then <port> + 1 as TLS's server (axiom::net::Identity, from the
 //! stick's NODE.PEM and NODE.KEY), for a TLS client from the host, after
 //! a key that is not the certificate's is refused; dns: axiom.test by name
-//! too.
+//! too. spawn: programs started (axiom::task), their consoles to a channel
+//! of ours: hello's, a child's chatter faster than it is read, a
+//! grandchild's; one killed; the memory, the uptime and a volume's free
+//! space (chatter and nest are the children it runs).
 
 use std::cell::Cell;
 use std::collections::BTreeSet;
@@ -74,6 +77,17 @@ fn main() -> ExitCode {
         Some("ro") => read_only(&args[1]),
         Some("home") => home(),
         Some("net") => network(&args[1..]),
+        Some("spawn") => spawning(),
+        Some("chatter") => {
+            for i in 0..args[1].parse::<u32>().unwrap() {
+                println!("line {}", i);
+            }
+            return ExitCode::from(5);
+        }
+        Some("nest") => {
+            let c = axiom::task::spawn("hello from a grandchild", [0, 0], None).expect("spawn");
+            println!("rstd: nest's child ended {:?}", c.join(None));
+        }
         _ => {
             threads();
             locks();
@@ -383,6 +397,69 @@ fn home() {
 }
 
 /// std::net, against the test's servers on the host (10.0.2.2).
+/// Everything sent to `ours` until the other end and all who wrote to it
+/// are gone, as text.
+fn read_out(ours: &axiom::chan::End, wait_first: Duration) -> String {
+    use axiom::Error;
+    thread::sleep(wait_first);
+    let mut text = Vec::new();
+    let mut b = [0u8; axiom::chan::MSG_MAX];
+    loop {
+        match ours.recv(&mut b) {
+            Ok(n) => text.extend_from_slice(&b[..n]),
+            Err(Error::EMPTY) => ours.wait(None).unwrap(),
+            Err(Error::PEER) => break,
+            Err(e) => panic!("recv: {:?}", e),
+        }
+    }
+    String::from_utf8_lossy(&text).into_owned()
+}
+
+fn spawning() {
+    use axiom::{chan, task};
+    let (ours, theirs) = chan::pair().expect("a channel");
+    let c = task::spawn("hello one two", [0, 0], Some(&theirs)).expect("spawn hello");
+    drop(theirs);
+    let text = read_out(&ours, Duration::ZERO);
+    let code = c.join(None);
+    println!("rstd: spawn hello {:?}, said hello {}, its arguments {}, {} bytes", code,
+             text.contains("Hello from ring 3!"), text.contains("hello: arguments: one two"), text.len());
+
+    let (ours, theirs) = chan::pair().unwrap();
+    let c = task::spawn("rstd chatter 3000", [0, 0], Some(&theirs)).expect("spawn rstd");
+    drop(theirs);
+    let text = read_out(&ours, Duration::from_millis(500)); // it waits meanwhile
+    let lines: Vec<&str> = text.lines().filter(|l| l.starts_with("line ")).collect();
+    let right = lines.len() == 3000 && lines.iter().enumerate().all(|(i, l)| *l == format!("line {}", i));
+    println!("rstd: spawn chatter {:?}, 3000 lines in order {}", c.join(None), right);
+
+    let (ours, theirs) = chan::pair().unwrap();
+    let c = task::spawn("rstd nest", [0, 0], Some(&theirs)).expect("spawn rstd nest");
+    drop(theirs);
+    let text = read_out(&ours, Duration::ZERO);
+    println!("rstd: spawn nest {:?}, the grandchild's text too {}, then its own {}", c.join(None),
+             text.contains("hello: arguments: from a grandchild"), text.contains("rstd: nest's child ended Ok(0)"));
+
+    let c = task::spawn("spin", [0, 0], None).expect("spawn spin");
+    thread::sleep(Duration::from_millis(100));
+    let early = c.join(Some(axiom::Instant::now()));
+    let killed = c.kill();
+    let t = Instant::now();
+    let after = c.join(None);
+    println!("rstd: spawn spin {:?}, killed {:?}, then {:?} in time {}", early, killed, after,
+             t.elapsed() < Duration::from_secs(5));
+    println!("rstd: spawn a name that is not there {:?}", task::spawn("nothing-here", [0, 0], None).map(|_| ()));
+
+    let (ram, free) = axiom::sys::ram();
+    let up = axiom::sys::uptime_ms();
+    println!("rstd: spawn info ram {} MiB, free some {}, uptime some {}", ram >> 20, free > 0 && free < ram,
+             up > 1000 && up < 3_600_000);
+    let vols = axiom::Files::get().and_then(|f| f.volumes()).expect("volumes");
+    let boot = vols.iter().find(|v| v.flags & axiom::files::VOL_BOOT != 0).expect("the boot volume");
+    println!("rstd: spawn the boot volume {} MiB, free some {}", boot.bytes >> 20,
+             boot.free > 0 && boot.free < boot.bytes);
+}
+
 /// TLS's server side on `port`: the kernel's, through axiom::net.
 fn tls_server(port: u16) {
     use axiom::Error;

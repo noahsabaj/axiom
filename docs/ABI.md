@@ -158,7 +158,7 @@ on a ring.
 | 6 | `SYS_THREAD_NEW` | RDI = entry, RSI = its RSP, RDX = its RDI | RAX = the thread, already running |
 | 7 | `SYS_YIELD` | | |
 | 8 | `SYS_UNMAP` | RDI = memory | its mapping goes |
-| 9 | `SYS_SPAWN` | RDI = memory, RSI = offset, RDX = bytes of `"program args"`, R10 = a handle to give or 0, R8 = a second or 0 | RAX = the task, RDX = its first thread |
+| 9 | `SYS_SPAWN` | RDI = memory, RSI = offset, EDX = bytes of `"program args"` (RDX's high dword: a channel's end for its console, or 0), R10 = a handle to give or 0, R8 = a second or 0 | RAX = the task, RDX = its first thread |
 | 10 | `SYS_CHANNEL_NEW` | | RAX, RDX = the two ends |
 | 11 | `SYS_WINDOW_NEW` | RDI = desktop, RSI = width, RDX = height, R10 = a channel's end, R8 = `WNF_*` | RAX = the window, RDX = its pixels (memory) |
 | 12 | `SYS_SOUND_NEW` | RDI = the speakers, RSI = frames | RAX = a stream, playing; RDX = its memory (`SN_*`) |
@@ -195,11 +195,21 @@ Notes:
   a reason: check the dword again.
 - **`SYS_INFO`**: `SI_CLOCK` (0) is the microseconds since 1970, from the
   RTC read at boot (taken as UTC) and kept by the TSC; `SI_CPUS` (1) is
-  the CPUs running. Anything else is `E_ARG`.
+  the CPUs running; `SI_RAM` (2) and `SI_RAM_FREE` (3) the bytes of memory
+  Axiom has and of those free; `SI_UPTIME` (4) the milliseconds since
+  power-on. Anything else is `E_ARG`.
 - **`SYS_SPAWN`**: the text is at most 255 bytes, and programs nest eight
   deep. The gifts move to the child before it runs. The child is the
-  caller's own: the caller's task handle can `RO_KILL` it, and when the
-  caller ends, so does the child.
+  caller's own: the caller's task handle can `RO_KILL` it (`RO_JOIN` on
+  its thread then says `E_KILLED`), and when the caller ends, so does the
+  child. A channel's end in RDX's high dword (`RT_CH_SEND`) takes what
+  the child writes to its console, and what the programs it starts write:
+  each `RO_WRITE` a message there, as it was written, instead of on the
+  screen and in the log. A write waits while the other end has 64 unread,
+  and is dropped once that end is gone. The kernel holds the end like a
+  handle until the child and its own have all ended, so the caller may
+  close its handle at once; the other end's `RO_RECV` then says `E_PEER`
+  when the last of them ends, once all they wrote is read.
 - **`SYS_WINDOW_NEW`**: the window sends its events from the end it is
   given (R10) to that end's peer, which the program keeps. Keep R10's
   handle open too. Closing it cuts off the window's events.
@@ -512,6 +522,10 @@ With `AW_FILES`:
 - **Read only by default**: every write is `E_READONLY` until the user
   types `vol <n> rw` in the shell. A program can't make a volume writable.
   `FV_FLAGS` says whether it is (`FVF_WRITABLE`).
+- **Space**: `RO_FS_VOLUMES` gives each volume's size (`FV_BYTES`) and
+  what is free on it (`FV_FREE`), 72 bytes a record. A FAT is read
+  through to count its free clusters the first time it is asked, then
+  kept as clusters are taken and given back.
 - **But `/Home`**: on the volume Axiom started from (`FVF_BOOT`), what is
   in `/Home` may always be written: files and folders made, written,
   renamed within it, removed. That is where a program keeps its files.

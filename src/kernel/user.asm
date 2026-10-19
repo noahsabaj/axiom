@@ -44,7 +44,11 @@
 ;  number in SB_GIFT): the main thread loads it (the boot stick is read
 ;  there alone), a child of the task that asked, which gets handles to it
 ;  and its first thread. Killing a task kills its children, and theirs; a
-;  killed task with no thread left closes its handles at once.
+;  killed task with no thread left closes its handles at once. It may also
+;  name a channel's end for the child's console: what the child, and what
+;  it starts, write goes there as messages (TK_OUT), waiting while the
+;  other end has CH_QUEUE_MAX unread, and that end hears E_PEER once they
+;  have all ended (a fleet node's job's log, say).
 ;
 ;  Neither a system call nor an interrupt saves SIMD state: nothing they run
 ;  uses SIMD (macros.inc), and the scheduler keeps each thread's. It keeps
@@ -127,7 +131,8 @@ SR_THREAD       equ 32                  ; the thread asking
 SR_RAX          equ 40                  ; what it gets back
 SR_RDX          equ 48
 SR_GIFT2        equ 56                  ; dword: a second, or 0
-SR_SIZE         equ 64
+SR_OUT          equ 64                  ; a channel's end for its console (held), or 0
+SR_SIZE         equ 72
 SPAWN_TEXT_MAX  equ 255
 SPAWN_DEPTH     equ 8                   ; programs started by programs, this deep
 SPAWN_TASK_RIGHTS equ RT_DUP | RT_GIVE | RT_INFO | RT_TASK_HANDLES | RT_TASK_KILL
@@ -674,13 +679,34 @@ futex_result:
     ret
 
 ; sys_info(EDI = SI_*) -> RAX: SI_CLOCK, microseconds since 1970 (the RTC
-; read at boot, taken as UTC, kept since by the TSC); SI_CPUS, CPUs running
+; read at boot, taken as UTC, kept since by the TSC); SI_CPUS, CPUs running;
+; SI_RAM and SI_RAM_FREE, bytes of memory and of it free; SI_UPTIME,
+; milliseconds since power-on
 sys_info:
     cmp edi, SI_CLOCK
     je .clock
     cmp edi, SI_CPUS
     je .cpus
+    cmp edi, SI_RAM
+    je .ram
+    cmp edi, SI_RAM_FREE
+    je .ram_free
+    cmp edi, SI_UPTIME
+    je .uptime
     mov rax, E_ARG
+    xor edx, edx
+    ret
+.ram:
+    mov rax, [pmm_usable_bytes]
+    xor edx, edx
+    ret
+.ram_free:
+    mov rax, [pmm_free_pages]
+    shl rax, 12
+    xor edx, edx
+    ret
+.uptime:
+    call uptime_ms
     xor edx, edx
     ret
 .clock:
@@ -714,12 +740,12 @@ h_task_kill:
 .out:
     ret
 
-; sys_spawn(EDI = memory, RSI = offset, RDX = bytes there of "program
-; arguments", RCX = a handle to give it, or 0, R8 = a second, or 0) -> RAX
-; = a handle to the task
-; it started, RDX = to its first thread (RO_JOIN for what it returns). The
-; main thread reads the file, so it does the loading; this thread waits for
-; it, and is not cut short meanwhile.
+; sys_spawn(EDI = memory, RSI = offset, EDX = bytes there of "program
+; arguments", RDX's high dword = a channel's end for what its console writes
+; (needs RT_CH_SEND), or 0; RCX = a handle to give it, or 0, R8 = a second,
+; or 0) -> RAX = a handle to the task it started, RDX = to its first thread
+; (RO_JOIN for what it returns). The main thread reads the file, so it does
+; the loading; this thread waits for it, and is not cut short meanwhile.
 sys_spawn:
     push rbx
     push r12
@@ -729,8 +755,24 @@ sys_spawn:
     mov [rbx + SR_GIFT], ecx
     mov [rbx + SR_GIFT2], r8d
     mov qword [rbx + SR_TEXT], 0
+    mov qword [rbx + SR_OUT], 0
     mov r12d, edi
     mov r13, rsi
+    mov rdi, rdx                        ; where its console goes
+    shr rdi, 32
+    jz .its_text
+    push rdx
+    mov esi, OT_CHANNEL
+    mov edx, RT_CH_SEND
+    call handle_get
+    pop rdx
+    cmp rax, E_ANY
+    jae .out
+    mov rdi, rax
+    call out_hold
+    mov [rbx + SR_OUT], rdi             ; held, until the child takes it
+.its_text:
+    mov edx, edx
     mov rax, E_ARG
     test rdx, rdx
     jz .out
@@ -814,10 +856,32 @@ sys_spawn:
 .out:
     xor edx, edx
 .back:
+    mov rdi, [rbx + SR_OUT]             ; unless the child took it
+    call out_drop
     add rsp, SR_SIZE
     pop r13
     pop r12
     pop rbx
+    ret
+
+; out_hold(RDI = a channel's end, a reference the caller gives): kept as a
+; task's console (TK_OUT), counted as a capability so that the end stays
+; open while a task writes to it. Preserves all.
+out_hold:
+    lock inc dword [rdi + OB_CAPS]
+    ret
+
+; out_drop(RDI = such an end, or 0): let go; with its last capability gone,
+; its peer hears so. Preserves all.
+out_drop:
+    test rdi, rdi
+    jz .none
+    lock dec dword [rdi + OB_CAPS]
+    jnz .put
+    call obj_orphaned
+.put:
+    jmp obj_put
+.none:
     ret
 
 ; spawn_service: on the main thread, each program a program asked for, loaded
@@ -884,7 +948,15 @@ spawn_one:
     mov eax, [rbx + SR_GIFT]
     or r8, rax
     xor r9d, r9d                        ; (a task's child: nothing granted)
+    mov rax, [rbx + SR_OUT]             ; where its console goes, for user_load
+    mov [user_out], rax
+    mov qword [rbx + SR_OUT], 0
     call user_load
+    push rdi
+    mov rdi, [user_out]                 ; not taken: it failed before its task
+    mov qword [user_out], 0
+    call out_drop
+    pop rdi
     test rax, rax
     jz .failed
     mov r12, rax                        ; the task, R13 its first thread
@@ -1600,7 +1672,8 @@ unmap_flush:
 ; h_con_write(EDI = the console, ESI = memory, RDX = offset, RCX = bytes) ->
 ; RAX = bytes: the text, as lines on the console and the serial log (needs
 ; RT_CON_WRITE, and RT_MEM_READ on the memory). Bytes below a space but
-; newlines show as dots.
+; newlines show as dots. A task with a channel for its console (TK_OUT)
+; sends it there instead, as it is, one message.
 h_con_write:
     push rbx
     push r12
@@ -1637,6 +1710,9 @@ h_con_write:
     mov rdi, rbx
     mov rsi, rax
     call cur_task                       ; where the program was run
+    mov rdx, [rax + TK_OUT]
+    test rdx, rdx
+    jnz .to_channel
     mov r11, [rax + TK_CON]
     lea rax, [con_lines]
     call con_call
@@ -1651,6 +1727,42 @@ h_con_write:
     mov rax, E_NOMEM
 .out:
     pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+.to_channel:
+    mov rdi, rdx                        ; RDI = the end, RSI = the bytes
+    mov rdx, rsi
+    mov rsi, rbx
+    call con_out
+    mov rax, r14
+    jmp .free
+
+; con_out(RDI = a task's console's channel end, RSI = text, RDX = bytes): one
+; message from it, waiting while its peer has CH_QUEUE_MAX unread; dropped
+; once the peer is gone, or the task is killed
+con_out:
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov r13, rdx
+.again:
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    call ch_post
+    cmp rax, E_FULL
+    jne .out
+    call cur_task
+    test byte [rax + TK_KILL], 1
+    jnz .out
+    mov edi, 2000
+    call thread_sleep_us
+    jmp .again
+.out:
     pop r13
     pop r12
     pop rbx
@@ -1813,6 +1925,13 @@ user_load:
     test rax, rax
     jz .nomem
     mov r14, rax
+    mov rdi, [user_out]                 ; spawn_one's: where its console goes,
+    test rdi, rdi                       ; instead of where its parent's does
+    jz .out_kept
+    mov qword [user_out], 0
+    xchg rdi, [r14 + TK_OUT]
+    call out_drop
+.out_kept:
     cmp qword [rsp + 32], 0             ; run from the shell: it writes there
     jne .written
     call con_target
@@ -2831,6 +2950,7 @@ section .bss
 alignb 8
 console_obj:    resq 1
 spawn_list:     resq 1                  ; requests for the main thread, oldest first
+user_out:       resq 1                  ; spawn_one's channel for user_load's task
 spawn_tail:     resq 1
 spawn_lock:     resd 1
 alignb 8

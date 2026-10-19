@@ -17,7 +17,7 @@ use crate::sys::*;
 
 const FS_PATH: usize = 256;
 #[cfg(feature = "alloc")]
-const FV_SIZE: usize = 64;
+const FV_SIZE: usize = 72;
 const FE_NAME: usize = 24;
 
 pub const ATTR_DIR: u32 = 1;
@@ -71,6 +71,8 @@ pub struct Volume {
     /// VOL_*
     pub flags: u32,
     pub bytes: u64,
+    /// of them free
+    pub free: u64,
     pub label: String,
 }
 
@@ -263,12 +265,13 @@ impl Files {
         Ok((0..count)
             .map(|i| {
                 let v = &raw[i * FV_SIZE..(i + 1) * FV_SIZE];
-                let label = &v[16..];
+                let label = &v[16..64];
                 let label = &label[..label.iter().position(|&b| b == 0).unwrap_or(label.len())];
                 Volume {
                     index: u32::from_le_bytes(v[0..4].try_into().unwrap()),
                     flags: u32::from_le_bytes(v[4..8].try_into().unwrap()),
                     bytes: u64::from_le_bytes(v[8..16].try_into().unwrap()),
+                    free: u64::from_le_bytes(v[64..72].try_into().unwrap()),
                     label: String::from_utf8_lossy(label).into_owned(),
                 }
             })

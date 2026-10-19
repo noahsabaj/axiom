@@ -926,11 +926,21 @@ fsq_volumes:
     mov ecx, [rdx + DK_SHIFT]
     shl rax, cl
     mov [rdi + FV_BYTES], rax
+    push r14
+    mov r14, rsi
+    call fat_free_count                 ; (read through once)
+    jnc .counted
+    xor eax, eax
+.counted:
+    mov ecx, [r14 + VF_CBYTES]
+    imul rax, rcx
+    mov [rdi + FV_FREE], rax
+    pop r14
     push rsi
     push rdi
     add rsi, VO_LABEL                   ; its label: 40 bytes at most, the
     add rdi, FV_LABEL                   ; rest zeroes
-    mov ecx, FV_SIZE - FV_LABEL
+    mov ecx, FV_FREE - FV_LABEL
     mov edx, 40
 .label:
     xor eax, eax

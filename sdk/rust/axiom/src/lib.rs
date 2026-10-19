@@ -27,6 +27,7 @@
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
+pub mod chan;
 pub mod console;
 pub mod files;
 pub mod heap;
@@ -37,6 +38,7 @@ pub mod rt;
 pub mod sound;
 pub mod sync;
 pub mod sys;
+pub mod task;
 pub mod thread;
 pub mod time;
 pub mod tls;

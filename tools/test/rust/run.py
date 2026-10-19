@@ -34,6 +34,12 @@ screen.
     a folder made, written, appended to, 256 KiB sought in, its metadata,
     listed, NotFound, removed; a thread's panic ends it, 134; a thread's
     std::process::exit ends it with that code; main's ExitCode is its own;
+  - rstd spawn (axiom::task, axiom::chan): hello started, its console to a
+    channel here, what it printed read until the channel's end, its exit
+    code; a child printing 3000 lines faster than they are read (it
+    waits), all of them in order; a grandchild's text there too; spin
+    killed (E_KILLED); a program that is not there; the memory, the
+    uptime, the boot volume's free space;
   - rstd net (std::net, on an RTL8139 on QEMU's user network, the host
     10.0.2.2): to an echo server here, 200 KB written by one thread and read
     back whole by another (try_clone), its addresses, peek, a read's
@@ -356,6 +362,7 @@ def script_std():
         "type rstd panic\\n", "until run: RSTD exited", "wait 0.3",
         "type rstd exit\\n", "until run: RSTD exited", "wait 0.3",
         "type rstd code\\n", "until run: RSTD exited", "wait 0.5",
+        "type rstd spawn\\n", "until rstd: spawn the boot volume", "wait 0.5",
     ]
 
 
@@ -453,6 +460,21 @@ def check_std(log):
     result(has("rstd: a thread exits") and has("run: RSTD exited with 7") and not has("rstd: still here"),
            "rstd exit: std::process::exit from a thread ends the program, 7")
     result(has("run: RSTD exited with 3"), "rstd code: main's ExitCode, 3")
+    for line, what in [
+        ("rstd: spawn hello Ok(0), said hello true, its arguments true",
+         "hello started, its console to a channel of ours, its exit code"),
+        ("rstd: spawn chatter Ok(5), 3000 lines in order true",
+         "3000 lines faster than they are read: the child waits, nothing lost"),
+        ("rstd: spawn nest Ok(0), the grandchild's text too true, then its own true",
+         "a grandchild writes to the same channel; its end comes after both"),
+        ("rstd: spawn spin Err(Error(-9: timed out)), killed Ok(()), then Ok(-12) in time true",
+         "join's deadline; kill; then join says E_KILLED"),
+        ("rstd: spawn a name that is not there Err(", "a program that is not there"),
+        ("rstd: spawn info ram ", "SYS_INFO's memory"),
+        ("free some true, uptime some true", "SYS_INFO's free memory and uptime"),
+        ("rstd: spawn the boot volume 62 MiB, free some true", "a volume's free space (FV_FREE)"),
+    ]:
+        result(has(line), f"rstd spawn: {what}")
     panics = log.count("panicked")
     result(panics == 1, f"rstd: no panic but the one asked for ({panics})")
     for line in log.splitlines():

@@ -152,7 +152,8 @@ FV_INDEX        EQU 0  ; a volume (RO_FS_VOLUMES): dword, its n in "vol<n>:"
 FV_FLAGS        EQU 4  ; dword FVF_*
 FV_BYTES        EQU 8  ; its size
 FV_LABEL        EQU 16  ; its name, NUL-ended
-FV_SIZE         EQU 64
+FV_FREE         EQU 64  ; bytes free on it
+FV_SIZE         EQU 72
 FVF_WRITABLE    EQU 1  ; 'vol <n> rw' was said
 FVF_REMOVABLE   EQU 2  ; a stick, a card
 FVF_BOOT        EQU 4  ; the stick Axiom started from
@@ -251,7 +252,7 @@ SYS_EVENT_NEW   EQU 5  ; -> an event
 SYS_THREAD_NEW  EQU 6  ; (entry, RSP, RDI) -> a thread, started
 SYS_YIELD       EQU 7
 SYS_UNMAP       EQU 8  ; (memory): its mapping goes
-SYS_SPAWN       EQU 9  ; (memory, offset, bytes of "program args",
+SYS_SPAWN       EQU 9  ; (memory, offset, bytes of "program args"
 SYS_CHANNEL_NEW EQU 10  ; -> RAX, RDX = the two ends of a channel
 SYS_WINDOW_NEW  EQU 11  ; (desktop, width, height, a channel's end,
 SYS_SOUND_NEW   EQU 12  ; (the speakers, frames) -> RAX = a stream
@@ -263,6 +264,9 @@ SYS_COUNT       EQU 17
 EXIT_TASK       EQU 1  ; SYS_EXIT: the whole task ends
 SI_CLOCK        EQU 0  ; microseconds since 1970, by the RTC (as UTC)
 SI_CPUS         EQU 1  ; CPUs running
+SI_RAM          EQU 2  ; bytes of memory Axiom has
+SI_RAM_FREE     EQU 3  ; of those, bytes free
+SI_UPTIME       EQU 4  ; milliseconds since power-on
 SN_WRITE        EQU 0  ; dword: frames written, in all (the program's)
 SN_READ         EQU 4  ; dword: frames taken to play, in all
 SN_FRAMES       EQU 8  ; dword: the ring's, a power of two

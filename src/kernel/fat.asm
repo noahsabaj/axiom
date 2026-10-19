@@ -24,6 +24,8 @@ VF_HINT         equ VO_FAT + 48         ; where to look for a free cluster
 VF_CWD          equ VO_FAT + 52         ; current directory's cluster
 VF_PATH         equ VO_FAT + 64         ; and its path, 256 bytes
 VF_SERIAL       equ VO_FAT + 320        ; the volume serial number
+VF_FREE         equ VO_FAT + 324        ; free clusters, once counted
+VF_FREE_OK      equ VO_FAT + 328        ; byte: they were (fat_free_count)
 
 FAT_EOC         equ 0x0FFFFFFF
 FAT_FILE_MAX    equ 64 * 1024           ; what cat and the shell move at once
@@ -129,6 +131,7 @@ fat_mount:
     mov [r14 + VF_CWD], eax
     mov dword [r14 + VF_HINT], 2
     mov dword [r14 + VF_FSINFO], 0
+    mov byte [r14 + VF_FREE_OK], 0
     movzx eax, word [rbx + 48]          ; FSInfo: where free clusters start
     test eax, eax
     jz .path
@@ -290,8 +293,21 @@ fat_set:
     lea rcx, [fc_buf]
     add rcx, rdx
     mov eax, [rcx]
-    and eax, 0xF0000000                 ; the top four bits are not ours
     and esi, 0x0FFFFFFF
+    cmp byte [r14 + VF_FREE_OK], 0      ; free clusters, as they change
+    je .kept
+    test eax, 0x0FFFFFFF
+    jnz .was_used
+    test esi, esi
+    jz .kept
+    dec dword [r14 + VF_FREE]
+    jmp .kept
+.was_used:
+    test esi, esi
+    jnz .kept
+    inc dword [r14 + VF_FREE]
+.kept:
+    and eax, 0xF0000000                 ; the top four bits are not ours
     or eax, esi
     mov [rcx], eax
     mov byte [fc_dirty], 1
@@ -381,6 +397,43 @@ fat_alloc:
 .out:
     pop rsi
     pop rcx
+    ret
+
+; fat_free_count(R14) -> EAX = its free clusters; CF on a disk error. The
+; FAT is read through once, the first time; fat_set keeps the count after.
+; Preserves others.
+fat_free_count:
+    cmp byte [r14 + VF_FREE_OK], 0
+    jne .known
+    push rcx
+    push rdx
+    xor edx, edx
+    mov ecx, 2
+.each:
+    cmp ecx, [r14 + VF_MAXCL]
+    ja .counted
+    mov eax, ecx
+    call fat_get
+    jc .failed
+    test eax, eax
+    jnz .used
+    inc edx
+.used:
+    inc ecx
+    jmp .each
+.counted:
+    mov [r14 + VF_FREE], edx
+    mov byte [r14 + VF_FREE_OK], 1
+    pop rdx
+    pop rcx
+.known:
+    mov eax, [r14 + VF_FREE]
+    clc
+    ret
+.failed:
+    pop rdx
+    pop rcx
+    stc
     ret
 
 ; fat_free_chain(R14, EAX = first cluster) -> CF. Preserves all but RAX.

@@ -182,7 +182,15 @@ fn main() -> axiom::Result<()> { /* ... */ Ok(()) }
   Paths are `vol<n>:/a/b`. A read or a write is 16 MiB at most; a volume
   is written only after the user says `vol <n> rw` in the shell
   (`Error::READONLY` until then), but for what is in `home()`, the boot
-  volume's `/Home`, which may always be written.
+  volume's `/Home`, which may always be written. A `Volume` says its
+  `bytes` and how many are `free`.
+- **`axiom::task`**: `spawn(text, gifts, out)` starts another program
+  (`"hello one two"`, or a path to an .AXE on the boot volume), a child
+  of this one given up to two handles; `Child::join(until)` (its exit
+  code), `kill()`. With `out` (an `axiom::chan::End`), what it and what
+  it starts print comes to the other end of that channel, a message a
+  write, and the end says `Error::PEER` once they have all ended.
+- **`axiom::chan`**: `pair()`, an `End`'s `send`, `recv`, `wait(until)`.
 - **`axiom::Stream`** (`axiom::sound`), with `wants::SOUND`: `open(frames)`
   (a ring of that many, a power of two from 1024 to 65536), `room()`,
   `write(&[Frame])` and `write_with(n, |i| frame)` (as many as fit, ->
@@ -197,7 +205,7 @@ fn main() -> axiom::Result<()> { /* ... */ Ok(()) }
 - **`axiom::thread`** (without std): `spawn(f, arg, stack)` for an `extern
   "C" fn(usize)`, `join()`; each thread with its own stack, thread-local
   block and ring. `axiom::sys::futex_wait`, `futex_wake`, `clock_us()`
-  (the wall clock), `cpus()`.
+  (the wall clock), `cpus()`, `ram()` (bytes, and free), `uptime_ms()`.
 - **`axiom::Heap`**: the global allocator. A program maps 128 blocks at
   most at once, so the heap takes few: arenas from 1 MiB, each twice the
   last, to 64 MiB; slots of 40 sizes up to 32 KiB, pages beyond, grown in

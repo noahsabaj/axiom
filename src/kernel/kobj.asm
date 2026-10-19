@@ -66,6 +66,12 @@ task_new:
     call obj_get
     mov rax, [r12 + TK_CON]             ; it writes where its parent does
     mov [rbx + TK_CON], rax
+    mov rdi, [r12 + TK_OUT]             ; and to its channel, if it has one
+    test rdi, rdi
+    jz .made
+    call obj_get
+    call out_hold
+    mov [rbx + TK_OUT], rdi
 .made:
     mov rax, rbx
     jmp .out
@@ -82,6 +88,7 @@ task_new:
 task_destroy:
     push r12
     mov r12, rdi
+    call task_quiet
     call cap_drop_all
     mov rdi, [r12 + TK_LX]              ; a Linux process's state (linux.asm)
     test rdi, rdi
@@ -114,6 +121,7 @@ task_hold:
 task_release:
     lock dec dword [rdi + TK_THREADS]
     jnz obj_put
+    call task_quiet                     ; no thread writes to its channel now
     test byte [rdi + TK_KILL], 1        ; killed: no thread will act for it again
     jnz .end
     cmp dword [rdi + OB_CAPS], 0
@@ -121,6 +129,19 @@ task_release:
 .end:
     call task_end                       ; its last thread, and no handle to it
     jmp obj_put
+
+; task_quiet(RDI = a task no thread acts for): its console's channel let go
+; (TK_OUT). Preserves all.
+task_quiet:
+    push rax
+    push rdi
+    xor eax, eax
+    xchg rax, [rdi + TK_OUT]
+    mov rdi, rax
+    call out_drop
+    pop rdi
+    pop rax
+    ret
 
 ; task_orphan(RDI): the last handle to a task went (its TY_ORPHAN)
 task_orphan:

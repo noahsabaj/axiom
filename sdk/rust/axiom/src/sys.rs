@@ -26,9 +26,13 @@ pub const SYS_INFO: u64 = 16;
 
 /// SYS_EXIT's second: the whole task ends, from any thread.
 pub const EXIT_TASK: u64 = 1;
-/// SYS_INFO's: microseconds since 1970 (the RTC's, as UTC); CPUs running.
+/// SYS_INFO's: microseconds since 1970 (the RTC's, as UTC); CPUs running;
+/// bytes of memory, and of it free; milliseconds since power-on.
 pub const SI_CLOCK: u64 = 0;
 pub const SI_CPUS: u64 = 1;
+pub const SI_RAM: u64 = 2;
+pub const SI_RAM_FREE: u64 = 3;
+pub const SI_UPTIME: u64 = 4;
 
 // what a ring entry asks for (RO_*)
 pub const RO_NOP: u8 = 0;
@@ -331,6 +335,18 @@ pub fn clock_us() -> u64 {
 /// CPUs running.
 pub fn cpus() -> usize {
     (unsafe { syscall(SYS_INFO, SI_CPUS, 0, 0, 0, 0) }.0).max(1) as usize
+}
+
+/// Bytes of memory Axiom has, and of those, free.
+pub fn ram() -> (u64, u64) {
+    let all = unsafe { syscall(SYS_INFO, SI_RAM, 0, 0, 0, 0) }.0.max(0) as u64;
+    let free = unsafe { syscall(SYS_INFO, SI_RAM_FREE, 0, 0, 0, 0) }.0.max(0) as u64;
+    (all, free)
+}
+
+/// Milliseconds since the machine was switched on.
+pub fn uptime_ms() -> u64 {
+    unsafe { syscall(SYS_INFO, SI_UPTIME, 0, 0, 0, 0) }.0.max(0) as u64
 }
 
 /// Others run first.

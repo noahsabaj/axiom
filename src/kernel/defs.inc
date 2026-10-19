@@ -242,6 +242,10 @@ TK_LX           equ 128                 ; a Linux process: its state (linux.asm)
 TK_CON          equ 136                 ; the terminal its console writes go to
                                         ; (0: the first); its children's too
 TK_CODE         equ 144                 ; what its first thread returns, by EXIT_TASK
+TK_OUT          equ 152                 ; a channel's end its console writes go to
+                                        ; instead, a message each (counted as a
+                                        ; capability), until its last thread ends;
+                                        ; its children's too; or 0
 TK_SIZE         equ 192
 
 ; a slot of a handle table; a handle is (HS_GEN << 16) | its index, never 0
@@ -497,7 +501,8 @@ FV_INDEX        equ 0                   ; a volume (RO_FS_VOLUMES): dword, its n
 FV_FLAGS        equ 4                   ; dword FVF_*
 FV_BYTES        equ 8                   ; its size
 FV_LABEL        equ 16                  ; its name, NUL-ended
-FV_SIZE         equ 64
+FV_FREE         equ 64                  ; bytes free on it
+FV_SIZE         equ 72
 FVF_WRITABLE    equ 1                   ; 'vol <n> rw' was said
 FVF_REMOVABLE   equ 2                   ; a stick, a card
 FVF_BOOT        equ 4                   ; the stick Axiom started from
@@ -722,9 +727,11 @@ SYS_EVENT_NEW   equ 5                   ; -> an event
 SYS_THREAD_NEW  equ 6                   ; (entry, RSP, RDI) -> a thread, started
 SYS_YIELD       equ 7
 SYS_UNMAP       equ 8                   ; (memory): its mapping goes
-SYS_SPAWN       equ 9                   ; (memory, offset, bytes of "program args",
-                                        ; a handle to give it or 0, a second or 0)
-                                        ; -> RAX = the task, RDX = its first thread
+SYS_SPAWN       equ 9                   ; (memory, offset, bytes of "program args"
+                                        ; | a channel's end << 32 for what its
+                                        ; console writes, or 0; a handle to give
+                                        ; it or 0, a second or 0) -> RAX = the
+                                        ; task, RDX = its first thread
 SYS_CHANNEL_NEW equ 10                  ; -> RAX, RDX = the two ends of a channel
 SYS_WINDOW_NEW  equ 11                  ; (desktop, width, height, a channel's end,
                                         ; the window's events come to its peer
@@ -747,6 +754,9 @@ SYS_COUNT       equ 17
 EXIT_TASK       equ 1                   ; SYS_EXIT: the whole task ends
 SI_CLOCK        equ 0                   ; microseconds since 1970, by the RTC (as UTC)
 SI_CPUS         equ 1                   ; CPUs running
+SI_RAM          equ 2                   ; bytes of memory Axiom has
+SI_RAM_FREE     equ 3                   ; of those, bytes free
+SI_UPTIME       equ 4                   ; milliseconds since power-on
 
 ; a stream's memory (SYS_SOUND_NEW): this header, then SN_FRAMES frames at
 ; SN_DATA, each a left and a right sample, 16 bits signed, SN_RATE a second.
