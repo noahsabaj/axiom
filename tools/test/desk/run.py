@@ -221,10 +221,12 @@ def script():
         f"abs {at(*MARK)} left", "wait 0.3", "sendkey right", "wait 0.3",
         "sendkey up", "wait 0.3", "sendkey ret", "until desk: shell 5 closes", "wait 0.5",
         # Help's Find an App (the mark's, left, round the end): the launcher,
-        # what is typed run in a new shell; File's Close Window closes it
+        # what is typed run in a new shell; File's Close Window closes it.
+        # Typed on the keyboard: the serial port is read only as the main
+        # loop wakes, so its text could come after the enter key
         f"abs {at(*MARK)} left", "wait 0.3", "sendkey left", "wait 0.3",
         "sendkey down", "wait 0.3", "sendkey ret", "wait 0.5",
-        "type echo launched", "wait 0.5", "shot build/test/desk/launcher.png",
+        "press echo launched", "wait 0.5", "shot build/test/desk/launcher.png",
         "sendkey ret", "until desk: shell 6 opens", "wait 1",
         f"abs {at(*MARK)} left", "wait 0.3", "sendkey right", "wait 0.3",
         "sendkey up", "wait 0.3", "sendkey ret", "until desk: shell 6 closes", "wait 0.5",

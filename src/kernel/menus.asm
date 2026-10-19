@@ -33,6 +33,7 @@ MS_CHECK        equ 2                   ; ticked
 MN_MAX          equ 48                  ; items in the open menu
 MN_TEXT         equ 512                 ; labels made for it as it opens
 MN_QUERY        equ 40                  ; what the launcher is asked, at most
+MN_BLINK_MS     equ 70                  ; an item chosen: off this long, then on
 
 BT_MARK         equ 0                   ; the bar's titles, left to right
 BT_APP          equ 1                   ; (the app's name: not a menu)
@@ -651,6 +652,33 @@ mn_open:
     pop rbx
     ret
 
+; mn_close_fade: the open menu closed, fading away. Preserves all.
+mn_close_fade:
+    cmp qword [mn_which], -1
+    je .out
+    push rax
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    call mn_area                        ; as it is on the screen, below the
+    mov rax, [m_bar_h]                  ; bar (which changes at once)
+    cmp rsi, rax
+    jge .below
+    add rcx, rsi
+    sub rcx, rax
+    mov rsi, rax
+.below:
+    call mv_fade
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rax
+    call mn_close
+.out:
+    ret
+
 ; mn_close: the open menu, closed. Preserves all.
 mn_close:
     cmp qword [mn_which], -1
@@ -673,18 +701,100 @@ mn_refill:
     call mn_step
     jmp mn_damage
 
-; mn_do(RAX = an item): the menu closed, then what the item does
+; mn_do(RAX = an item): chosen: it blinks (mn_motion), then the menu
+; closes and the item does what it does
 mn_do:
+    call mv_on
+    jz mn_done
+    mov [mn_blink], rax
+    mov qword [mn_hot], -1
+    push rax
+    RDTSC64
+    mov [mn_blink_t0], rax
+    pop rax
+    call mn_damage
+    jmp mv_kick
+
+; mn_done(RAX = an item): the menu closed, fading; then what the item does
+mn_done:
+    mov qword [mn_blink], -1
     imul rax, rax, MI_SIZE
     lea rcx, [mn_items]
     add rax, rcx
     mov rcx, [rax + MI_DO]
     mov rdi, [rax + MI_ARG]
-    call mn_close
+    call mn_close_fade
     test rcx, rcx
     jz .out
     jmp rcx
 .out:
+    ret
+
+; mn_motion -> EAX = 1 while an item chosen blinks: off a moment, on a
+; moment, then done (motion_service's step)
+mn_motion:
+    mov rax, [mn_blink]
+    cmp rax, -1
+    je .still
+    mov rax, [mv_now]
+    sub rax, [mn_blink_t0]
+    xor edx, edx
+    div qword [tsc_per_ms]
+    mov ecx, [mv_scale]
+    imul ecx, ecx, MN_BLINK_MS
+    jecxz .done                         ; (motion turned off)
+    xor edx, edx
+    div rcx                             ; RAX: the phase
+    cmp rax, 2
+    jae .done
+    mov rdx, -1                         ; off, then on
+    test rax, rax
+    jz .hot
+    mov rdx, [mn_blink]
+.hot:
+    cmp rdx, [mn_hot]
+    je .going
+    mov [mn_hot], rdx
+    call mn_damage
+.going:
+    mov eax, 1
+    ret
+.done:
+    mov rax, [mn_blink]
+    mov [mn_hot], rax
+    push rbx
+    call mn_done
+    pop rbx
+.still:
+    xor eax, eax
+    ret
+
+; mn_blinking -> CF if an item chosen blinks still: then it is done at
+; once (the keys and the pointer are for what comes after). Preserves all.
+mn_blinking:
+    cmp qword [mn_blink], -1
+    je .no
+    push rax
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    mov rax, [mn_blink]
+    call mn_done
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rax
+.no:
     ret
 
 ; mn_usable(RAX = an item) -> CF if it may not be chosen: a line, a note,
@@ -1526,6 +1636,7 @@ mn_paint_query:
 ; on the bar, a title opens its menu (or closes it, open); in an open
 ; menu, nothing until it is let go; elsewhere an open menu closes.
 mn_press:
+    call mn_blinking
     mov rdi, [ptr_x]
     mov rsi, [ptr_y]
     cmp rsi, [m_bar_h]
@@ -1534,7 +1645,7 @@ mn_press:
     jc .bar
     cmp rax, [mn_which]
     jne .open
-    call mn_close
+    call mn_close_fade
     stc
     ret
 .open:
@@ -1542,7 +1653,7 @@ mn_press:
     stc
     ret
 .bar:
-    call mn_close
+    call mn_close_fade
     stc
     ret
 .below:
@@ -1550,7 +1661,7 @@ mn_press:
     je .not
     call mn_inside
     jnc .ours
-    call mn_close
+    call mn_close_fade
 .ours:
     stc
     ret
@@ -1563,6 +1674,8 @@ mn_press:
 mn_release:
     cmp qword [mn_which], -1
     je .out
+    cmp qword [mn_blink], -1            ; (chosen already)
+    jne .out
     cmp edx, 1
     jne .out
     push rdx
@@ -1581,6 +1694,8 @@ mn_release:
 mn_hover:
     cmp qword [mn_which], -1
     je .out
+    cmp qword [mn_blink], -1            ; chosen: it blinks, as it is
+    jne .out
     mov rdi, [ptr_x]
     mov rsi, [ptr_y]
     cmp rdi, [mn_px]                    ; only if it moved: a pointer left
@@ -1612,8 +1727,13 @@ mn_hover:
 ; mn_key(EAX = key code): the open menu's: Esc, Enter, the arrows; the
 ; launcher's, what is typed too
 mn_key:
+    cmp qword [mn_blink], -1            ; one chosen blinks: done at once,
+    je .keys                            ; and the key for what comes after
+    call mn_blinking
+    jmp desk_key
+.keys:
     cmp eax, 27
-    je mn_close
+    je mn_close_fade
     cmp eax, 10
     je .enter
     cmp eax, 13
@@ -1879,6 +1999,7 @@ mn_which:       dq -1                   ; the open menu (BT_*), -1 none
 mn_hot:         dq -1                   ; its item chosen
 mn_px:          dq -1                   ; the pointer when last seen
 mn_py:          dq -1
+mn_blink:       dq -1                   ; an item chosen, blinking
 
 ; the menus
 mn_axiom:
@@ -2037,6 +2158,7 @@ st_due:        resq 1                  ; st_tick: when next,
 st_seen:        resq 1                  ; and what it saw
 alignb 8
 mn_gl:          resb GL_SIZE            ; the open menu's glass
+mn_blink_t0:    resq 1                  ; when it was chosen
 st_pts:         resd 2 * POLY_MAX
 mn_ink:         resd 1
 mn_text:        resb MN_TEXT

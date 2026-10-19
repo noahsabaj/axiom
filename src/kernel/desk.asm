@@ -55,7 +55,8 @@ WN_ZY           equ WN_ZX + 8
 WN_ZW           equ WN_ZX + 16
 WN_ZH           equ WN_ZX + 24
 WN_FOCUSED      equ WN_ZX + 32          ; when it last took the keys (a count)
-WN_SIZE         equ WN_ZX + 40
+WN_INKED        equ WN_ZX + 40          ; byte: its owner has drawn in it
+WN_SIZE         equ WN_ZX + 48
 
 WF_SHOWN        equ 1 << 0              ; not minimised
 WF_CLOSE        equ 1 << 1              ; it has a close button
@@ -64,6 +65,7 @@ WF_CLOSING      equ 1 << 3              ; it goes at the next desk_service
 WF_PROGRAM      equ 1 << 4              ; a program's (its pixels are not ours)
 WF_ZOOMED       equ 1 << 5              ; it fills the screen (WN_Z* is where it was)
 WF_AWAY         equ 1 << 6              ; put away: not on the screen, not in the dock
+WF_ANIM         equ 1 << 7              ; moving: motion.asm draws it (or its place in the dock)
 
 OP_PAINT        equ 0                   ; RBX = window: draw the whole client
 OP_KEY          equ 8                   ; RBX, EAX = key code
@@ -470,6 +472,7 @@ win_new:
 .seen:
     mov rdi, rbx
     call win_damage_whole
+    call mv_open                        ; growing into place
     call desk_bar_damage
     mov byte [dock_dirty], 1
     mov rax, rbx
@@ -680,6 +683,7 @@ win_client:
 ; win_damage(RDI = window, RSI = x, RDX = y, RCX = w, R8 = h in the client):
 ; that part changed. Any thread. Preserves all.
 win_damage:
+    mov byte [rdi + WN_INKED], 1
     test dword [rdi + WN_FLAGS], WF_SHOWN
     jz .out
     push rdi
@@ -814,6 +818,18 @@ win_set_rect:
 win_zoom:
     test dword [rdi + WN_FLAGS], WF_RESIZE
     jz .out
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    mov rbx, rdi
+    call win_outer                      ; R12..R15: the window where it was
+    mov r12, rdi
+    mov r13, rsi
+    mov r14, rdx
+    mov r15, rcx
+    mov rdi, rbx
     test dword [rdi + WN_FLAGS], WF_ZOOMED
     jnz .back
     mov rax, [rdi + WN_X]               ; where it was
@@ -831,14 +847,26 @@ win_zoom:
     mov r8, [m_work_y1]
     sub r8, rdx
     sub r8, [fr_t]
-    jmp win_set_rect
+    jmp .set
 .back:
     and dword [rdi + WN_FLAGS], ~WF_ZOOMED
     mov rsi, [rdi + WN_ZX]
     mov rdx, [rdi + WN_ZY]
     mov rcx, [rdi + WN_ZW]
     mov r8, [rdi + WN_ZH]
-    jmp win_set_rect
+.set:
+    call win_set_rect
+    mov rdi, rbx                        ; from there to here
+    mov rsi, r12
+    mov rdx, r13
+    mov rcx, r14
+    mov r8, r15
+    call mv_zoom
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
 .out:
     ret
 
@@ -928,6 +956,13 @@ win_focus:
     mov [rdi + WN_FOCUSED], rax
     test dword [rdi + WN_FLAGS], WF_SHOWN
     jnz .shown
+    test dword [rdi + WN_FLAGS], WF_AWAY
+    jnz .appear
+    call mv_back                        ; out of its place in the dock
+    jmp .show
+.appear:
+    call mv_open                        ; or growing into place
+.show:
     or dword [rdi + WN_FLAGS], WF_SHOWN
     and dword [rdi + WN_FLAGS], ~WF_AWAY
     push rdi
@@ -981,6 +1016,7 @@ win_minimise:
     jz .out
     call win_damage_whole
     call win_thumb
+    call mv_minimise                    ; into its place there
     and dword [rdi + WN_FLAGS], ~WF_SHOWN
     mov byte [dock_dirty], 1
     cmp rdi, [desk_focus]
@@ -1001,6 +1037,7 @@ win_minimise:
 win_put_away:
     test dword [rdi + WN_FLAGS], WF_SHOWN
     jz .away
+    call mv_close                       ; shrinking away
     call win_damage_whole
 .away:
     and dword [rdi + WN_FLAGS], ~WF_SHOWN
@@ -1133,6 +1170,9 @@ desk_service:
 
 ; win_destroy(RBX = window): its owner lets go, then it goes
 win_destroy:
+    mov rdi, rbx                        ; shrinking away, from its picture now
+    call mv_close
+    call mv_forget                      ; (and nothing of it moves on)
     mov rax, [rbx + WN_OPS]
     mov rax, [rax + OP_CLOSE]
     test rax, rax
@@ -1798,6 +1838,8 @@ desk_compose:
     mov rdi, [rax + rbx * 8]
     test dword [rdi + WN_FLAGS], WF_SHOWN
     jz .next
+    test dword [rdi + WN_FLAGS], WF_ANIM ; moving: drawn as it moves
+    jnz .next
     push rdi
     call win_extent                     ; does it reach the rectangle?
     lea rax, [rdi + rdx]
@@ -1821,6 +1863,8 @@ desk_compose:
     inc rbx
     jmp .window
 .dock:
+    mov edi, MVL_WINS                   ; what moves over the windows
+    call motion_paint
     DS_LAP DS_WINS
     lea rax, [r13 + r15]                ; the dock, if it is in it
     cmp rax, [m_dock_y]
@@ -1828,12 +1872,16 @@ desk_compose:
     call dock_paint
 .tip:
     call tip_paint
+    mov edi, MVL_TOP                    ; what moves over the dock
+    call motion_paint
     DS_LAP DS_DOCK
     cmp r13, [m_bar_h]                  ; the menu bar
     jge .menu
     call bar_paint
 .menu:
     call mn_paint                       ; an open menu, over all
+    mov edi, MVL_MENU                   ; and a menu fading
+    call motion_paint
     DS_LAP DS_BAR
 .shown:
     call gfx_target_back                ; the clip off again
@@ -2863,6 +2911,12 @@ dock_paint:
     mov r9d, 90
     call gfx_fill_a
 .icon:
+    cmp dword [r12 + DI_KIND], DK_MIN   ; a window going in or coming out:
+    jne .picture                        ; it is drawn as it moves
+    mov rax, [r12 + DI_WIN]
+    test dword [rax + WN_FLAGS], WF_ANIM
+    jnz .next
+.picture:
     mov rdx, [r12 + DI_ICON]
     cmp qword [rdx + SF_PTR], 0
     je .dot
@@ -3002,6 +3056,57 @@ dock_at:
 .out:
     pop rdx
     pop rcx
+    ret
+
+; dock_spot(RDI = a window) -> RDI x, RSI y, RDX w, RCX h: its picture in
+; the dock, minimised; CF if it is not there. Preserves others but RAX.
+dock_spot:
+    push r8
+    xor ecx, ecx
+    lea r8, [dock_items]
+.each:
+    cmp rcx, [dock_n]
+    jae .none
+    cmp dword [r8 + DI_KIND], DK_MIN
+    jne .next
+    cmp [r8 + DI_WIN], rdi
+    je .found
+.next:
+    add r8, DI_SIZE
+    inc rcx
+    jmp .each
+.found:
+    mov rax, [r8 + DI_ICON]             ; its size, centred in its place
+    mov rdx, [rax + SF_W]
+    mov rcx, [rax + SF_H]
+    test rdx, rdx
+    jz .square
+    test rcx, rcx
+    jnz .sized
+.square:
+    mov rdx, [m_icon]
+    mov rcx, rdx
+.sized:
+    mov rdi, [m_icon]
+    sub rdi, rdx
+    sar rdi, 1
+    add rdi, [r8 + DI_X]
+    mov rsi, [m_icon]
+    sub rsi, rcx
+    sar rsi, 1
+    add rsi, [m_dock_y]
+    add rsi, [m_dock_pad]
+    pop r8
+    clc
+    ret
+.none:
+    pop r8
+    stc
+    ret
+
+; dock_motion -> EAX = 1 if the dock moves on (motion_service's step)
+dock_motion:
+    xor eax, eax
     ret
 
 ; dock_click(RAX = an item): what it is for

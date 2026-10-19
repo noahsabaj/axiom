@@ -1989,7 +1989,8 @@ commands:
     VERB    'set',      cmd_set,      'set [name [value...]]: every variable ($name), one removed, or one set'
     COMMAND 'shell',    cmd_shell,    'a new shell, in a window of its own'
     COMMAND 'screen',   cmd_screen,   "what this shell's window shows, as text, to the serial log"
-    COMMAND 'win',      cmd_win,      'win [move <n> <x> <y> | size <n> <w> <h> | raise <n> | min <n> | zoom <n> | close <n>]: the windows'
+    COMMAND 'win',      cmd_win,      'win [move <n> <x> <y> | size <n> <w> <h> | raise <n> | min <n> | zoom <n> | close <n> | speed]: the windows'
+    COMMAND 'motion',   cmd_motion,   'motion [on | off | slow]: windows, the dock and menus moving (slow: ten times slower)'
     THING   'theme',    themes_actions, 'how the desktop looks: light or dark, its accent, its scale'
     COMMAND 'info',     cmd_info,     'what this machine is'
     VERB    'cpus',     cmd_cpus,     'each logical CPU: kind, core, clock, heat, work'

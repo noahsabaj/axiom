@@ -181,6 +181,7 @@ main_loop:
 .refresh:
     call desk_service                   ; windows closing go
     call term_service                   ; what was printed, drawn
+    call motion_service                 ; what moves, a step on
     call desk_update                    ; and what changed, shown
     RDTSC64
     cmp rax, [next_refresh]
@@ -269,6 +270,7 @@ main_loop:
     cmp rcx, rax
     cmovb rax, rcx
 .armed:
+    call motion_deadline                ; the next step of what moves
     call net_deadline                   ; DHCP, ARP, ping, polling
     mov rdi, rax
     call thread_park_until
