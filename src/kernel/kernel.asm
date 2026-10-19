@@ -119,6 +119,7 @@ section .text
 %include "ui.asm"
 %include "shell.asm"
 %include "theme.asm"
+%include "wall.asm"
 %include "draw.asm"
 %include "icons.asm"
 %include "look.asm"

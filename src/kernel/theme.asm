@@ -12,8 +12,7 @@
 ;  as 1280x800 points, and a 1920x1080 one at 1.25 pixels a point. pt()
 ;  turns points into pixels. Measures in this file and desk.asm are points.
 ;
-;  The wallpaper is made, not stored: a gradient and soft light over it,
-;  computed at a quarter of the size, then drawn smooth and dithered.
+;  The wallpaper is in wall.asm.
 ;
 ;  In the shell, 'theme' is a thing: theme (as it is), theme dark, theme
 ;  light, theme accent <name>, theme scale <1..2 in quarters: 4..8>.
@@ -21,19 +20,6 @@
 
 ; TH_* and the colors' names, TC_*, are in defs.inc: programs see them
 ; in the look (LK_C)
-
-; the wallpaper: a gradient top to bottom, and WALL_BLOBS soft lights
-WALL_BLOBS      equ 5
-WB_X            equ 0                   ; its centre, thousandths of the width,
-WB_Y            equ 4                   ; and of the height
-WB_R            equ 8                   ; its reach, thousandths of the width
-WB_COLOR        equ 12
-WB_A            equ 16                  ; 0..256 at its centre
-WB_SIZE         equ 20
-WL_TOP          equ 0
-WL_BOTTOM       equ 4
-WL_BLOBS        equ 8
-WL_SIZE         equ WL_BLOBS + WALL_BLOBS * WB_SIZE
 
 ACCENTS         equ 8
 
@@ -141,271 +127,6 @@ theme_apply:
     jmp look_update                     ; and programs told
 
 ; -----------------------------------------------------------------------------
-;  The wallpaper, into wall_sf (the screen's size)
-; -----------------------------------------------------------------------------
-wall_make:
-    push rbx
-    push rbp
-    push r12
-    push r13
-    push r14
-    push r15
-    lea rdi, [wall_sf]
-    mov rsi, [scr_w]
-    mov rdx, [scr_h]
-    call sf_size
-    jc .out
-    ; the grid: a point every 4 pixels, and one past the edge
-    mov rax, [scr_w]
-    shr rax, 2
-    add rax, 2
-    mov [wall_gw], rax
-    mov rcx, [scr_h]
-    shr rcx, 2
-    add rcx, 2
-    mov [wall_gh], rcx
-    imul rax, rcx
-    imul rax, rax, 12                   ; 3 dwords a point: R, G, B in 8.8
-    mov rdi, rax
-    call vm_alloc
-    test rax, rax
-    jz .out
-    mov [wall_grid], rax
-    lea rbx, [wall_dark]
-    cmp byte [th_mode], TH_LIGHT
-    jne .params
-    lea rbx, [wall_light]
-.params:
-    cvtsi2ss xmm8, qword [scr_w]
-    cvtsi2ss xmm9, qword [scr_h]
-    mov r15, [wall_grid]
-    xor r13d, r13d                      ; gy
-.gy:
-    cmp r13, [wall_gh]
-    jae .grid_done
-    xor r12d, r12d                      ; gx
-.gx:
-    cmp r12, [wall_gw]
-    jae .gy_next
-    ; the point, in pixels
-    mov rax, r12
-    shl rax, 2
-    cvtsi2ss xmm6, rax                  ; x
-    mov rax, r13
-    shl rax, 2
-    cvtsi2ss xmm7, rax                  ; y
-    ; the gradient: t = 0.75 y / h + 0.25 x / w
-    movss xmm0, xmm7
-    divss xmm0, xmm9
-    mulss xmm0, [f_0_75]
-    movss xmm1, xmm6
-    divss xmm1, xmm8
-    mulss xmm1, [f_0_25]
-    addss xmm0, xmm1
-    minss xmm0, [f_one]
-    mov eax, [rbx + WL_TOP]
-    mov edx, [rbx + WL_BOTTOM]
-    call .lerp_colors                   ; -> XMM3, XMM4, XMM5 = R, G, B
-    ; the lights over it
-    xor ebp, ebp
-.blob:
-    cmp ebp, WALL_BLOBS
-    jae .store
-    imul rcx, rbp, WB_SIZE
-    lea rcx, [rbx + WL_BLOBS + rcx]
-    mov eax, [rcx + WB_A]
-    test eax, eax
-    jz .blob_next
-    cvtsi2ss xmm0, dword [rcx + WB_X]   ; its centre and reach, in pixels
-    mulss xmm0, xmm8
-    divss xmm0, [f_1000]
-    subss xmm0, xmm6
-    mulss xmm0, xmm0
-    cvtsi2ss xmm1, dword [rcx + WB_Y]
-    mulss xmm1, xmm9
-    divss xmm1, [f_1000]
-    subss xmm1, xmm7
-    mulss xmm1, xmm1
-    addss xmm0, xmm1                    ; d^2
-    cvtsi2ss xmm1, dword [rcx + WB_R]
-    mulss xmm1, xmm8
-    divss xmm1, [f_1000]
-    mulss xmm1, xmm1                    ; r^2
-    divss xmm0, xmm1                    ; t = d^2 / r^2
-    comiss xmm0, [f_one]
-    jae .blob_next
-    movss xmm1, [f_one]                 ; w = a (1 - t)^2
-    subss xmm1, xmm0
-    mulss xmm1, xmm1
-    cvtsi2ss xmm0, dword [rcx + WB_A]
-    divss xmm0, [f_256]
-    mulss xmm1, xmm0
-    mov eax, [rcx + WB_COLOR]           ; each channel toward the light's
-    mov edx, eax
-    shr edx, 16
-    and edx, 0xFF
-    cvtsi2ss xmm0, edx
-    subss xmm0, xmm3
-    mulss xmm0, xmm1
-    addss xmm3, xmm0
-    mov edx, eax
-    shr edx, 8
-    and edx, 0xFF
-    cvtsi2ss xmm0, edx
-    subss xmm0, xmm4
-    mulss xmm0, xmm1
-    addss xmm4, xmm0
-    mov edx, eax
-    and edx, 0xFF
-    cvtsi2ss xmm0, edx
-    subss xmm0, xmm5
-    mulss xmm0, xmm1
-    addss xmm5, xmm0
-.blob_next:
-    inc ebp
-    jmp .blob
-.store:
-    mulss xmm3, [f_256]                 ; 8.8
-    mulss xmm4, [f_256]
-    mulss xmm5, [f_256]
-    cvtss2si eax, xmm3
-    mov [r15], eax
-    cvtss2si eax, xmm4
-    mov [r15 + 4], eax
-    cvtss2si eax, xmm5
-    mov [r15 + 8], eax
-    add r15, 12
-    inc r12
-    jmp .gx
-.gy_next:
-    inc r13
-    jmp .gy
-.grid_done:
-    ; the screen: each row from the two grid rows around it, each pixel
-    ; from the two points of that around it, with a dither
-    xor r13d, r13d                      ; y
-.row:
-    cmp r13, [scr_h]
-    jae .made
-    mov rax, r13                        ; the grid rows, and the weight of
-    shr rax, 2                          ; the lower one (0..3 quarters)
-    mov rcx, r13
-    and ecx, 3
-    mov rsi, rax
-    imul rsi, [wall_gw]
-    imul rsi, rsi, 12
-    add rsi, [wall_grid]                ; upper
-    mov rdi, [wall_gw]
-    imul rdi, rdi, 12
-    add rdi, rsi                        ; lower
-    lea r8, [wall_row]                  ; this row of the grid, 8.8
-    mov r9, [wall_gw]
-    imul r9, r9, 3                      ; values
-    mov r10d, 4
-    sub r10d, ecx                       ; upper's weight
-.vrow:
-    mov eax, [rsi]
-    imul eax, r10d
-    mov edx, [rdi]
-    imul edx, ecx
-    add eax, edx
-    shr eax, 2
-    mov [r8], eax
-    add rsi, 4
-    add rdi, 4
-    add r8, 4
-    dec r9
-    jnz .vrow
-    mov rdi, r13                        ; the pixels
-    imul rdi, [wall_sf + SF_PITCH]
-    add rdi, [wall_sf + SF_PTR]
-    mov rax, r13
-    and eax, 3
-    lea r14, [bayer4]
-    lea r14, [r14 + rax * 4]
-    xor r12d, r12d                      ; x
-    lea rsi, [wall_row]
-.px:
-    cmp r12, [scr_w]
-    jae .row_next
-    mov rcx, r12
-    and ecx, 3                          ; the right one's weight
-    mov r10d, 4
-    sub r10d, ecx
-    movzx r11d, byte [r14 + rcx]        ; the dither
-    xor ebp, ebp                        ; the pixel
-    xor edx, edx                        ; channel: R, G, B
-.chan:
-    mov eax, [rsi + rdx * 4]
-    imul eax, r10d
-    mov r8d, [rsi + rdx * 4 + 12]
-    imul r8d, ecx
-    add eax, r8d
-    shr eax, 2
-    add eax, r11d
-    shr eax, 8
-    cmp eax, 255
-    jbe .chan_ok
-    mov eax, 255
-.chan_ok:
-    shl ebp, 8
-    or ebp, eax
-    inc edx
-    cmp edx, 3
-    jb .chan
-    mov [rdi], ebp
-    add rdi, 4
-    inc r12
-    test r12, 3
-    jnz .px
-    add rsi, 12                         ; the next point
-    jmp .px
-.row_next:
-    inc r13
-    jmp .row
-.made:
-    mov rdi, [wall_grid]
-    call vm_free
-    mov qword [wall_grid], 0
-.out:
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop rbp
-    pop rbx
-    ret
-; XMM0 = t, EAX = from, EDX = to -> XMM3, XMM4, XMM5 = R, G, B (0..255)
-.lerp_colors:
-    push rcx
-    mov ecx, 16
-    call .lerp_one
-    movss xmm3, xmm1
-    mov ecx, 8
-    call .lerp_one
-    movss xmm4, xmm1
-    xor ecx, ecx
-    call .lerp_one
-    movss xmm5, xmm1
-    pop rcx
-    ret
-.lerp_one:
-    push rax
-    push rdx
-    shr eax, cl
-    and eax, 0xFF
-    shr edx, cl
-    and edx, 0xFF
-    cvtsi2ss xmm1, eax
-    cvtsi2ss xmm2, edx
-    subss xmm2, xmm1
-    mulss xmm2, xmm0
-    addss xmm1, xmm2
-    pop rdx
-    pop rax
-    ret
-
-; -----------------------------------------------------------------------------
 ;  theme: the thing in the shell
 ; -----------------------------------------------------------------------------
 
@@ -504,10 +225,6 @@ theme_changed:
 
 section .rodata
 align 4
-f_0_25:         dd 0.25
-f_0_75:         dd 0.75
-f_256:          dd 256.0
-f_1000:         dd 1000.0
 str_th_dark:    db 'dark', 0
 str_th_light:   db 'light', 0
 
@@ -584,24 +301,6 @@ str_ac_yellow:  db 'yellow', 0
 str_ac_green:   db 'green', 0
 str_ac_graphite: db 'graphite', 0
 
-; the wallpapers: night, a deep blue going violet, with lights of indigo,
-; teal and rose; day, a pale lilac going blue, with peach, sky and mint
-align 4
-wall_dark:
-    dd 0x0B1030, 0x150A2A
-    dd 180, 260, 520, 0x3B2FB0, 230
-    dd 820, 220, 460, 0x0E7490, 200
-    dd 560, 920, 560, 0x7C2D92, 210
-    dd 980, 980, 380, 0xD9466F, 150
-    dd 420, 480, 300, 0x1D4ED8, 110
-wall_light:
-    dd 0xEDE7FB, 0xDCEBFB
-    dd 160, 220, 520, 0xFFD2B8, 230
-    dd 840, 260, 460, 0xB8E0FF, 230
-    dd 560, 940, 560, 0xD8C7FF, 220
-    dd 960, 960, 380, 0xC4F1E1, 200
-    dd 420, 520, 320, 0xFFE7C2, 120
-
 section .data
 align 8
 themes_actions:
@@ -620,9 +319,3 @@ th_accent_i:    resb 1                  ; which accent
 alignb 4
 th_accent:      resd 1                  ; its color in this theme
 th_c:           resd TC_COUNT / 4
-alignb 8
-wall_sf:        resb SF_SIZE
-wall_grid:      resq 1
-wall_gw:        resq 1
-wall_gh:        resq 1
-wall_row:       resd (4096 / 4 + 4) * 3
