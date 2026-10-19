@@ -122,6 +122,32 @@ tco_pet:
     pop rax
     ret
 
+; tco_stop -> CF if the watchdog would not stop: its count halted
+; (TCO1_CNT's TMR_HLT), as after a trial is kept (update.asm). Preserves
+; all.
+tco_stop:
+    push rax
+    push rdx
+    movzx edx, word [tco_base]
+    test edx, edx
+    jz .stopped
+    add edx, 0x08                       ; TCO1_CNT
+    in ax, dx
+    or ax, 0x0800                       ; TMR_HLT
+    out dx, ax
+    in ax, dx
+    test ax, 0x0800
+    jz .running
+.stopped:
+    clc
+    jmp .out
+.running:
+    stc
+.out:
+    pop rdx
+    pop rax
+    ret
+
 ; tco_set(EDI = seconds): the reset that long after the last reload: ticks
 ; of 0.6 s, counted twice. Preserves all.
 tco_set:

@@ -111,7 +111,8 @@ log_volume:
 
 ; boot_volume -> R14 = the volume the loader came from, removable or not
 ; (a laptop's own EFI partition: hp-1), CF if it is not here (yet). As
-; log_volume otherwise; only reads are meant. Preserves all but RAX.
+; log_volume otherwise; only reads are meant, but for the kernel slots
+; update.asm writes. Preserves all but RAX.
 boot_volume:
     push rcx
     push rdx

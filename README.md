@@ -448,6 +448,28 @@ panic saves the log and restarts too; a hang ends in the watchdog's reset.
 `harness` in the shell shows a run and the variables; `tools/test/harness`
 runs the whole round in QEMU.
 
+### A new kernel, tried once
+
+A machine no one is at takes a new Axiom without risking the one it has.
+Besides the kernel built into the loader, two files on the volume Axiom
+started from may hold one: `/EFI/AXIOM/KERNEL.A` and `KERNEL.B`.
+
+```
+update try kernel.bin [seconds]   # into the slot not kept; tried at the next start
+reboot
+update keep                       # on trial: every start uses it from now on
+```
+
+`update try` names the slot in the UEFI variable `AxiomTry`. The loader
+marks that variable tried before it starts the kernel, so a trial happens
+once, and starts the TCO watchdog. Kept, the slot goes into `AxiomSlot`;
+not kept in time (600 s unless said), the trial ends in a restart, as a
+panic on trial does, and a hang in the watchdog's reset, and the loader
+starts the kept kernel again. Each variable holds its file's size and
+FNV-1a hash: a slot whose file is missing or damaged is passed over, for
+the kept one, then the built-in one. `update` says which kernel this is;
+`tools/test/update` runs every way a trial ends in QEMU.
+
 ### One of fleet's nodes
 
 Axiom can be one of fleet's nodes itself, a self-managed one (fleet's
@@ -535,7 +557,9 @@ tools/test/             host-side tests for self-contained modules (tls: the
                         streams, judged from the WAV file QEMU's codec
                         writes; harness: test runs as hp-1 has them,
                         across boots on one store of firmware variables,
-                        to the watchdog's reset; fleet: Axiom as one of
+                        to the watchdog's reset; update: a new kernel
+                        tried, kept, given up, and its file damaged,
+                        across boots; fleet: Axiom as one of
                         fleet's nodes, a client here pushing to it and
                         running jobs, across two boots); all.py runs them
                         all at once, and qemu.py boots side by side

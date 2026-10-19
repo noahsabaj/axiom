@@ -241,6 +241,8 @@ panic:
     call log_panic                      ; onto the boot stick, if that is safe
     cmp byte [harness_on], 0
     jne harness_crashed                 ; a test run: its log kept, and a restart
+    cmp byte [upd_trial], 0
+    jne update_crashed                  ; a new kernel on trial: the same, and the kept one
 .halt:
     cli
     hlt

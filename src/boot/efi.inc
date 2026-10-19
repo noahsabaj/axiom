@@ -33,6 +33,7 @@ BS_LOCATE_PROTOCOL      equ 320
 ; EFI_RUNTIME_SERVICES
 RT_GET_VARIABLE         equ 72
 RT_SET_VARIABLE         equ 88
+EFI_VAR_NV_BS_RT        equ 7           ; non-volatile, boot and runtime access
 
 ALLOCATE_ANY_PAGES      equ 0
 ALLOCATE_MAX_ADDRESS    equ 1
@@ -45,6 +46,13 @@ BIO_MEDIA               equ 8
 BIO_READ_BLOCKS         equ 24
 BM_MEDIA_ID             equ 0
 BM_BLOCK_SIZE           equ 12
+; EFI_SIMPLE_FILE_SYSTEM_PROTOCOL, and EFI_FILE_PROTOCOL
+SFS_OPEN_VOLUME         equ 8
+FILE_OPEN               equ 8
+FILE_CLOSE              equ 16
+FILE_READ               equ 32
+FILE_SET_POSITION       equ 56
+EFI_FILE_MODE_READ      equ 1
 
 ; EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL
 CON_OUTPUT_STRING       equ 8

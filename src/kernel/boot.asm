@@ -41,6 +41,7 @@ kernel_main:
     KLOG "clock:%04u-%02u-%02u %02u:%02u:%02u", qword [rtc_year], qword [rtc_mon], qword [rtc_day], qword [rtc_hour], qword [rtc_min], qword [rtc_sec]
     call log_init
     call harness_init                   ; a test run the loader found (hp-1)
+    call update_init                    ; a new kernel on trial: its watchdog
     lea rax, [cpu_brand]
     KLOG "cpu: %s, TSC %u MHz", rax, qword [tsc_mhz]
 
@@ -131,6 +132,7 @@ kernel_main:
     mov byte [ints_on], 1
     call store_init                     ; interrupts on: the drive completes by them
     call rtw_start                      ; the Wi-Fi card's firmware, from the boot volume
+    call update_start                   ; what kernel this is; a trial's outcome
 
     RDTSC64
     mov [next_refresh], rax
@@ -157,6 +159,7 @@ main_loop:
     call iommu_service
     call shell_service                  ; the rest of a line, after a command
     call harness_service                ; a test run's next line
+    call update_service                 ; a trial not kept in time: a restart
 .keys:
     call key_next                       ; keys down and up, until a key code's turn
     jc .input

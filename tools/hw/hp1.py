@@ -16,6 +16,10 @@
                                                made (build/hw/axiom-1) onto its EFI
                                                partition as /Home/fleet, for
                                                FLEET.AXE; not printed
+    python tools/hw/hp1.py try [--seconds S]   build/kernel.bin into the slot not kept
+                                               on its EFI partition, named in
+                                               AxiomTry: the next run tries it
+                                               ('update keep' keeps it; S: 600)
 
 hp-1 still runs Ubuntu, and fleet reaches it there. A test run: the lines go
 into the UEFI variable AxiomRun, BootNext is set to Axiom's boot entry and
@@ -73,12 +77,25 @@ def stage(script=None):
     (STAGE / "run.txt").write_text(script or "", encoding="utf-8", newline="\n")
 
 
-def node(what, script=None, check=True):
+def node(what, script=None, check=True, args=()):
     """hp1_node.py WHAT on hp-1, as root, in a folder with what stage() made."""
     stage(script)
     proc = fleet("run", "--on", NODE, "--dir", str(STAGE), "--name", "axiom-hp1", "--admin",
-                 "--allow-battery", "--", "python3", "hp1_node.py", what, check=check)
+                 "--allow-battery", "--", "python3", "hp1_node.py", what, *args, check=check)
     return proc.stdout + proc.stderr
+
+
+def try_kernel(seconds):
+    """build/kernel.bin into the slot not kept on hp-1, for a trial at the
+    next start of Axiom (hp1_node.py try)."""
+    sent = STAGE / "kernel.bin"
+    STAGE.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(ROOT / "build" / "kernel.bin", sent)
+    try:
+        print(node("try", args=[str(seconds)]).strip())
+    finally:
+        sent.unlink(missing_ok=True)
+    return 0
 
 
 def home(src):
@@ -151,9 +168,11 @@ def log():
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("what", choices=("status", "install", "run", "log", "cancel", "wifi",
-                                     "home"))
+                                     "home", "try"))
     ap.add_argument("lines", nargs="*", help="run: the script's lines")
     ap.add_argument("--file", help="run: the script, from this file")
+    ap.add_argument("--seconds", type=int, default=600, help="try: how long the trial "
+                    "has to be kept (600)")
     ap.add_argument("--wait", type=int, default=900, help="run: seconds to wait for hp-1 "
                     "to come back (900)")
     opts = ap.parse_args()
@@ -167,6 +186,8 @@ def main():
         return log()
     if opts.what == "home":
         return home(opts.file or AXIOM_1)
+    if opts.what == "try":
+        return try_kernel(opts.seconds)
     print(node(opts.what).strip())
     return 0
 

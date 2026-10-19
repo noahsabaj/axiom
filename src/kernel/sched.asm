@@ -1344,6 +1344,10 @@ sched_tick:
     je .no_run
     call harness_tick
 .no_run:
+    cmp byte [upd_watch], 0             ; a trial: the watchdog reloaded
+    je .no_trial
+    call update_tick
+.no_trial:
     mov r12, [gs:PC_SELF]
     cmp byte [r12 + PC_SCHED_ON], 0
     je .out

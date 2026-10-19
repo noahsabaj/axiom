@@ -17,6 +17,10 @@ hp1.py sent: EFI/AXIOM/BOOTX64.EFI and run.txt.
                                    into EFI/AXIOM/WIFI.KEY
     python3 hp1_node.py home       Home/fleet (sent) onto the EFI system
                                    partition, for Axiom's fleet program
+    python3 hp1_node.py try [S]    kernel.bin (sent) into the slot not kept
+                                   (EFI/AXIOM/KERNEL.A or .B) and named in
+                                   AxiomTry: the next start of Axiom tries
+                                   it, for S seconds (600)
 
 Only BootNext is ever set; BootOrder is never written. Nothing here reads
 or prints anything but Axiom's own variables, the boot entries, and the
@@ -30,6 +34,7 @@ import os
 import pathlib
 import re
 import shutil
+import struct
 import subprocess
 import sys
 
@@ -37,6 +42,8 @@ GUID = "8b367f3b-9403-4cf2-81cd-bda84a771936"         # bootinfo.inc's AXIOM_VEN
 EFIVARS = pathlib.Path("/sys/firmware/efi/efivars")
 RUN = EFIVARS / f"AxiomRun-{GUID}"
 LOG = EFIVARS / f"AxiomLog-{GUID}"
+TRY = EFIVARS / f"AxiomTry-{GUID}"                # src/kernel/update.asm
+SLOT = EFIVARS / f"AxiomSlot-{GUID}"
 ESP = pathlib.Path("/boot/efi")
 LOADER = pathlib.Path("EFI/AXIOM/BOOTX64.EFI")
 LABEL = "Axiom"
@@ -108,6 +115,13 @@ def status():
         print(f"{there}: not there")
     print("AxiomRun:", f"{RUN.stat().st_size - 4} bytes" if RUN.exists() else "none")
     print("AxiomLog:", f"{LOG.stat().st_size - 4} bytes" if LOG.exists() else "none")
+    for var in (TRY, SLOT):
+        got = slot_var(var)
+        print(f"{var.name.split('-')[0]}:", "none" if got is None else
+              f"kernel {got[0]}, {got[2]} bytes" + (f", {got[1]} s to keep it" if var == TRY else ""))
+    for name in ("KERNEL.A", "KERNEL.B"):
+        f = ESP / "EFI" / "AXIOM" / name
+        print(f"{f}:", f"{f.stat().st_size} bytes" if f.exists() else "not there")
     print("TCO:", tco())
 
 
@@ -306,6 +320,64 @@ def home():
         shutil.rmtree("Home", ignore_errors=True)
 
 
+def fnv64(data):
+    """FNV-1a, 64-bit, as the loader's fnv64 and update.asm's upd_hash."""
+    h = 0xCBF29CE484222325
+    for b in data:
+        h = ((h ^ b) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    return h
+
+
+def slot_var(path):
+    """AxiomTry or AxiomSlot (bootinfo.inc's UV_*): (its slot, small once
+    tried; the trial's seconds; the file's size; its hash), or None."""
+    if not path.exists():
+        return None
+    data = path.read_bytes()[4:]
+    if len(data) != 16:
+        return None
+    slot, _, seconds, size, h = struct.unpack("<BBHIQ", data)
+    return chr(slot), seconds, size, h
+
+
+def try_kernel():
+    """kernel.bin, as hp1.py sent it, into the slot AxiomSlot does not
+    name, and AxiomTry made to name it: the next start of Axiom (the
+    loader's find_slot) tries it, and 'update keep' there keeps it within
+    the seconds given. As 'update try' does in Axiom, but written from
+    here, so a first trial on hp-1 leaves Axiom's FAT code out of it."""
+    seconds = int(sys.argv[2]) if len(sys.argv) > 2 else 600
+    if not 30 <= seconds <= 3600:
+        print("a trial's seconds: 30 to 3600")
+        return 1
+    try:
+        data = pathlib.Path("kernel.bin").read_bytes()
+    finally:
+        pathlib.Path("kernel.bin").unlink(missing_ok=True)
+    magic, entry, size, mem = struct.unpack_from("<8sQQQ", data)
+    if magic != b"AXIOMKRN" or size != len(data) or mem < size:
+        print("kernel.bin: not a kernel (its header is not Axiom's, or not its size)")
+        return 1
+    kept = slot_var(SLOT)
+    slot = "B" if kept and kept[0] == "A" else "A"
+    dst = ESP / "EFI" / "AXIOM" / f"KERNEL.{slot}"
+    tmp = dst.with_suffix(".NEW")
+    tmp.write_bytes(data)
+    os.sync()
+    tmp.replace(dst)
+    os.sync()
+    if dst.read_bytes() != data:
+        print(f"{dst}: NOT as sent; nothing tried")
+        return 1
+    efivar_delete(TRY)
+    with open(TRY, "wb", buffering=0) as f:          # one write: attributes, then the data
+        f.write(NV_BS_RT + struct.pack("<BBHIQ", ord(slot), 0, seconds, len(data), fnv64(data)))
+    got = slot_var(TRY)
+    print(f"{dst}: {len(data)} bytes, as sent; AxiomTry: kernel {got[0]}, {got[1]} s to keep it"
+          f"; kept: {'kernel ' + kept[0] if kept else 'none (the built-in one)'}")
+    return 0
+
+
 def cancel():
     efivar_delete(RUN)
     _, nxt, _, axiom = boot_entries()
@@ -318,4 +390,4 @@ def cancel():
 if __name__ == "__main__":
     what = sys.argv[1] if len(sys.argv) > 1 else "status"
     sys.exit({"status": status, "install": install, "run": run, "log": log,
-              "cancel": cancel, "wifi": wifi, "home": home}[what]() or 0)
+              "cancel": cancel, "wifi": wifi, "home": home, "try": try_kernel}[what]() or 0)
