@@ -12,8 +12,9 @@ CCMP vector), then random cases against independent references (hashlib and
 hmac; a CCM written here from SP 800-38C and the 802.11 text over the pure-
 Python AES of tools/test/crypto, checked against the vector first). Buffers
 sit at odd addresses; every call must come back with each register but RAX
-as it went in. Outputs go to build/test/wpa/. Exit status 0 only if every
-test passed.
+as it went in. Then the RTL8821CE station's handshakes, src/kernel/rtwwpa.asm
+inside hs_shim.asm, against an access point played by handshake.py. Outputs
+go to build/test/wpa/. Exit status 0 only if every test passed.
 """
 import argparse
 import ctypes
@@ -37,6 +38,9 @@ GCC = (r"C:\Users\noahs\AppData\Local\Microsoft\WinGet\Packages"
 _spec = importlib.util.spec_from_file_location("crypto_run", HERE.parent / "crypto" / "run.py")
 _crypto = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_crypto)
+_spec = importlib.util.spec_from_file_location("handshake", HERE / "handshake.py")
+handshake = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(handshake)
 aes = _crypto.aes128_encrypt
 
 h = bytes.fromhex
@@ -369,6 +373,11 @@ def main():
     rng = random.Random(opts.seed)
     published(k)
     randomly(k, rng)
+    obj, dll = OUT / "hs_shim.obj", OUT / "hs.dll"
+    run([nasm, "-f", "win64", "-I", kinc, "-I", str(HERE) + os.sep, "-o", obj,
+         HERE / "hs_shim.asm"], "nasm -f win64 (handshakes)")
+    run([cc, "-shared", "-o", dll, obj], "gcc -shared (handshakes)")
+    handshake.run(Kernel(dll), rng, result, prf, aes_wrap, ccmp_seal)
     if failures:
         print(f"wpa: {len(failures)} failed, {passed} passed")
         sys.exit(1)

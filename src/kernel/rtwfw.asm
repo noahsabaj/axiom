@@ -114,9 +114,12 @@ rtw_start:
     jc .off
     call rtw_coex_init
     call rtw_port_init
-    KLOG "wifi: the MAC and radio are set up; surveying"
-    call rtw_survey
+    KLOG "wifi: the MAC and radio are set up"
     call rtw_join
+    jc .quiet
+    mov byte [rtw_up], 1                ; on, for the network
+    jmp .free
+.quiet:
     mov word [r12 + 0xAA], 0x8000       ; to Bluetooth: Wi-Fi off
 .off:
     call rtw_power_off

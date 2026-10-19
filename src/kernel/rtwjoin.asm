@@ -26,9 +26,9 @@ REG_AID         equ 0x6A8
 
 section .text
 
-; rtw_join(R12): the network of WIFI.KEY found, authenticated with and
-; associated to; what the access point sends then counted, and the
-; station gone again (deauthenticated). Said what happened.
+; rtw_join(R12) -> CF (said why) if there is no network to join (no good
+; WIFI.KEY): its key read, then the network joined (rtw_connect; if that
+; fails, the link tries again later).
 rtw_join:
     push rax
     push rcx
@@ -37,12 +37,12 @@ rtw_join:
     push rdi
     push r14
     call boot_volume
-    jc .out
+    jc .no_key
     lea rsi, [str_rtw_key_path]
     lea rdi, [rtw_wk]
     mov ecx, WK_SIZE + 1
     call fat_read_file
-    jc .out                             ; (it said why)
+    jc .no_key                          ; (it said why)
     cmp rax, WK_SIZE
     jne .bad_key
     mov rax, 'AXWIFI01'
@@ -52,32 +52,55 @@ rtw_join:
     dec eax
     cmp eax, 32
     jae .bad_key
-    call rtw_find
-    jc .out
-    call rtw_auth
-    jc .out
-    call rtw_assoc
-    jc .out
-    mov dword [rtw_eapol_n], 0
-    mov dword [rtw_data_n], 0
-    mov byte [rtw_js_got], 0
-    mov ecx, 1000                       ; a second on the network
-    call rtw_listen
-    mov eax, [rtw_eapol_n]
-    mov edx, [rtw_data_n]
-    KLOG "wifi: in a second on the network: %u EAPOL-Key frames, %u other data frames", rax, rdx
-    call rtw_deauth
+    call rtw_connect
+    clc
     jmp .out
 .bad_key:
     KLOG "wifi: WIFI.KEY is not a network's key (tools/hw/hp1.py wifi makes it)"
+.no_key:
+    stc
 .out:
-    mov byte [rtw_js], JS_IDLE
     pop r14
     pop rdi
     pop rsi
     pop rdx
     pop rcx
     pop rax
+    ret
+
+; rtw_connect(R12) -> CF (said why) if not on the network with keys in
+; use: found, authenticated, associated, and the 4-way handshake done
+; within 3 seconds. Preserves all but RAX.
+rtw_connect:
+    push rcx
+    call rtw_find
+    jc .fail
+    call rtw_auth
+    jc .fail
+    call rtw_assoc
+    jc .fail
+    xor eax, eax
+    mov [rtw_eapol_n], eax
+    mov [rtw_data_n], eax
+    mov [rtw_rx_dec], eax
+    mov [rtw_rx_undec], eax
+    mov [rtw_rx_locked], eax
+    mov byte [rtw_js_got], 0
+    mov ecx, 3000                       ; the 4-way handshake
+    call rtw_listen
+    cmp byte [rtw_keys], 0
+    jne .keys
+    mov eax, [rtw_eapol_n]
+    KLOG "wifi: no keys agreed in 3 s (%u EAPOL frames from the access point)", rax
+    call rtw_deauth
+.fail:
+    mov byte [rtw_js], JS_IDLE
+    stc
+    jmp .out
+.keys:
+    clc
+.out:
+    pop rcx
     ret
 
 ; rtw_find(R12) -> CF (said why) if not found: each survey channel tuned,
@@ -256,6 +279,7 @@ rtw_assoc:
     or al, 2
     mov [r12 + REG_CR + 2], al
     mov byte [rtw_js], JS_LINKED
+    call rtw_wpa_reset
     movzx eax, word [rtw_aid]
     KLOG "wifi: associated (AID %u)", rax
     clc
@@ -361,7 +385,11 @@ rtw_join_frame:
     je .auth
     cmp eax, JS_ASSOC
     je .assoc
-    mov al, [rsi]                       ; on the network: data, from it
+    cmp word [rsi], 0x00C0              ; on the network: deauthenticated,
+    je .dropped
+    cmp word [rsi], 0x00A0              ;   or disassociated,
+    je .dropped
+    mov al, [rsi]                       ;   or data, from it
     and al, 0x0C
     cmp al, 0x08
     jne .out
@@ -371,19 +399,21 @@ rtw_join_frame:
     jne .out
     mov ebx, 24
     test byte [rsi], 0x80               ; QoS data: two bytes more
-    jz .llc
+    jz .data
     add ebx, 2
-.llc:
-    lea eax, [ebx + 8]
-    cmp ecx, eax
+.data:
+    cmp ecx, ebx
     jb .out
-    mov rax, 0x8E8800000003AAAA          ; AA AA 03 00-00-00 88-8E
-    cmp [rsi + rbx], rax                ; LLC/SNAP, EAPOL
-    jne .other
-    inc dword [rtw_eapol_n]
+    call rtw_rx_data
     jmp .out
-.other:
-    inc dword [rtw_data_n]
+.dropped:
+    cmp ecx, 26
+    jb .out
+    mov byte [rtw_js], JS_IDLE
+    mov byte [rtw_keys], 0
+    and byte [r12 + REG_CR + 2], ~3     ; net type: no link
+    movzx eax, word [rsi + 24]
+    KLOG "wifi: the access point let us go (reason %u)", rax
     jmp .out
 .auth:
     cmp word [rsi], 0x00B0

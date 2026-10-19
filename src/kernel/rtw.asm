@@ -143,6 +143,7 @@ rtw_probe:
     KLOG "wifi: Realtek RTL8821CE, cut %u, MAC %M, RFE type %u, crystal %u, BT setting %02x", rax, rcx, rdx, r8, r9
     call rtw_power_off                  ; until its firmware can be read (rtw_start)
     mov byte [rtw_found], 1
+    call rtw_nic_add
     mov eax, 1
     jmp .out
 .failed:

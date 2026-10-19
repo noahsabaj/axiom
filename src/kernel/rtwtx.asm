@@ -35,6 +35,24 @@ rtw_port_init:
 ; band's lowest rate, no fallback, sequence numbered by the chip.
 ; Preserves all but RAX.
 rtw_mgmt_send:
+    push r8
+    mov r8d, RQ_MGMT | (RTW_QSEL_MGMT << 8)
+    call rtw_send
+    pop r8
+    ret
+
+; rtw_data_send(R12, RSI = an 802.11 data frame, no FCS, ECX = its
+; length) -> CF if the BE ring is full: as rtw_mgmt_send, as TID 0
+rtw_data_send:
+    push r8
+    mov r8d, RQ_BE | (0 << 8)
+    call rtw_send
+    pop r8
+    ret
+
+; rtw_send(R12, RSI, ECX, R8D = the ring (RQ_*) | the queue to select
+; (bits 15:8))
+rtw_send:
     push rcx
     push rdx
     push rsi
@@ -56,7 +74,8 @@ rtw_mgmt_send:
     or eax, 1 << 24
 .unicast:
     mov [rdi], eax
-    mov edx, RTW_QSEL_MGMT << 8
+    mov edx, r8d
+    and edx, 0xFF00
     cmp byte [rtw_band], 1
     jne .ofdm
     or edx, 8 << 16                     ; 2.4 GHz: 1 Mb/s (rate ID B_20M, rate 0)
@@ -74,7 +93,7 @@ rtw_mgmt_send:
     pop rcx
     add ecx, 48
     lea rsi, [rtw_txf]
-    mov edx, RQ_MGMT
+    movzx edx, r8b
     call rtw_tx_put
     jmp .out
 .full:
