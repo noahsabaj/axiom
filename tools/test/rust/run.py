@@ -157,6 +157,7 @@ LISTEN = 7777                           # the guest's, SERVE forwarded to it
 TLS_LISTEN = LISTEN + 1                 # its TLS listener's, TLS_SERVE to it
 heard = []                              # what the guest told the client here
 heard_tls = []                          # and the TLS client
+TLS_LINE = b"hello over TLS" + b"." * 200_000 + b"\n"
 
 
 def node_identity():
@@ -172,7 +173,8 @@ def node_identity():
 
 def tls_client(log_path, started, cert):
     """Once the guest's TLS listener listens: TLS 1.3 to it, its certificate
-    pinned by its SHA-256 (fleet's protocol, section 7), a line, the answer."""
+    pinned by its SHA-256 (fleet's protocol, section 7), a line of 200 KB
+    (more than the kernel holds for it at once), the answer."""
     want = hashlib.sha256(ssl.PEM_cert_to_DER_cert(cert.read_text())).hexdigest()
     deadline = time.time() + 300
     while time.time() < deadline:
@@ -191,7 +193,7 @@ def tls_client(log_path, started, cert):
         with ctx.wrap_socket(raw) as c:
             got = hashlib.sha256(c.getpeercert(binary_form=True)).hexdigest()
             info = (c.version(), c.cipher()[0], got == want)
-            c.sendall(b"hello over TLS\n")
+            c.sendall(TLS_LINE)
             back = b""
             while True:
                 try:
@@ -328,14 +330,15 @@ def check_net(log, dns):
          'bad PEM [Some(Error(-10: ', "TLS listener: a key not the certificate's refused; bad PEM refused"),
         (f"rstd: net tls listening on port {TLS_LISTEN}, failed false, 1 certificate",
          "TLS listener: Identity::from_pem (PKCS #8), listen_tls"),
-        ('rstd: net tls accepted from 10.0.2.2, open true, said "hello over TLS"',
-         "TLS listener: accepted, the handshake done, a line read"),
+        (f'rstd: net tls accepted from 10.0.2.2, open true, said "hello over TLS", {len(TLS_LINE)} bytes',
+         "TLS listener: accepted, the handshake done, a line of 200 KB read"),
         ("rstd: net done", "done"),
     ]:
         result(has(line), f"rstd net: {what}")
     result(heard == [b"you said: hello from the host\n"], f"rstd net: the client here was answered ({heard})")
-    result(heard_tls == [(("TLSv1.3", "TLS_AES_128_GCM_SHA256", True), b"you said, over TLS: hello over TLS\n")],
-           f"rstd net: the TLS client here: TLS 1.3, the certificate pinned, answered ({heard_tls})")
+    result(heard_tls == [(("TLSv1.3", "TLS_AES_128_GCM_SHA256", True), b"you said, over TLS: " + TLS_LINE)],
+           "rstd net: the TLS client here: TLS 1.3, the certificate pinned, answered "
+           f"({str(heard_tls)[:300]})")
     if dns:
         result(has(f"rstd: net axiom.test is [10.0.2.2:{ECHO}]"), "rstd net: to_socket_addrs by the kernel's DNS")
         result(has('rstd: net by name, echoed "by name"'), "rstd net: connected by name")
