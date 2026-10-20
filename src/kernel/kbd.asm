@@ -185,6 +185,10 @@ kbd_cook:
     je .ctrl_down
     cmp ecx, 0x38                       ; right alt
     je .alt_down
+    cmp ecx, 0x5B                       ; meta, left and right
+    je .meta_down
+    cmp ecx, 0x5C
+    je .meta_down
     lea rdx, [kbd_e0_map]
 .e0_find:
     cmp byte [rdx], 0
@@ -201,6 +205,10 @@ kbd_cook:
     je .ctrl_up
     cmp ecx, 0x38
     je .alt_up
+    cmp ecx, 0x5B
+    je .meta_up
+    cmp ecx, 0x5C
+    je .meta_up
     ret
 .plain:
     test al, 0x80
@@ -304,6 +312,12 @@ kbd_cook:
     ret
 .ctrl_up:
     mov byte [kbd_ctrl], 0
+    ret
+.meta_down:
+    mov byte [kbd_meta], 1
+    ret
+.meta_up:
+    mov byte [kbd_meta], 0
     ret
 .caps:
     xor byte [kbd_caps], 1
@@ -487,8 +501,12 @@ kbd_mods:
     or al, WM_CTRL
 .ps2_alt:
     cmp byte [kbd_alt], 0
-    je .out
+    je .ps2_meta
     or al, WM_ALT
+.ps2_meta:
+    cmp byte [kbd_meta], 0
+    je .out
+    or al, WM_META
 .out:
     pop rcx
     ret
@@ -607,6 +625,7 @@ kbd_skip:       db 0                    ; bytes of a sequence to pass over
 kbd_shift:      db 0
 kbd_ctrl:       db 0
 kbd_alt:        db 0
+kbd_meta:       db 0
 kbd_caps:       db 0
 kbd_head:       dw 0
 kbd_tail:       dw 0

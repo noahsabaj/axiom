@@ -25,7 +25,7 @@ K = ROOT / "src" / "kernel"
 SOURCES = [K / "defs.inc", K / "kbd.asm", K / "kobj.asm", K / "user.asm", K / "fscap.asm"]
 # what a program sees of them: the rest is the kernel's own
 PUBLIC = ("OT_", "RT_", "E_", "RA_", "SQ_", "SQF_", "CQ_", "RO_", "FS_PATH", "FV_", "FVF_",
-          "FE_", "FEA_", "USER_", "AXE_", "AW_", "SB_", "SYS_", "WE_", "WM_", "WNF_", "PTRM_",
+          "FE_", "FEA_", "USER_", "AXE_", "AW_", "SB_", "SYS_", "WE_", "WM_", "WNF_", "PTRM_", "WZ_",
           "WIN_MAX", "TC_", "LK_", "SKS_", "NETW_", "NETF_", "NA_", "NS_", "NI_", "KEY_", "MEM_MAX", "AS_MAX",
           "CON_WRITE_MAX", "FS_ROOM_MAX", "SN_", "SI_", "EXIT_TASK", "UPD_", "UPS_")
 

@@ -2,16 +2,18 @@
 //! draws it each frame (about 60 a second): a plain ground, a bar sweeping
 //! across the top, and a square where the mouse last pressed or dragged.
 //! Says each key (as text, and down and up), press, resize, the pointer
-//! over it and leaving, on the console ("rdemo: ..."); g holds the pointer
-//! (a game's mouse-look) or lets it go; q, Esc or the close button end it,
-//! with a count of what happened.
+//! over it and leaving, the keys gained and lost, full screen or not, on
+//! the console ("rdemo: ..."); g holds the pointer (a game's mouse-look) or
+//! lets it go; f goes full screen or back; o opens a second, small window
+//! (which takes the keys, and cannot go full screen); q, Esc or the close
+//! button end it, with a count of what happened.
 //!
-//!   rdemo [--full] [title]
+//!   rdemo [--full | --screen] [title]
 
 use std::collections::HashMap;
 use std::time::Duration;
 
-use axiom::{Event, Instant, Key, Pointer, Window};
+use axiom::{Event, Instant, Key, Pointer, Window, Zoom};
 
 axiom::entry!(wants = axiom::wants::DESK);
 
@@ -22,20 +24,25 @@ const SQUARE: i32 = 40;
 
 fn main() -> Result<(), axiom::Error> {
     let mut title: Vec<String> = std::env::args().skip(1).collect();
-    let full = title.first().is_some_and(|a| a == "--full");
-    if full {
+    let size = match title.first().map(|a| a.as_str()) {
+        Some("--full") => Window::FULL,
+        Some("--screen") => Window::SCREEN,
+        _ => Window::RESIZE,
+    };
+    if size != Window::RESIZE {
         title.remove(0);
     }
     let title = if title.is_empty() { "Rust on Axiom".to_string() } else { title.join(" ") };
     println!("rdemo: std says hello, {} args", std::env::args().count());
 
-    let size = if full { Window::FULL } else { Window::RESIZE };
     let mut w = Window::open(640, 400, size | Window::KEYS | Window::HOVER)?;
     w.set_title(&title);
     let mut seen: HashMap<&'static str, u32> = HashMap::new();
     let mut mark = (100, 100);
     let mut held = 0u32;
     let mut grab = false;
+    let mut zoom = Zoom::Normal;
+    let mut two: Option<Window> = None;
     let mut frames = 0u64;
     let start = Instant::now();
     loop {
@@ -52,6 +59,17 @@ fn main() -> Result<(), axiom::Error> {
                         let p = if grab { Pointer::Grab } else { Pointer::Arrow };
                         w.set_pointer(p);
                         println!("rdemo: pointer {:?}", p);
+                    }
+                    if key == Key::Char('f') {
+                        let z = if zoom == Zoom::Screen { Zoom::Normal } else { Zoom::Screen };
+                        println!("rdemo: asked {:?}, {:?}", z, w.set_zoom(z));
+                    }
+                    if key == Key::Char('o') && two.is_none() {
+                        let t = Window::open(320, 200, 0)?;
+                        t.set_title("rdemo two");
+                        // not one that can be resized: never full screen
+                        println!("rdemo: a second window, full screen {:?}", t.set_zoom(Zoom::Screen));
+                        two = Some(t);
                     }
                     "key"
                 }
@@ -94,9 +112,35 @@ fn main() -> Result<(), axiom::Error> {
                 }
                 Event::Wheel { .. } => "wheel",
                 Event::Look => "look",
-                Event::Focus(_) => "focus",
+                Event::Focus(b) => {
+                    println!("rdemo: focus {}", b);
+                    "focus"
+                }
+                Event::Zoom(z) => {
+                    println!("rdemo: zoom {:?}", z);
+                    zoom = z;
+                    "zoom"
+                }
             };
             *seen.entry(name).or_default() += 1;
+        }
+        if let Some(t) = two.as_mut() {
+            let mut gone = false;
+            while let Some(e) = t.poll() {
+                match e {
+                    Event::Key { key: Key::Char('q') | Key::Escape, .. } => {
+                        return bye(&seen, frames, start);
+                    }
+                    Event::Close | Event::Gone => gone = true,
+                    _ => {}
+                }
+            }
+            if gone {
+                two = None;
+            } else {
+                t.frame().fill(MARK);
+                t.show();
+            }
         }
         draw(&mut w, mark, frames);
         w.show();

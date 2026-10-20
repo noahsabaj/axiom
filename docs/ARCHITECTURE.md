@@ -1174,8 +1174,23 @@ text rows.
   `win_resize` (`win_fit`: at least its minimum, at most the screen,
   repainted), `win_focus` (raised, with the keys), `win_minimise` (a
   picture of it kept for the dock), `win_zoom` (to fill the space between
-  the bar and the dock, and back), `win_close` (destroyed by the main loop,
-  after its own close op).
+  the bar and the dock, and back), `win_screen` and `win_unscreen` (full
+  screen, and back), `win_close` (destroyed by the main loop, after its
+  own close op).
+- **Full screen** (`WF_SCREEN`, `desk_screen`): one window that may be
+  resized at a time, its client all of the screen (`win_fit` and
+  `win_place` keep it so: its title bar above the screen's top), with the
+  keys; where it was is kept in `WN_S*`. `desk_compose` then copies only
+  its client, square, with black where its pixels do not reach: no
+  wallpaper, frames, shadows, bar or dock, and their glass waits.
+  `desk_hit` finds its client everywhere, so a press never reaches the
+  bar or the menus. It ends when another window takes the keys
+  (`win_focus`), when it is minimised, put away or closed, or by
+  ctrl+meta+F (`desk_key`), the Window menu's Full Screen or `win screen`.
+  A program's window is told `WE_ZOOM` (`zoom_tell`, only when it differs
+  from what it was last told, `WN_ZTOLD`) before the `WE_RESIZED` its new
+  size brings, however it changed: `RO_WIN_ZOOM`, the zoom button, a
+  double click, the menu, the keys, or dragging a zoomed window.
 - **Stacking:** `desk_z` bottom to top, `desk_wins` by slot,
   `desk_focus` the window with the keys. A title bar always stays on the
   screen, under the bar.
@@ -1207,7 +1222,8 @@ text rows.
   goes to the window's click op, and so does the release. The wheel goes
   to the client under the pointer.
 - `win` lists the windows (a shell's with its lines and how far it is
-  scrolled back); `win move|size|raise|min|zoom|close <n>` acts on one.
+  scrolled back, and the one full screen as such);
+  `win move|size|raise|min|zoom|screen|close <n>` acts on one.
 
 ## Program windows: `window.asm`
 
@@ -1219,16 +1235,20 @@ text rows.
   title starts as the program's name. With `WNF_RESIZE` the user may resize
   it: the pixels are as large as the screen, and `WE_RESIZED` says how much
   of them the window shows now; `WNF_FULL` is that, zoomed to begin with
-  (the screen between the bar and the dock; `win_zoom`).
+  (the screen between the bar and the dock; `win_zoom`), and `WNF_SCREEN`
+  that, full screen to begin with (`win_screen`). `RO_WIN_ZOOM` (`WZ_*`,
+  kept in `WO_ZOOM` until `wo_service` does it with `win_set_zoom`) asks
+  for full screen, zoomed or neither, and `WE_ZOOM` says which it is now.
 - **What happens to it** goes to the program as messages of `WE_SIZE`
   bytes, sent from the end it was given (`ch_post`, the kernel's own send)
   so they arrive at the end the program kept: `WE_KEY` while it has the
   keys, `WE_PRESS` and `WE_RELEASE` (the button, where), `WE_MOVE` while a
   button is held in it, `WE_WHEEL`, `WE_CLOSE` from its close button or
   `win close`, which only ask (`OP_ASK`), `WE_RESIZED`, `WE_FOCUS` (it has
-  the keys, or not) and `WE_LOOK`. `WE_MOVE`'s code is how far the mouse
-  moved since the desk last heard (`ptr_delta`: its own counts, before
-  `pointer_accel` and the screen's edges), for a game to look around with.
+  the keys, or not), `WE_ZOOM` and `WE_LOOK`. `WE_MOVE`'s code is how far
+  the mouse moved since the desk last heard (`ptr_delta`: its own counts,
+  before `pointer_accel` and the screen's edges), for a game to look
+  around with.
 - **For games**, asked for in `WNF_*`: `WNF_KEYS` sends `WE_KEYDOWN` and
   `WE_KEYUP` too, each key once each way, by its USB HID usage. Both
   keyboards feed them through `key_event` (kbd.asm), which keeps a bit for
@@ -1259,11 +1279,12 @@ text rows.
   drawn on the screen; `RO_WIN_TITLE` retitles it. Both need `RT_WIN_DRAW`.
 - The program's side runs on any CPU and never touches the desktop's own
   structures: it notes what it wants in the object under `win_lock`
-  (`WOF_OPEN`, `WOF_TITLE`, `WOF_GONE`) and wakes the main loop, whose
-  `wo_service` (from `desk_service`) opens, retitles and closes. Showing only
-  adds damage, which any thread may. The window closes when its last handle
-  goes (`wo_orphan`): the program ended, was killed, or its shell closed.
-  The keys then go back to the window that had them before.
+  (`WOF_OPEN`, `WOF_TITLE`, `WOF_ZOOM`, `WOF_GONE`) and wakes the main
+  loop, whose `wo_service` (from `desk_service`) opens, retitles, zooms and
+  closes. Showing only adds damage, which any thread may. The window closes
+  when its last handle goes (`wo_orphan`): the program ended, was killed,
+  or its shell closed. The keys then go back to the window that had them
+  before.
 
 ## Files for programs: `fscap.asm`
 

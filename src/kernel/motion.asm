@@ -1596,6 +1596,8 @@ dock_point:
     je .set
     cmp byte [drag_mode], DRAG_NONE
     jne .set
+    cmp qword [desk_screen], 0          ; (full screen: no dock)
+    jne .set
     mov rax, [ptr_y]
     cmp rax, [dock_mtop]
     jl .set

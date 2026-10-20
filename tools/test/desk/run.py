@@ -31,7 +31,11 @@ serial log ('win' lists the windows) and from screenshots:
     shell, its Close Window closes it; Help's Find an App opens the
     launcher, which runs what is typed in a new shell;
   - 'theme light': the shells' background white; 'theme' says so; View's
-    Dark Look, and 'theme' says that; then 'theme accent pink'.
+    Dark Look, and 'theme' says that; then 'theme accent pink';
+  - full screen: 'win screen' on a new shell, all of the screen (the shell
+    where the bar and the dock were); ctrl+meta+F brings it back where it
+    was, and again full screen; another shell taking the keys ends it;
+    Window's Full Screen, then 'win screen' back.
 Outputs go to build/test/desk/.
 """
 import pathlib
@@ -101,7 +105,7 @@ def result(ok, text):
     return ok
 
 
-WIN = re.compile(r"^desk: (\d+) '([^'\n]*)' at (-?\d+),(-?\d+), (\d+)x(\d+), (\w+)"
+WIN = re.compile(r"^desk: (\d+) '([^'\n]*)' at (-?\d+),(-?\d+), (\d+)x(\d+), (\w+(?: screen)?)"
                  r"(?:, (\d+) lines, (\d+) back)?$", re.M)
 
 
@@ -240,6 +244,22 @@ def script():
         "sendkey down", "wait 0.2", "sendkey down", "wait 0.2", "sendkey ret", "wait 1.5",
         "type theme\\n", "wait 0.5",
         "type theme accent pink\\n", "wait 1",
+        # full screen: a new shell, 'win screen'; ctrl+meta+F back and
+        # again; then another shell takes the keys
+        "type shell\\n", "until desk: shell 7 opens", "wait 0.5", *win("screen before"),
+        "type win screen 12\\n", "until goes full screen", "wait 0.5", *win("screen"),
+        "shot build/test/desk/screen.png",
+        "sendkey ctrl-meta_l-f", "until leaves full screen", "wait 0.5", *win("screen off"),
+        "sendkey ctrl-meta_l-f", "until goes full screen", "wait 0.5", *win("screen on"),
+        "type shell\\n", "until desk: shell 8 opens", "wait 0.5", *win("screen left"),
+        "shot build/test/desk/unscreened.png",
+        # Window's Full Screen (the mark's, right four times, its third
+        # item), then 'win screen' back
+        f"abs {at(*MARK)} left", "wait 0.3", "sendkey right", "wait 0.2",
+        "sendkey right", "wait 0.2", "sendkey right", "wait 0.2", "sendkey right", "wait 0.2",
+        "sendkey down", "wait 0.2", "sendkey down", "wait 0.2", "sendkey down", "wait 0.2",
+        "sendkey ret", "until goes full screen", "wait 0.5", *win("screen menu"),
+        "type win screen 13\\n", "until leaves full screen", "wait 0.5", *win("screen back"),
         "type poweroff\\n", "ended",
     ]
 
@@ -391,6 +411,39 @@ def check(log, err):
     result(re.search(r"^launched$", log, re.M) is not None and "desk: shell 6 opens" in log,
            "the launcher ran what was typed in shell 6")
     result("desk: shell 6 closes" in log, "and Close Window closed that")
+
+    def rect(w):
+        return w.get("x"), w.get("y"), w.get("w"), w.get("h")
+
+    b = listing(log, "screen before").get("shell 7", {})
+    result(b.get("id") == 12 and b.get("state") == "focused", f"'shell' opened shell 7, 12 ({b})")
+    s = listing(log, "screen").get("shell 7", {})
+    result(rect(s) == (0, -TITLE, SCR_W, SCR_H) and s.get("state") == "full screen",
+           f"win screen 12: all of the screen, its title bar above it ({rect(s)}, {s.get('state')})")
+    for what, (x, y) in (("the bar", (SCR_W - 10, BAR // 2)), ("the dock", (SCR_W // 2, SCR_H - 15))):
+        p, q = pixel("screen.png", x, y), pixel("clean.png", x, y)
+        result(p == WINDOW and q is not None and q != WINDOW,
+               f"full screen: the shell where {what} was ({p}; before, {q})")
+    o = listing(log, "screen off").get("shell 7", {})
+    result(rect(o) == rect(b) and o.get("state") == "focused",
+           f"ctrl+meta+F: back where it was ({rect(o)}, {o.get('state')})")
+    n = listing(log, "screen on").get("shell 7", {})
+    result(rect(n) == rect(s) and n.get("state") == "full screen",
+           f"ctrl+meta+F again: full screen ({rect(n)}, {n.get('state')})")
+    left = listing(log, "screen left")
+    o, e = left.get("shell 7", {}), left.get("shell 8", {})
+    result(rect(o) == rect(b) and o.get("state") == "shown" and e.get("state") == "focused",
+           f"shell 8 took the keys: shell 7 back where it was ({rect(o)}, {o.get('state')})")
+    p = pixel("unscreened.png", SCR_W - 10, BAR // 2)
+    result(p is not None and p != WINDOW, f"and the bar there again ({p})")
+    said = [m.group(1) for m in re.finditer(r"desk: 'shell 7' (goes|leaves) full screen", log)]
+    result(said == ["goes", "leaves", "goes", "leaves"], f"each said so ({said})")
+    m = listing(log, "screen menu").get("shell 8", {})
+    result(m.get("state") == "full screen" and rect(m) == rect(s),
+           f"Window's Full Screen: shell 8 full screen ({m.get('state')})")
+    m, e = listing(log, "screen back").get("shell 8", {}), left.get("shell 8", {})
+    result(m.get("state") == "focused" and rect(m) == rect(e),
+           f"win screen 13: back where it was ({rect(m)}, {m.get('state')})")
     result("AXIOM PANIC" not in log, "no panic")
     result("QEMU ended by itself" in err, "powered off")
 

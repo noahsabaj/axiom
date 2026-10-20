@@ -10,6 +10,12 @@
 ;  edge, raises and takes the keys when clicked; a double click on its
 ;  title zooms it.
 ;
+;  One that may be resized may also go full screen (win_screen,
+;  desk_screen): its client all of the screen, with no frame, bar or dock,
+;  over all else and with the keys, until another window takes them or
+;  ctrl+meta+F brings it back. A program's is told which of the three it
+;  is (zoom_tell, WE_ZOOM) before it is told its new size.
+;
 ;  What changed on the screen is a list of rectangles; desk_update composes
 ;  each into the back buffer - the wallpaper, the windows bottom to top,
 ;  the dock, the menu bar - and copies it to the screen. The dock is frosted
@@ -56,7 +62,12 @@ WN_ZW           equ WN_ZX + 16
 WN_ZH           equ WN_ZX + 24
 WN_FOCUSED      equ WN_ZX + 32          ; when it last took the keys (a count)
 WN_INKED        equ WN_ZX + 40          ; byte: its owner has drawn in it
-WN_SIZE         equ WN_ZX + 48
+WN_SX           equ WN_ZX + 48          ; where it was before it went full screen
+WN_SY           equ WN_ZX + 56
+WN_SW           equ WN_ZX + 64
+WN_SH           equ WN_ZX + 72
+WN_ZTOLD        equ WN_ZX + 80          ; dword WZ_*: what its program was last told
+WN_SIZE         equ WN_ZX + 88
 
 WF_SHOWN        equ 1 << 0              ; not minimised
 WF_CLOSE        equ 1 << 1              ; it has a close button
@@ -66,6 +77,7 @@ WF_PROGRAM      equ 1 << 4              ; a program's (its pixels are not ours)
 WF_ZOOMED       equ 1 << 5              ; it fills the screen (WN_Z* is where it was)
 WF_AWAY         equ 1 << 6              ; put away: not on the screen, not in the dock
 WF_ANIM         equ 1 << 7              ; moving: motion.asm draws it (or its place in the dock)
+WF_SCREEN       equ 1 << 8              ; full screen (desk_screen; WN_S* is where it was)
 
 OP_PAINT        equ 0                   ; RBX = window: draw the whole client
 OP_KEY          equ 8                   ; RBX, EAX = key code
@@ -579,8 +591,9 @@ win_title:
     jmp desk_bar_damage
 
 ; win_fit(RDI = window, RSI = width, RDX = height): the client that size, as
-; far as the screen and the window's least allow; the window kept on the
-; screen; then painted. Preserves RBX, RBP, R12-R15.
+; far as the screen and the window's least allow (full screen: the
+; screen's, whatever is asked); the window kept on the screen; then
+; painted. Preserves RBX, RBP, R12-R15.
 win_fit:
     push rbx
     push r12
@@ -588,6 +601,12 @@ win_fit:
     mov rbx, rdi
     mov r12, rsi
     mov r13, rdx
+    test dword [rbx + WN_FLAGS], WF_SCREEN
+    jz .least
+    mov r12, [scr_w]                    ; full screen: all of it
+    mov r13, [scr_h]
+    jmp .h_max
+.least:
     cmp r12, [rbx + WN_MIN_W]
     jge .w_min
     mov r12, [rbx + WN_MIN_W]
@@ -647,8 +666,11 @@ win_fit:
     ret
 
 ; win_place(RDI = window, RSI = x, RDX = y): the window there, as far as its
-; title bar stays reachable. Preserves all.
+; title bar stays reachable (full screen: its client at the screen's top
+; left, the title bar above it). Preserves all.
 win_place:
+    test dword [rdi + WN_FLAGS], WF_SCREEN
+    jnz .screen
     push rax
     push rcx
     push rdx
@@ -683,6 +705,14 @@ win_place:
     pop rsi
     pop rdx
     pop rcx
+    pop rax
+    ret
+.screen:
+    push rax
+    mov qword [rdi + WN_X], 0
+    mov rax, [fr_t]
+    neg rax
+    mov [rdi + WN_Y], rax
     pop rax
     ret
 
@@ -856,10 +886,16 @@ win_set_rect:
     ret
 
 ; win_zoom(RDI = window): to fill the screen between the bar and the dock,
-; or back to where it was. Preserves RBX, RBP, R12-R15.
+; or back to where it was (full screen: out of it, zoomed). Preserves RBX,
+; RBP, R12-R15.
 win_zoom:
     test dword [rdi + WN_FLAGS], WF_RESIZE
     jz .out
+    test dword [rdi + WN_FLAGS], WF_SCREEN
+    jz .zoom
+    mov esi, WZ_ZOOMED
+    jmp win_set_zoom
+.zoom:
     push rbx
     push r12
     push r13
@@ -883,15 +919,12 @@ win_zoom:
     mov rax, [rdi + WN_H]
     mov [rdi + WN_ZH], rax
     or dword [rdi + WN_FLAGS], WF_ZOOMED
-    xor esi, esi
-    mov rdx, [m_bar_h]
-    mov rcx, [scr_w]
-    mov r8, [m_work_y1]
-    sub r8, rdx
-    sub r8, [fr_t]
+    call zoom_tell
+    call zoom_rect
     jmp .set
 .back:
     and dword [rdi + WN_FLAGS], ~WF_ZOOMED
+    call zoom_tell
     mov rsi, [rdi + WN_ZX]
     mov rdx, [rdi + WN_ZY]
     mov rcx, [rdi + WN_ZW]
@@ -909,6 +942,237 @@ win_zoom:
     pop r13
     pop r12
     pop rbx
+.out:
+    ret
+
+; zoom_rect -> RSI x, RDX y, RCX w, R8 h: a window zoomed, between the bar
+; and the dock. Preserves others.
+zoom_rect:
+    xor esi, esi
+    mov rdx, [m_bar_h]
+    mov rcx, [scr_w]
+    mov r8, [m_work_y1]
+    sub r8, rdx
+    sub r8, [fr_t]
+    ret
+
+; win_set_zoom(RDI = window, ESI = WZ_*): full screen, zoomed or neither, as
+; asked (RO_WIN_ZOOM); only one that may be resized. From full screen it
+; goes straight there. Preserves RBX, RBP, R12-R15.
+win_set_zoom:
+    test dword [rdi + WN_FLAGS], WF_RESIZE
+    jz .out
+    cmp esi, WZ_SCREEN
+    je win_screen
+    test dword [rdi + WN_FLAGS], WF_SCREEN
+    jnz .screen
+    xor eax, eax                        ; zoomed now, or not
+    test dword [rdi + WN_FLAGS], WF_ZOOMED
+    setnz al
+    cmp eax, esi
+    jne win_zoom
+.out:
+    ret
+.screen:
+    cmp esi, WZ_ZOOMED
+    je .to_zoomed
+    test dword [rdi + WN_FLAGS], WF_ZOOMED
+    jz win_unscreen
+    and dword [rdi + WN_FLAGS], ~WF_ZOOMED ; to where it was before it zoomed
+    mov rax, [rdi + WN_ZX]
+    mov [rdi + WN_SX], rax
+    mov rax, [rdi + WN_ZY]
+    mov [rdi + WN_SY], rax
+    mov rax, [rdi + WN_ZW]
+    mov [rdi + WN_SW], rax
+    mov rax, [rdi + WN_ZH]
+    mov [rdi + WN_SH], rax
+    jmp win_unscreen
+.to_zoomed:
+    test dword [rdi + WN_FLAGS], WF_ZOOMED
+    jnz win_unscreen
+    or dword [rdi + WN_FLAGS], WF_ZOOMED ; zoomed, and from there back to
+    mov rax, [rdi + WN_SX]              ; where it was
+    mov [rdi + WN_ZX], rax
+    mov rax, [rdi + WN_SY]
+    mov [rdi + WN_ZY], rax
+    mov rax, [rdi + WN_SW]
+    mov [rdi + WN_ZW], rax
+    mov rax, [rdi + WN_SH]
+    mov [rdi + WN_ZH], rax
+    call zoom_rect
+    mov [rdi + WN_SX], rsi
+    mov [rdi + WN_SY], rdx
+    mov [rdi + WN_SW], rcx
+    mov [rdi + WN_SH], r8
+    jmp win_unscreen
+
+; win_screen(RDI = window): full screen: all of the screen its client, over
+; all else, with the keys; no frame, bar or dock (desk_screen). Only one
+; that may be resized; one full screen already leaves it first, as it
+; loses the keys. Preserves all.
+win_screen:
+    test dword [rdi + WN_FLAGS], WF_RESIZE
+    jz .out
+    test dword [rdi + WN_FLAGS], WF_SCREEN
+    jnz .out
+    push rax
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push rbx
+    mov rbx, rdi
+    call mv_forget                      ; at once: nothing of it moves on,
+    call mn_close                       ; no menu stays open, nothing is
+    mov byte [drag_mode], DRAG_NONE     ; dragged
+    mov qword [drag_win], 0
+    mov qword [dock_press], -1
+    test dword [rbx + WN_FLAGS], WF_SHOWN
+    jnz .shown
+    or dword [rbx + WN_FLAGS], WF_SHOWN ; out of the dock
+    and dword [rbx + WN_FLAGS], ~WF_AWAY
+    lea rdi, [rbx + WN_THUMB]
+    call sf_free
+    mov byte [dock_dirty], 1
+.shown:
+    mov rdi, rbx
+    call win_focus                      ; the keys, on top
+    mov rax, [rbx + WN_X]               ; where to come back to
+    mov [rbx + WN_SX], rax
+    mov rax, [rbx + WN_Y]
+    mov [rbx + WN_SY], rax
+    mov rax, [rbx + WN_W]
+    mov [rbx + WN_SW], rax
+    mov rax, [rbx + WN_H]
+    mov [rbx + WN_SH], rax
+    or dword [rbx + WN_FLAGS], WF_SCREEN
+    mov [desk_screen], rbx
+    lea rax, [rbx + WN_TITLE]
+    KLOG "desk: '%s' goes full screen", rax
+    call zoom_tell
+    mov rsi, [scr_w]
+    mov rdx, [scr_h]
+    call win_fit
+    mov qword [hover_win], 0            ; no frame's buttons, no dock's name
+    mov qword [dock_hover], -1
+    cmp rbx, [grab_win]
+    jne .held
+    mov qword [grab_win], 0             ; held in its middle now (ptr_mode)
+.held:
+    call desk_damage_screen
+    pop rbx
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rax
+.out:
+    ret
+
+; win_unscreen(RDI = window): out of full screen, back where it was; its
+; program told so (WE_ZOOM), then its size. Preserves all.
+win_unscreen:
+    test dword [rdi + WN_FLAGS], WF_SCREEN
+    jz .out
+    push rax
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push rbx
+    mov rbx, rdi
+    and dword [rbx + WN_FLAGS], ~WF_SCREEN
+    cmp rbx, [desk_screen]
+    jne .left
+    mov qword [desk_screen], 0
+.left:
+    mov rax, [rbx + WN_SX]
+    mov [rbx + WN_X], rax
+    mov rax, [rbx + WN_SY]
+    mov [rbx + WN_Y], rax
+    lea rax, [rbx + WN_TITLE]
+    KLOG "desk: '%s' leaves full screen", rax
+    call zoom_tell
+    mov rsi, [rbx + WN_SW]
+    mov rdx, [rbx + WN_SH]
+    call win_fit
+    cmp rbx, [grab_win]
+    jne .held
+    mov qword [grab_win], 0             ; held in its middle there (ptr_mode)
+.held:
+    call desk_damage_screen             ; the desk again, all of it
+    pop rbx
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rax
+.out:
+    ret
+
+; win_screen_flip(RDI = window): full screen, or out of it. Preserves all.
+win_screen_flip:
+    test dword [rdi + WN_FLAGS], WF_SCREEN
+    jnz win_unscreen
+    jmp win_screen
+
+; zoom_tell(RDI = window): a program's is told whether it is full screen,
+; zoomed or neither, if that is not what it was last told (WE_ZOOM).
+; Preserves all.
+zoom_tell:
+    test dword [rdi + WN_FLAGS], WF_PROGRAM
+    jz .out
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    mov rbx, rdi
+    mov esi, WZ_SCREEN
+    test dword [rbx + WN_FLAGS], WF_SCREEN
+    jnz .state
+    mov esi, WZ_ZOOMED
+    test dword [rbx + WN_FLAGS], WF_ZOOMED
+    jnz .state
+    mov esi, WZ_NORMAL
+.state:
+    cmp esi, [rbx + WN_ZTOLD]
+    je .told
+    mov [rbx + WN_ZTOLD], esi
+    call prog_zoom
+.told:
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
 .out:
     ret
 
@@ -961,8 +1225,9 @@ win_raise:
     pop rax
     ret
 
-; win_focus(RDI = window or 0): it is shown, raised and takes the keys.
-; Preserves all.
+; win_focus(RDI = window or 0): it is shown, raised and takes the keys; one
+; full screen that loses them leaves it (told WE_FOCUS 0 first). Preserves
+; all.
 win_focus:
     push rax
     push rdi
@@ -981,6 +1246,17 @@ win_focus:
 .same:
     pop rdi
 .old_done:
+    mov rax, [desk_screen]
+    test rax, rax
+    jz .screen_done
+    cmp rax, rdi
+    je .screen_done
+    push rdi
+    mov rdi, rax
+    call win_unscreen
+    pop rdi
+.screen_done:
+    mov rax, [desk_focus]
     cmp rdi, rax
     je .tell_done
     test rdi, rdi
@@ -1056,6 +1332,7 @@ focus_tell:
 win_minimise:
     test dword [rdi + WN_FLAGS], WF_SHOWN
     jz .out
+    call win_unscreen                   ; (out of full screen first)
     call win_damage_whole
     call win_thumb
     call mv_minimise                    ; into its place there
@@ -1079,6 +1356,7 @@ win_minimise:
 win_put_away:
     test dword [rdi + WN_FLAGS], WF_SHOWN
     jz .away
+    call win_unscreen                   ; (out of full screen first)
     call mv_close                       ; shrinking away
     call win_damage_whole
 .away:
@@ -1212,8 +1490,16 @@ desk_service:
 
 ; win_destroy(RBX = window): its owner lets go, then it goes
 win_destroy:
-    mov rdi, rbx                        ; shrinking away, from its picture now
-    call mv_close
+    mov rdi, rbx
+    cmp rbx, [desk_screen]              ; full screen: gone at once, and the
+    jne .shrink                         ; desk all there again
+    mov qword [desk_screen], 0
+    and dword [rbx + WN_FLAGS], ~WF_SCREEN
+    call desk_damage_screen
+    jmp .forget
+.shrink:
+    call mv_close                       ; shrinking away, from its picture now
+.forget:
     call mv_forget                      ; (and nothing of it moves on)
     mov rax, [rbx + WN_OPS]
     mov rax, [rax + OP_CLOSE]
@@ -1502,6 +1788,24 @@ desk_damage:
     xor r8d, r8d
     call desk_damage_own
     pop r8
+    ret
+
+; desk_damage_screen: all of the screen, to be composed again. Any thread.
+; Preserves all.
+desk_damage_screen:
+    push rdi
+    push rsi
+    push rdx
+    push rcx
+    xor edi, edi
+    xor esi, esi
+    mov rdx, [scr_w]
+    mov rcx, [scr_h]
+    call desk_damage
+    pop rcx
+    pop rdx
+    pop rsi
+    pop rdi
     ret
 
 ; desk_damage_own(RDI x, RSI y, RDX w, RCX h, R8 = a pane of glass or 0):
@@ -1803,8 +2107,11 @@ ds_say:
 
 ; desk_glass(RDI x, RSI y, RDX w, RCX h) -> the rectangle grown to hold
 ; all a pane of glass reads, if what is behind it changed and the rectangle
-; touches that (the pane is made again as it is composed). Preserves others.
+; touches that (the pane is made again as it is composed). Full screen,
+; none shows: they wait. Preserves others.
 desk_glass:
+    cmp qword [desk_screen], 0
+    jne .out
     push rax
     lea rax, [dock_gl]
     call gl_grow
@@ -1813,6 +2120,7 @@ desk_glass:
     lea rax, [dock_gl]                  ; (the menu's may reach the dock's)
     call gl_grow
     pop rax
+.out:
     ret
 
 ; dock_pane: the dock's pane of glass where the dock is; made again if that
@@ -1877,6 +2185,9 @@ desk_compose:
     pop rax
     call gfx_target_back
     call gfx_set_clip
+    mov rdi, [desk_screen]              ; one full screen: it alone
+    test rdi, rdi
+    jnz .screen
     call wall_draw                      ; the wallpaper
     DS_LAP DS_WALL
     xor ebx, ebx                        ; windows, bottom to top
@@ -1932,6 +2243,10 @@ desk_compose:
     mov edi, MVL_MENU                   ; and a menu fading
     call motion_paint
     DS_LAP DS_BAR
+    jmp .shown
+.screen:
+    call screen_paint
+    DS_LAP DS_WINS
 .shown:
     call gfx_target_back                ; the clip off again
     mov rdi, r12
@@ -1944,6 +2259,63 @@ desk_compose:
     pop r14
     pop r13
     pop r12
+    pop rbx
+    ret
+
+; screen_paint(RDI = the window full screen): its client, all of the
+; screen, within the clip; black where its pixels do not reach. Preserves
+; RBX, RBP, R12-R15.
+screen_paint:
+    push rbx
+    mov rbx, rdi
+    mov rax, [rbx + WN_SF + SF_W]       ; RAX by RCX: its pixels, on the screen
+    mov rcx, [rbx + WN_SF + SF_H]
+    cmp qword [rbx + WN_SF + SF_PTR], 0
+    jne .some
+    xor eax, eax
+    xor ecx, ecx
+.some:
+    cmp rax, [scr_w]
+    jbe .w
+    mov rax, [scr_w]
+.w:
+    cmp rcx, [scr_h]
+    jbe .h
+    mov rcx, [scr_h]
+.h:
+    push rax
+    push rcx
+    xor r8d, r8d                        ; black beyond them: at the right,
+    mov rdi, rax
+    xor esi, esi
+    mov rdx, [scr_w]
+    sub rdx, rax
+    mov rcx, [scr_h]
+    call gfx_fill
+    mov rcx, [rsp]                      ; and below
+    xor edi, edi
+    mov rsi, rcx
+    mov rdx, [rsp + 8]
+    mov rcx, [scr_h]
+    sub rcx, rsi
+    call gfx_fill
+    pop rcx
+    pop rdx
+    test rdx, rdx
+    jz .out
+    test rcx, rcx
+    jz .out
+    lea rax, [rbx + WN_SF]              ; then them, square
+    mov [span_sf], rax
+    mov qword [span_x], 0
+    mov qword [span_y], 0
+    xor edi, edi
+    xor esi, esi
+    xor r10d, r10d
+    mov r11d, RC_ALL
+    lea rbx, [span_copy]
+    call rr_walk
+.out:
     pop rbx
     ret
 
@@ -3445,8 +3817,18 @@ win_app_front:
 
 ; desk_hit(RDI x, RSI y) -> RAX = the window there (0: none), EDX = P_*,
 ; R8, R9 = the point in its client, ECX = the edges (P_GRIP) or the dock's
-; item (P_DOCK). Preserves RBX, RBP, R12-R15.
+; item (P_DOCK); full screen, that window's client everywhere. Preserves
+; RBX, RBP, R12-R15.
 desk_hit:
+    mov rax, [desk_screen]
+    test rax, rax
+    jz .desk
+    mov r8, rdi                         ; (its client's top left is the
+    mov r9, rsi                         ; screen's)
+    xor ecx, ecx
+    mov edx, P_CLIENT
+    ret
+.desk:
     push rbx
     push r12
     push r13
@@ -3590,8 +3972,11 @@ desk_press:
     push r12
     push r13
     mov r12d, edx
+    cmp qword [desk_screen], 0          ; (full screen: no bar, no menus)
+    jne .hit
     call mn_press                       ; the bar's, or an open menu's?
     jc .done
+.hit:
     mov rdi, [ptr_x]
     mov rsi, [ptr_y]
     call desk_hit
@@ -3603,8 +3988,11 @@ desk_press:
     je .dock
     test rbx, rbx
     jz .done
+    cmp rbx, [desk_screen]              ; (it has the keys, on top)
+    je .focused
     mov rdi, rbx
     call win_focus
+.focused:
     cmp edx, P_CLIENT
     je .client
     cmp r12d, 1                         ; the frame's parts: the left button
@@ -3673,6 +4061,8 @@ desk_press:
     mov rax, [rbx + WN_H]
     mov [drag_h0], rax
     and dword [rbx + WN_FLAGS], ~WF_ZOOMED
+    mov rdi, rbx
+    call zoom_tell
     jmp .done
 .client:
     mov [press_win], rbx
@@ -3813,6 +4203,7 @@ desk_motion:
     je .out
 .moved:
     and dword [rdi + WN_FLAGS], ~WF_ZOOMED
+    call zoom_tell
     jmp win_move
 .size:
     ; from where it was: each edge held follows the pointer
@@ -3941,10 +4332,22 @@ desk_wheel:
     ret
 
 ; desk_key(EAX = key code): to an open menu; else to the window with the
-; keys; with none, to the first shell, brought forward
+; keys; with none, to the first shell, brought forward. Ctrl+meta+F is the
+; desk's: the window with the keys full screen, or back.
 desk_key:
     cmp qword [mn_which], -1
     jne mn_key
+    cmp eax, 'F' - 64
+    jne .key
+    mov cl, [kbd_got]
+    and cl, WM_CTRL | WM_META
+    cmp cl, WM_CTRL | WM_META
+    jne .key
+    mov rdi, [desk_focus]
+    test rdi, rdi
+    jnz win_screen_flip
+    ret
+.key:
     push rbx
     mov rbx, [desk_focus]
     test rbx, rbx
@@ -3968,7 +4371,7 @@ desk_key:
     ret
 
 ; -----------------------------------------------------------------------------
-;  win [move|size|raise|min|close <n> ...]
+;  win [move|size|raise|min|zoom|screen|close <n> ...]
 ; -----------------------------------------------------------------------------
 cmd_win:
     push rbx
@@ -4023,6 +4426,11 @@ cmd_win:
     test eax, eax
     jnz .zoom
     mov rdi, r12
+    lea rsi, [str_win_screen]
+    call streq
+    test eax, eax
+    jnz .screen
+    mov rdi, r12
     lea rsi, [str_win_close]
     call streq
     test eax, eax
@@ -4055,6 +4463,12 @@ cmd_win:
     jz .fixed
     mov rdi, rbx
     call win_zoom
+    jmp .said
+.screen:
+    test dword [rbx + WN_FLAGS], WF_RESIZE
+    jz .fixed
+    mov rdi, rbx
+    call win_screen_flip
     jmp .said
 .close:
     test dword [rbx + WN_FLAGS], WF_CLOSE
@@ -4105,7 +4519,7 @@ cmd_win:
     call ds_say
     jmp .out
 .usage:
-    KLOG "usage: win [move <n> <x> <y> | size <n> <w> <h> | raise <n> | min <n> | zoom <n> | close <n> | speed]"
+    KLOG "usage: win [move <n> <x> <y> | size <n> <w> <h> | raise <n> | min <n> | zoom <n> | screen <n> | close <n> | speed]"
 .out:
     pop r13
     pop r12
@@ -4149,6 +4563,9 @@ win_say:
     cmp rbx, [desk_focus]
     jne .say
     lea rdx, [str_win_focused]
+    cmp rbx, [desk_screen]
+    jne .say
+    lea rdx, [str_win_full]
 .say:
     lea rdi, [term_ops]                 ; a shell: how much it holds
     cmp [rbx + WN_OPS], rdi
@@ -4171,12 +4588,14 @@ str_win_size:   db 'size', 0
 str_win_raise:  db 'raise', 0
 str_win_min:    db 'min', 0
 str_win_zoom:   db 'zoom', 0
+str_win_screen: db 'screen', 0
 str_win_close:  db 'close', 0
 str_win_speed:  db 'speed', 0
 str_win_shown:  db 'shown', 0
 str_win_hidden: db 'minimised', 0
 str_win_away:   db 'away', 0
 str_win_focused: db 'focused', 0
+str_win_full:   db 'full screen', 0
 str_finder:     db 'Axiom', 0
 str_empty:      db 0
 align 4
@@ -4277,6 +4696,8 @@ desk_wins:      resq DESK_MAX           ; by slot
 desk_z:         resq DESK_MAX           ; bottom to top
 desk_zn:        resq 1
 desk_focus:     resq 1                  ; the window with the keys
+desk_screen:    resq 1                  ; the window full screen, 0 if none:
+                                        ; shown, on top, with the keys
 desk_focus_n:   resq 1                  ; how many times the keys have moved
 desk_next_id:   resq 1
 hover_win:      resq 1                  ; the window whose buttons the pointer is on

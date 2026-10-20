@@ -1051,6 +1051,11 @@ ring_exec:
     mov rsi, [rbx + SQ_A0]
     call h_win_pointer
     jmp .out
+.win_zoom:
+    mov edi, [rbx + SQ_HANDLE]
+    mov rsi, [rbx + SQ_A0]
+    call h_win_zoom
+    jmp .out
 .fs_volumes:
     mov edi, [rbx + SQ_HANDLE]
     mov esi, [rbx + SQ_HANDLE2]
@@ -1599,7 +1604,7 @@ ro_exec:        dq ring_exec.nop, ring_exec.signal, ring_exec.reset, ring_exec.b
                 dq ring_exec.bad, ring_exec.bad, ring_exec.desk_look, ring_exec.fs_volumes
                 dq ring_exec.fs_list, ring_exec.fs_read, ring_exec.fs_write, ring_exec.fs_mkdir
                 dq ring_exec.fs_remove, ring_exec.fs_rename, ring_exec.fs_sub, ring_exec.win_pointer
-                dq ring_exec.net_addr, ring_exec.fs_update
+                dq ring_exec.net_addr, ring_exec.fs_update, ring_exec.win_zoom
 ro_async:      db 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 ; which wait: RO_WAIT, RO_JOIN, RO_TIMEOUT
                 db 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
                 db 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0

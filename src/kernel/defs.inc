@@ -497,7 +497,10 @@ RO_NET_ADDR     equ 44                  ; handle = a socket, into handle2 + a0:
 RO_FS_UPDATE    equ 45                  ; handle = files, to every volume, with
                                         ; RT_FS_KERNEL; a1 = UPD_*: a new kernel,
                                         ; as the shell's 'update' (update.asm)
-RO_COUNT        equ 46
+RO_WIN_ZOOM     equ 46                  ; handle = a window that may be resized,
+                                        ; a0 = WZ_*: full screen, zoomed or
+                                        ; neither (WE_ZOOM says so, once done)
+RO_COUNT        equ 47
 
 ; a new kernel (RO_FS_UPDATE's a1)
 UPD_STATE       equ 0                   ; -> UPS_*
@@ -758,8 +761,9 @@ SYS_WINDOW_NEW  equ 11                  ; (desktop, width, height, a channel's e
                                         ; while it is open, WNF_*) -> RAX =
                                         ; the window, RDX = its pixels: memory,
                                         ; B,G,R,x at width * 4 bytes a row (with
-                                        ; WNF_RESIZE or WNF_FULL: the screen's
-                                        ; width * 4 a row, its height of rows)
+                                        ; WNF_RESIZE, WNF_FULL or WNF_SCREEN: the
+                                        ; screen's width * 4 a row, its height
+                                        ; of rows)
 SYS_SOUND_NEW   equ 12                  ; (the speakers, frames) -> RAX = a stream
                                         ; playing, RDX = its memory (SN_*)
 SYS_TLS         equ 13                  ; (FS base): this thread's, for its
@@ -832,6 +836,9 @@ WE_KEYUP        equ 11                  ; and came up (or one went down before i
                                         ; had the keys: losing them, WE_FOCUS 0,
                                         ; is every key up)
 WE_LEAVE        equ 12                  ; WNF_HOVER: the pointer left it
+WE_ZOOM         equ 13                  ; WE_CODE = WZ_*: full screen, zoomed or
+                                        ; neither now, however it came to be
+                                        ; (before the WE_RESIZED that follows)
 WM_SHIFT        equ 1                   ; WE_KEY's WE_X: the modifiers held
 WM_CTRL         equ 2
 WM_ALT          equ 4
@@ -841,12 +848,20 @@ WNF_FULL        equ 2                   ; as WNF_RESIZE, and zoomed to begin wit
                                         ; the screen between the bar and the dock
 WNF_KEYS        equ 4                   ; WE_KEYDOWN and WE_KEYUP too (games)
 WNF_HOVER       equ 8                   ; WE_MOVE without a button, and WE_LEAVE
+WNF_SCREEN      equ 16                  ; as WNF_RESIZE, and full screen to begin
+                                        ; with (WZ_SCREEN)
 PTRM_ARROW      equ 0                   ; RO_WIN_POINTER: the arrow, as anywhere
 PTRM_HIDDEN     equ 1                   ; none over it (it draws its own)
 PTRM_GRAB       equ 2                   ; none, and held in its middle while it
                                         ; has the keys: WE_MOVE (WNF_HOVER or
                                         ; not) says how far the mouse moved;
                                         ; ctrl+alt lets go until it is clicked
+WZ_NORMAL       equ 0                   ; RO_WIN_ZOOM, WE_ZOOM: where it was put
+WZ_ZOOMED       equ 1                   ; the screen between the bar and the dock
+WZ_SCREEN       equ 2                   ; the whole screen, over all else, with
+                                        ; the keys: no title bar, bar or dock
+                                        ; (another window taking the keys, or
+                                        ; ctrl+meta+F, ends it)
 WIN_MAX         equ 4096                ; a side, at most
 
 ; the desktop's themes (theme.asm), and the names of their colors

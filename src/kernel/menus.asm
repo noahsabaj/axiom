@@ -1856,6 +1856,16 @@ mn_zoom:
 .out:
     ret
 
+mn_screen:
+    mov rdi, [desk_focus]
+    test rdi, rdi
+    jz .out
+    test dword [rdi + WN_FLAGS], WF_RESIZE
+    jz .out
+    jmp win_screen_flip
+.out:
+    ret
+
 ; a key to the window with the keys (Edit's)
 mn_key_to:
     mov eax, edi
@@ -1937,6 +1947,22 @@ ms_resizable:                           ; and resized
     test dword [rcx + WN_FLAGS], WF_RESIZE
     jz .out
     xor eax, eax
+.out:
+    pop rcx
+    ret
+
+ms_screen:                              ; and resized, ticked full screen
+    push rcx
+    mov eax, MS_OFF
+    mov rcx, [desk_focus]
+    test rcx, rcx
+    jz .out
+    test dword [rcx + WN_FLAGS], WF_RESIZE
+    jz .out
+    xor eax, eax
+    test dword [rcx + WN_FLAGS], WF_SCREEN
+    jz .out
+    mov eax, MS_CHECK
 .out:
     pop rcx
     ret
@@ -2036,6 +2062,7 @@ mn_view:
 mn_window_menu:
     ITEM 'Minimise', mn_minimise, 0, ms_focus
     ITEM 'Zoom', mn_zoom, 0, ms_resizable
+    ITEMK 'Full Screen', mn_screen, 0, ms_screen, {UG_CTRL, UG_CMD, 'F'}
     LINE
     MENU_END                            ; then each window
 mn_help:

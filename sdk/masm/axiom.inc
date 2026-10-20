@@ -148,7 +148,8 @@ RO_FS_SUB       EQU 42  ; handle, handle2 + a0: a folder, a1 =
 RO_WIN_POINTER  EQU 43  ; handle = a window, a0 = PTRM_*: the
 RO_NET_ADDR     EQU 44  ; handle = a socket, into handle2 + a0:
 RO_FS_UPDATE    EQU 45  ; handle = files, to every volume, with
-RO_COUNT        EQU 46
+RO_WIN_ZOOM     EQU 46  ; handle = a window that may be resized,
+RO_COUNT        EQU 47
 UPD_STATE       EQU 0  ; -> UPS_*
 UPD_TRY         EQU 1  ; handle2 + a0: a kernel.bin's path, a2 =
 UPD_KEEP        EQU 2  ; on trial -> 0: kept, for every start
@@ -311,6 +312,7 @@ WE_FOCUS        EQU 9  ; WE_CODE = 1: it has the keys now; 0: not
 WE_KEYDOWN      EQU 10  ; WNF_KEYS: a key went down, once (held, it
 WE_KEYUP        EQU 11  ; and came up (or one went down before it
 WE_LEAVE        EQU 12  ; WNF_HOVER: the pointer left it
+WE_ZOOM         EQU 13  ; WE_CODE = WZ_*: full screen, zoomed or
 WM_SHIFT        EQU 1  ; WE_KEY's WE_X: the modifiers held
 WM_CTRL         EQU 2
 WM_ALT          EQU 4
@@ -319,9 +321,13 @@ WNF_RESIZE      EQU 1  ; SYS_WINDOW_NEW: the user may resize it
 WNF_FULL        EQU 2  ; as WNF_RESIZE, and zoomed to begin with:
 WNF_KEYS        EQU 4  ; WE_KEYDOWN and WE_KEYUP too (games)
 WNF_HOVER       EQU 8  ; WE_MOVE without a button, and WE_LEAVE
+WNF_SCREEN      EQU 16  ; as WNF_RESIZE, and full screen to begin
 PTRM_ARROW      EQU 0  ; RO_WIN_POINTER: the arrow, as anywhere
 PTRM_HIDDEN     EQU 1  ; none over it (it draws its own)
 PTRM_GRAB       EQU 2  ; none, and held in its middle while it
+WZ_NORMAL       EQU 0  ; RO_WIN_ZOOM, WE_ZOOM: where it was put
+WZ_ZOOMED       EQU 1  ; the screen between the bar and the dock
+WZ_SCREEN       EQU 2  ; the whole screen, over all else, with
 WIN_MAX         EQU 4096  ; a side, at most
 TC_WINDOW       EQU 0  ; a window's own background, a terminal's
 TC_TITLE        EQU 4  ; the title bar of the window with the keys

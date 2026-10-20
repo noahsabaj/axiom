@@ -82,6 +82,7 @@ pub const RO_FS_SUB: u8 = 42;
 pub const RO_WIN_POINTER: u8 = 43;
 pub const RO_NET_ADDR: u8 = 44;
 pub const RO_FS_UPDATE: u8 = 45;
+pub const RO_WIN_ZOOM: u8 = 46;
 
 pub const SQF_LINK: u8 = 1; // the next entry starts once this one succeeds
 

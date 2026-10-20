@@ -392,8 +392,9 @@ requests still waiting with that data.
 | 43 | `RO_WIN_POINTER` | handle = a window, a0 = `PTRM_*` | |
 | 44 | `RO_NET_ADDR` | handle = a socket, into handle2 + a0: `NA_SIZE` bytes (`NA_*`) | 0, or `E_EMPTY` while it is looked up |
 | 45 | `RO_FS_UPDATE` | handle = files, to every volume, with `RT_FS_KERNEL`; a1 = `UPD_*` (see Files) | `UPS_*`, or 0 |
+| 46 | `RO_WIN_ZOOM` | handle = a window, a0 = `WZ_*` | 0, or `E_ARG` if it can't be resized |
 
-`RO_COUNT` is 46. Anything from there up is `E_ARG`.
+`RO_COUNT` is 47. Anything from there up is `E_ARG`.
 
 **Fixed fields**: a path (`FS_PATH`, 256 bytes), a store name (64), a host
 (256) or a pattern (64) is read at its full size from handle2 + a0,
@@ -436,9 +437,10 @@ showing all that was drawn by then.
 
 - **Pixels**: B, G, R, x, 4 bytes each.
   - A row is `width * 4` bytes.
-  - With `WNF_RESIZE` or `WNF_FULL`, a row is the screen's width × 4, with
-    the screen's height of rows. `WE_RESIZED` says how much of them shows.
-    The screen's size is in the look (`LK_SCR_W`, `LK_SCR_H`).
+  - With `WNF_RESIZE`, `WNF_FULL` or `WNF_SCREEN`, a row is the screen's
+    width × 4, with the screen's height of rows. `WE_RESIZED` says how much
+    of them shows. The screen's size is in the look (`LK_SCR_W`,
+    `LK_SCR_H`).
 - **Flags** (`WNF_*`):
 
   | Flag | Value | What |
@@ -447,6 +449,7 @@ showing all that was drawn by then.
   | `WNF_FULL` | 2 | resizable, and starts zoomed between the menu bar and the dock |
   | `WNF_KEYS` | 4 | keys down and up too |
   | `WNF_HOVER` | 8 | `WE_MOVE` with no button held, and `WE_LEAVE` |
+  | `WNF_SCREEN` | 16 | resizable, and starts full screen |
 
 - **Events**: 16-byte messages (`WE_SIZE`) at the program's end. Read them
   with `RO_RECV`, or `RO_WAIT` then `RO_RECV`. Each is `WE_KIND`, `WE_CODE`,
@@ -467,6 +470,7 @@ showing all that was drawn by then.
   | 10 | `WE_KEYDOWN` | with `WNF_KEYS`: the USB HID usage (page 7); X = `WM_*` |
   | 11 | `WE_KEYUP` | the same, once each way |
   | 12 | `WE_LEAVE` | with `WNF_HOVER`: the pointer left it |
+  | 13 | `WE_ZOOM` | `WZ_*`: full screen, zoomed or neither now; before the `WE_RESIZED` that follows |
 
 - **Keys as text** (`WE_KEY`):
   - A code is a byte of text, or `KEY_UP` 0x80, `DOWN`, `LEFT`, `RIGHT`,
@@ -482,6 +486,18 @@ showing all that was drawn by then.
   - `PTRM_GRAB` 2 hides it and holds it at the window's middle while the
     window has the keys. Only `WE_MOVE`'s deltas change then, sent whatever
     the flags. Ctrl+alt lets it go until a click in the window.
+- **Full screen** (`RO_WIN_ZOOM`, for a window that can be resized):
+  - `WZ_NORMAL` 0 is where it was put, `WZ_ZOOMED` 1 the screen between
+    the menu bar and the dock, `WZ_SCREEN` 2 the whole screen: no title
+    bar, frame, menu bar or dock, over every other window, with the keys.
+  - `WE_ZOOM` says the state each time it changes, whoever changed it (this
+    op, the zoom button, the title's double click, the Window menu,
+    ctrl+meta+F, dragging or resizing a zoomed window), before the
+    `WE_RESIZED` for its new size.
+  - Full screen ends when another window takes the keys (`WE_FOCUS` 0,
+    `WE_ZOOM`, then `WE_RESIZED`), or when the user presses ctrl+meta+F
+    (not sent as a key; with `WNF_KEYS` its keys still go down and up).
+  - A pointer held (`PTRM_GRAB`) stays held, at the middle of the new size.
 - **The look**: `RO_DESK_LOOK` gives memory to map read only: the theme
   (`LK_MODE`, `LK_ACCENT`, the colours by role at `LK_C` + `TC_*`), the
   scale (`LK_S4`: quarters of a pixel a point), the screen's size and the
