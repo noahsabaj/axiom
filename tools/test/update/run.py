@@ -3,13 +3,18 @@
 
     python tools/test/update/run.py
 
-Boots a stick image of build/esp (build it first) nine times, one after
+Boots a stick image of build/esp (build it first) thirteen times, one after
 another, on one file of firmware variables, as a machine keeps them across
 restarts. The stick holds NEW.BIN, a copy of build/kernel.bin:
   - 'update try NEW.BIN 30' puts it in slot A; the next start is its trial,
     and 'update keep' there keeps it (AxiomSlot): the start after uses it;
   - tried in slot B and not kept, the trial ends in a restart after 30 s,
-    and the start after is kernel A again; so after a panic on trial;
+    and the start after is kernel A again; so after a panic on trial, after
+    a hang on trial ('watchdog on', 'watchdog test': the main loop stopped,
+    which the trial's own deadline catches, as the timer keeps the TCO
+    reloaded on trial), and after a trial with no network, which the
+    watchdog's network check resets well before the trial's 600 s (a
+    kernel that never reaches fleet, as on axiom-1);
   - B's file damaged: its trial passed over, for A; A's damaged too: the
     kernel built into the loader.
 Outputs go to build/test/update/.
@@ -131,6 +136,34 @@ def main():
     log, ended = run("after", ["until update: this is", *try_next("B")])
     result("update: kernel B was tried and not kept" in log and "update: this is kernel A\n" in log,
            "the start after the panic is kernel A again")
+    result(ended, "kernel B queued again; 'reboot' ends QEMU")
+
+    log, ended = run("hang", ["until update: this is kernel B, on trial",
+                              "type watchdog on 10\\n", "until watchdog: on:",
+                              "type watchdog test\\n", "until the main loop stops here",
+                              "ended"], timeout=90)
+    result("update: this is kernel B, on trial" in log and
+           "watchdog test: the main loop stops here" in log, "kernel B on trial hangs")
+    result(ended and "update: the trial is past its end, and the main loop has not ended it"
+           in log, "the trial's deadline, the main loop stopped: the machine restarts")
+
+    log, ended = run("afterhang", ["until update: this is", *try_next("B", 600)])
+    result("update: kernel B was tried and not kept" in log and "update: this is kernel A\n" in log,
+           "the start after the hang is kernel A again")
+    result(ended, "kernel B queued again; 'reboot' ends QEMU")
+
+    log, ended = run("nonet", ["until update: this is kernel B, on trial",
+                               "type watchdog net 30\\n", "until no network for 30 s",
+                               "type watchdog on 60\\n", "until watchdog: on:",
+                               "until watchdog: no network for 30 s", "ended"], timeout=120)
+    result("update: this is kernel B, on trial" in log and
+           "watchdog: no network for 30 s: a full reset" in log,
+           "kernel B on trial with no network: the watchdog's network check resets it")
+    result(ended, "and the machine restarts (QEMU ends)")
+
+    log, ended = run("afternet", ["until update: this is", *try_next("B")])
+    result("update: kernel B was tried and not kept" in log and "update: this is kernel A\n" in log,
+           "the start after it is kernel A again")
     result(ended, "kernel B queued again; 'reboot' ends QEMU")
 
     damage("KERNEL.B")
