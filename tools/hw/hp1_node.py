@@ -444,8 +444,23 @@ def fsck():
     os.sync()
     dev = sh("findmnt", "-no", "SOURCE", str(ESP)).strip()
     proc = subprocess.run(["fsck.vfat", "-n", dev], capture_output=True, text=True)
+    text = (proc.stdout + proc.stderr).strip()
     print(f"fsck.vfat -n {dev}: exit {proc.returncode}")
-    print((proc.stdout + proc.stderr).strip())
+    print(text)
+    # Linux marks a FAT32 volume dirty while it has it mounted (byte 65 of
+    # the boot sector, bit 0; not in its backup), as /boot/efi is now: that
+    # alone is Linux's, not damage
+    mounted = (r"fsck\.fat .*", r"There are differences between boot sector and its backup\.",
+               r"This is mostly harmless\. Differences: \(offset:original/backup\)",
+               r"65:01/00", r"Not automatically fixing this\.",
+               r"Dirty bit is set\. Fs was not properly unmounted.*",
+               r"Automatically removing dirty bit\.", r"Leaving filesystem unchanged\.",
+               r"\S+: \d+ files, \d+/\d+ clusters")
+    rest = [l for l in text.splitlines() if l.strip()
+            and not any(re.fullmatch(p, l.strip()) for p in mounted)]
+    if proc.returncode == 1 and not rest:
+        print("clean: only the dirty bit Linux sets while it has the partition mounted")
+        return 0
     return proc.returncode
 
 

@@ -300,6 +300,9 @@ def main():
     ap.add_argument("--mac", help="the card's MAC address")
     ap.add_argument("--stick", help="boot from this USB stick image (tools/mkstick.py) "
                     "instead of build/esp")
+    ap.add_argument("--internal", action="store_true", help="--stick's image as the "
+                    "machine's own NVMe drive, not a USB stick (as hp-1 starts Axiom from "
+                    "its own disk's EFI partition)")
     ap.add_argument("--trace", action="store_true", help="say how long each step of "
                     "--script took")
     ap.add_argument("--script", help="monitor commands after the keys, separated "
@@ -312,7 +315,11 @@ def main():
     opts = ap.parse_args()
     fresh = opts.port == 0 and not opts.vars
 
-    if opts.stick:
+    if opts.stick and opts.internal:
+        # the image as the machine's own disk: not removable; writes stay
+        boot = ["-drive", f"file={opts.stick},if=none,id=bootstick,format=raw",
+                "-device", "nvme,serial=axiom-boot,drive=bootstick,bootindex=0"]
+    elif opts.stick:
         # the loader on a USB stick image, as on real hardware; writes stay
         boot = ["-device", "qemu-xhci,id=bootx",
                 "-drive", f"file={opts.stick},if=none,id=bootstick,format=raw",

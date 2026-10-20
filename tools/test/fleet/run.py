@@ -8,6 +8,9 @@ docs/protocol.md, sections 1 to 4 and 7) over TLS, through a forwarded port.
 A stick holds /Home/fleet as `fleet add NAME --self-managed` makes it: its
 node.json (a client's token's SHA-256, the network it comes from), a P-256
 cert.pem and key.pem. Two boots, one after the other, on that stick:
+the first from it as a USB stick, the second from it as the machine's own
+NVMe drive (as hp-1, axiom-1, starts from its own EFI partition: /Home
+and fleet's home on a volume not removable):
 
   - the first: `fleet`; the hello (a wrong token refused, a protocol not
     spoken refused, then the reply: its node, version, code, protocol,
@@ -452,12 +455,14 @@ def main():
     args = ["--smp", "2", "--nic", "rtl8139", "--netdev", fwd, "--stick", stick.relative_to(ROOT).as_posix()]
     logs = []
     for client, last, simulated in ((client_one, "last", False), (client_two, "last2", True)):
+        internal = ["--internal"] if simulated else []
         name = f"fleet-{len(logs) + 1}"
         (OUT / f"{name}.log").unlink(missing_ok=True)    # (the last run's would do for this one's)
         started = time.time()
         t = threading.Thread(target=client, args=(OUT / f"{name}.log", started, pin), daemon=True)
         t.start()
-        log, _, took = boot(OUT, name, script(last, simulated), *args, timeout=150, slots=1)
+        log, _, took = boot(OUT, name, script(last, simulated), *args, *internal, timeout=150,
+                            slots=1)
         print(f"      ({name} {took:.0f} s)")
         t.join(5)
         logs.append(log)

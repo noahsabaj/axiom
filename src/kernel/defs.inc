@@ -525,7 +525,7 @@ FV_FREE         equ 64                  ; bytes free on it
 FV_SIZE         equ 72
 FVF_WRITABLE    equ 1                   ; 'vol <n> rw' was said
 FVF_REMOVABLE   equ 2                   ; a stick, a card
-FVF_BOOT        equ 4                   ; the stick Axiom started from
+FVF_BOOT        equ 4                   ; the volume Axiom started from
 FE_LEN          equ 0                   ; a thing in a folder (RO_FS_LIST): dword, the record's bytes
 FE_ATTR         equ 4                   ; dword FEA_*
 FE_SIZE         equ 8                   ; bytes, 0 for a folder

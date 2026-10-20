@@ -813,14 +813,15 @@ fs_writable:
     ret
 
 ; fs_home(RBX = a request, R14 = its volume) -> CF unless the volume is the
-; boot stick and what it writes is in its /Home (each path, for a rename).
-; Preserves all but RAX.
+; one Axiom started from (a stick, or a laptop's own EFI partition) and
+; what it writes is in its /Home (each path, for a rename). Preserves all
+; but RAX.
 fs_home:
     push rcx
     push rsi
     push r14
     mov rcx, r14
-    call log_volume                     ; (removable, and the one booted from)
+    call boot_volume
     jc .not
     cmp rcx, r14
     jne .not
@@ -878,8 +879,8 @@ home_inside:
     pop rcx
     ret
 
-; home_ensure(R14 = a volume): if it is the boot stick, its /Home made, once
-; a boot. The main thread's. Preserves all but RAX.
+; home_ensure(R14 = a volume): if it is the one Axiom started from, its
+; /Home made, once a boot. The main thread's. Preserves all but RAX.
 home_ensure:
     cmp byte [home_made], 0
     jne .quick
@@ -887,7 +888,7 @@ home_ensure:
     push rsi
     push r14
     mov rcx, r14
-    call log_volume
+    call boot_volume
     jc .out
     cmp rcx, r14
     jne .out
@@ -922,11 +923,11 @@ fsq_volumes:
     push r13
     push r15
     push r14
-    xor r15d, r15d                      ; R15: the boot stick, if one is
-    call log_volume
-    jc .no_stick
+    xor r15d, r15d                      ; R15: the boot volume, if one is
+    call boot_volume                    ; (not only a stick: hp-1's own disk)
+    jc .no_boot
     mov r15, r14
-.no_stick:
+.no_boot:
     pop r14
     xor r12d, r12d                      ; R12: how many
     xor r13d, r13d                      ; R13: bytes written
