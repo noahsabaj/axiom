@@ -27,6 +27,12 @@
     python tools/hw/hp1.py fsck                its EFI partition checked, read only
     python tools/hw/hp1.py axiom1 [--update]   one run as axiom-1, fleet's node: see
                                                axiom1() below
+    python tools/hw/hp1.py default             Axiom as what hp-1 starts (Stage C):
+                                               build/esp installed, START.TXT
+                                               'watchdog on' and 'fleet &', the
+                                               loader also as EFI/BOOT/BOOTX64.EFI,
+                                               its entry first in BootOrder; no
+                                               restart
     python tools/hw/hp1.py battery             how Axiom is to read its battery: its
                                                ACPI tables and EC registers, read
                                                under Ubuntu, through tools/hw/ecmap.py
@@ -49,7 +55,8 @@ the kernel types the lines into its shell (harness.asm: also 'sleep', 'until',
 AxiomLog, and restarts; BootNext is spent, so Ubuntu comes back, and the log
 is read from there. A hang ends in the watchdog's reset, a panic in a restart.
 
-Only BootNext is ever set, never BootOrder. A restart waits until no fleet
+A test run sets only BootNext; `default` alone writes BootOrder, Axiom's
+entry first, when hp-1 is to be axiom-1 for good. A restart waits until no fleet
 job starts or runs on hp-1, and none waiting in fleet's queue may go there.
 The log is also saved to build/hw/hp1-last.log.
 """
@@ -290,6 +297,20 @@ def axiom1(update, wait, keep):
     return code
 
 
+def make_default():
+    """Axiom as what hp-1 starts from now on (hp1_node.py default), as
+    axiom1 ran it: build/esp installed, START.TXT 'watchdog on' and 'fleet
+    &'. Nothing restarts here."""
+    status = node("status")
+    if "WIFI.KEY: not there" in status or "Home/fleet: node.json, cert.pem, key.pem" not in status:
+        sys.exit("hp1.py: no WIFI.KEY or /Home/fleet on hp-1: axiom-1 could not join fleet")
+    print(node("install").strip(), flush=True)
+    print(node("start", start=["watchdog on", "fleet &"]).strip(), flush=True)
+    out = node("default", check=False)
+    print(out.strip())
+    return 0 if "Axiom is what hp-1 starts next" in out else 1
+
+
 def battery():
     """How Axiom is to read hp-1's battery (src/kernel/battery.asm's board
     table): hp1_node.py battery, read only, under Ubuntu; its ACPI tables
@@ -332,7 +353,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("what", choices=("status", "install", "run", "log", "cancel", "wifi",
                                      "home", "try", "start", "forget", "fsck", "axiom1",
-                                     "battery"))
+                                     "battery", "default"))
     ap.add_argument("lines", nargs="*", help="run: the script's lines; start: START.TXT's")
     ap.add_argument("--update", action="store_true", help="axiom1: a new kernel over fleet, "
                     "and a second run, its trial")
@@ -363,6 +384,8 @@ def main():
         return axiom1(opts.update, max(opts.wait, 1200), opts.keep)
     if opts.what == "battery":
         return battery()
+    if opts.what == "default":
+        return make_default()
     print(node(opts.what, check=opts.what != "fsck").strip())
     return 0
 

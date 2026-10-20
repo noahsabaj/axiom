@@ -28,6 +28,11 @@ hp1.py sent: EFI/AXIOM/BOOTX64.EFI and run.txt.
                                    starts the kernel built into its loader
     python3 hp1_node.py fsck       the EFI system partition checked, read
                                    only (fsck.vfat -n), after Axiom wrote it
+    python3 hp1_node.py default    Axiom as what hp-1 starts: its loader also
+                                   as EFI/BOOT/BOOTX64.EFI (the firmware's
+                                   fallback) and its entry first in
+                                   BootOrder, the others after it as they
+                                   were; nothing restarts
     python3 hp1_node.py battery    what tools/hw/ecmap.py needs, as JSON on
                                    BATTERY lines: the DSDT (and the SSDTs naming a
                                    battery), the EC's ports, what Linux says
@@ -35,7 +40,9 @@ hp1.py sent: EFI/AXIOM/BOOTX64.EFI and run.txt.
                                    EC's registers if ec_sys is loaded; read
                                    only, nothing loaded
 
-Only BootNext is ever set; BootOrder is never written. Nothing here reads
+BootNext is what a test run sets; BootOrder is written by `default` alone,
+when hp-1 is to be axiom-1 (Stage C), and only to put Axiom's entry first.
+Nothing here reads
 or prints anything but Axiom's own variables, the boot entries, and the
 TCO watchdog's registers, but for `wifi`: it reads the network's saved
 passphrase and writes only the key made from it, and prints neither, nor
@@ -506,6 +513,47 @@ def read_text(path):
         return ""
 
 
+def default():
+    """Axiom as what hp-1 starts (Stage C): the loader EFI/AXIOM holds,
+    copied as EFI/BOOT/BOOTX64.EFI, the path the firmware tries when no
+    boot entry works, and Axiom's entry made first in BootOrder, the others
+    after it in the order they had. Nothing restarts; the next start is
+    Axiom's. START.TXT should say what it runs ('watchdog on', 'fleet &')."""
+    _, nxt, order, axiom = boot_entries()
+    loader = (ESP / LOADER).read_bytes() if (ESP / LOADER).exists() else b""
+    if axiom is None or not loader:
+        print("no boot entry for Axiom, or no loader in EFI/AXIOM: install first")
+        return 1
+    if not START.exists():
+        print(f"{START}: not there; Axiom would start and run nothing (hp1.py start first)")
+        return 1
+    fallback = ESP / "EFI" / "BOOT" / "BOOTX64.EFI"
+    fallback.parent.mkdir(parents=True, exist_ok=True)
+    tmp = fallback.with_suffix(".NEW")
+    tmp.write_bytes(loader)
+    os.sync()
+    tmp.replace(fallback)
+    os.sync()
+    want = hashlib.sha256(loader).hexdigest()
+    got = hashlib.sha256(fallback.read_bytes()).hexdigest()
+    print(f"{fallback}: {len(loader)} bytes, sha256 {got[:16]}, "
+          f"{'the loader in EFI/AXIOM' if got == want else 'NOT the loader in EFI/AXIOM'}")
+    if got != want:
+        return 1
+    rest = [e for e in (order or "").split(",") if e and e.upper() != axiom.upper()]
+    new = ",".join([axiom, *rest])
+    if order != new:
+        sh("efibootmgr", "-o", new)
+    _, nxt, after, _ = boot_entries()
+    print(f"BootOrder {after} (was {order}); BootNext {nxt}")
+    if after != new:
+        print("BootOrder: NOT as meant")
+        return 1
+    print(f"{START}: {START.read_text(errors='replace').splitlines()!r}")
+    print("Axiom is what hp-1 starts next")
+    return 0
+
+
 def cancel():
     efivar_delete(RUN)
     _, nxt, _, axiom = boot_entries()
@@ -520,4 +568,4 @@ if __name__ == "__main__":
     sys.exit({"status": status, "install": install, "run": run, "log": log,
               "cancel": cancel, "wifi": wifi, "home": home, "try": try_kernel,
               "start": start, "forget": forget, "fsck": fsck,
-              "battery": battery}[what]() or 0)
+              "battery": battery, "default": default}[what]() or 0)
