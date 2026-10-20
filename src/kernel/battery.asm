@@ -71,15 +71,17 @@ BB_REM_HI       equ 33                  ; and high
 BB_FULL         equ 34                  ; the charge when full
 BB_FULL_HI      equ 35
 BB_SMB          equ 36                  ; BR_SMBUS: the SMBus host's base
+BB_FLAGS        equ 37                  ; BBF_*
 BB_SIZE         equ 40
+BBF_EC_READONLY equ 1                   ; its EC is never written (ec_readonly)
 
 ; BOARD maker, name, model, command port, data port, charge register, how
 ; it is read, charger register, its bit, left low, high, full low, high,
-; SMBus base
-%macro BOARD 14
+; SMBus base[, BBF_* flags]
+%macro BOARD 14-15 0
     dq %%v, %%b, %%m
     dw %4, %5
-    db %6, %7, %8, %9, %10, %11, %12, %13, %14, 0, 0, 0
+    db %6, %7, %8, %9, %10, %11, %12, %13, %14, %15, 0, 0
     [section .rodata]
     %%v: db %1, 0
     %%b: db %2, 0
@@ -118,6 +120,10 @@ battery_init:
     call ec_use
     call bat_ports
     KLOG "battery: %s (%s %s), its EC at %x/%x (%s)", qword [rbx + BB_MODEL], qword [rbx + BB_VENDOR], qword [rbx + BB_BOARD], rax, rcx, rdx
+    test byte [rbx + BB_FLAGS], BBF_EC_READONLY
+    jz .none
+    mov byte [ec_readonly], 1
+    KLOG "battery: this board's EC is only read, never written (no hold, no charging mode)"
 .none:
     pop rbx
     ret
@@ -555,6 +561,11 @@ bat_mode_set:
     push r12
     mov r12d, edi
     mov rbx, [bat_board]
+    cmp byte [ec_readonly], 0
+    je .writable
+    cmp byte [ec_fake], 0               ; (the simulated EC may be)
+    je .readonly
+.writable:
     cmp r12d, BM_NORMAL
     je .ask
     mov byte [bat_changed], 1           ; undone by battery_leave
@@ -591,6 +602,9 @@ bat_mode_set:
     jmp .fail
 .refused:
     lea rsi, [str_bat_refused]
+    jmp .fail
+.readonly:
+    lea rsi, [str_bat_readonly]
     jmp .fail
 .other:
     lea rsi, [str_bat_other]
@@ -850,8 +864,11 @@ battery_ec:
 align 8
 bat_boards:
     ; hp-1. The charge register: tried under Linux (fleet, 2026-10-12).
-    ; How its charge is read: from its DSDT, still to be read.
-    BOARD 'HP', '87FE', 'HP Laptop 15-dy2xxx', 0x66, 0x62, 0x76, BR_UNKNOWN, 0, 0, 0, 0, 0, 0, 0
+    ; How its charge is read: from its DSDT, still to be read. Its EC is
+    ; only read: under Linux it timed out (\_SB.BAT0._BST, 2026-10-19)
+    ; while fleet's battery hold wrote its charge register, and only a hard
+    ; reset cleared it; not written until that is understood.
+    BOARD 'HP', '87FE', 'HP Laptop 15-dy2xxx', 0x66, 0x62, 0x76, BR_UNKNOWN, 0, 0, 0, 0, 0, 0, 0, BBF_EC_READONLY
     dq 0
 
 battery_actions:
@@ -877,6 +894,7 @@ str_bm_odd:         db 'none Axiom knows', 0
 str_bat_silent:     db 'the EC does not answer', 0
 str_bat_no_answer:  db 'the EC has not acknowledged it', 0
 str_bat_refused:    db 'the EC refused it', 0
+str_bat_readonly:   db "this board's EC is never written", 0
 str_bat_other:      db 'the EC runs another mode', 0
 str_bat_no_board:   db 'not a board Axiom holds the battery of', 0
 str_bat_no_ec:      db 'no embedded controller known here', 0

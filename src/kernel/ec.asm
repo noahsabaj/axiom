@@ -210,7 +210,8 @@ ec_read:
     ret
 
 ; ec_write(EDI = register, ESI = its new byte) -> CF if the EC did not take
-; it. Preserves all.
+; it, or is never written (ec_readonly: a board battery.asm's table says
+; so). Preserves all.
 ec_write:
     push rax
     push rcx
@@ -218,6 +219,11 @@ ec_write:
     push r8
     push r9
     push r10
+    cmp byte [ec_readonly], 0
+    je .write
+    cmp byte [ec_fake], 0               ; (the simulated EC may be)
+    je .refused
+.write:
     mov eax, EC_WRITE
     call ec_begin
     jc .fail
@@ -236,6 +242,7 @@ ec_write:
     mov dword [ec_busy], 0
 .fail:
     inc dword [ec_failures]
+.refused:
     stc
 .out:
     pop r10
@@ -256,3 +263,4 @@ ec_failures:    resd 1                  ; transactions the EC did not finish
 ec_cmd:         resw 1                  ; EC_SC: status in, commands out
 ec_data:        resw 1                  ; EC_DATA
 ec_from:        resb 1                  ; 0: no EC known; else EC_FROM_*
+ec_readonly:    resb 1                  ; 1: never written (battery.asm's board)

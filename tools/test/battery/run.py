@@ -11,10 +11,11 @@ board table needs in a DSDT.
     the hold over 40 simulated minutes; 'battery simulate': a battery read
     at 90% on its charger from then on, and 'battery test' refused.
   - hp1: QEMU's SMBIOS says HP 87FE (hp-1's board): the board found, its
-    EC's ports from the table, an EC that does not answer (QEMU has none)
-    said so; the hold refused, its charge readings still unknown; 'battery
-    test' passes there too and gives the board back; 'battery simulate'
-    refused.
+    EC's ports from the table, its EC only read (never written); an EC
+    that does not answer (QEMU has none) said so; the hold refused, its
+    charge readings still unknown; 'battery mode inhibit' refused, the EC
+    not written; 'battery test' passes there too (its simulated EC is
+    written) and gives the board back; 'battery simulate' refused.
   - ecmap: on a DSDT made here (no QEMU; --ecmap: only this): the EC's
     ports and fields, what _BST, _BIF and _PSR reach through the methods
     they call, a scope it cannot read passed over and said so; and which
@@ -222,8 +223,10 @@ def main():
            "QEMU has no EC: said so")
     result("battery: not held: how to read this board's charge is not known yet" in log,
            "the hold refused: its charge readings not known yet")
-    result("battery: inhibit asked for, but the EC does not answer" in log,
-           "'battery mode inhibit': the EC does not answer")
+    result("battery: this board's EC is only read, never written (no hold, no charging mode)"
+           in log, "hp-1's EC: only read, never written")
+    result("battery: inhibit asked for, but this board's EC is never written" in log,
+           "'battery mode inhibit': refused, the EC not written")
     result("battery: the EC did not answer, at register 0" in log,
            "'battery ec': the EC does not answer")
     m = re.search(r"battery test: (\d+) of (\d+) passed", log)
