@@ -12,7 +12,8 @@
 ;  as it does. A window that moves so is drawn from a picture of it
 ;  (mv_picture): desk_frame's, over black and over white, which gives each
 ;  pixel's color and how much of it there is, its shadow too - scaled,
-;  from the half of it that fits (pic_draw).
+;  from the half of it that fits (pic_draw). The pictures' memory is kept
+;  while things move, and MV_KEEP_MS after, for what moves next.
 ;
 ;  'motion off' stops it all; 'motion slow' makes it ten times slower.
 ;  Main thread.
@@ -63,6 +64,7 @@ MV_MIN_MS       equ 380
 MV_ZOOM_MS      equ 240
 MV_FADE_MS      equ 180
 MV_WAIT_MS      equ 300                 ; a program's new window: for its pixels, at most
+MV_KEEP_MS      equ 10000               ; the pictures' memory, kept once nothing moves
 
 %macro MV_PUT 1                         ; RDI, RSI, RDX, RCX: into a rectangle of the slot RBX
     mov [rbx + %1], rdi
@@ -110,9 +112,12 @@ motion_service:
     or r12d, eax
     call mn_motion                      ; a menu's item, chosen
     or r12d, eax
-    mov rax, -1                         ; the next step: none,
     test r12d, r12d
-    jz .due
+    jnz .moving
+    call mv_spare                       ; the next step: none (or the
+    jmp .due                            ; pictures' memory freed),
+.moving:
+    mov qword [mv_idle], 0
     mov rax, [tsc_per_ms]               ; or a frame on
     imul rax, rax, MV_FRAME_MS
     add rax, [mv_now]
@@ -124,6 +129,50 @@ motion_service:
     mov [mv_due], rax
     pop r12
     pop rbx
+.out:
+    ret
+
+; mv_spare -> RAX = when motion_service is next wanted, -1 for never: with
+; nothing moving, the pictures' memory is kept MV_KEEP_MS, then freed.
+; Preserves others.
+mv_spare:
+    mov rax, -1
+    cmp byte [mv_held], 0
+    je .out
+    cmp qword [mv_idle], 0
+    jne .since
+    mov rax, [mv_now]                   ; still from now
+    mov [mv_idle], rax
+.since:
+    mov eax, MV_KEEP_MS
+    imul rax, [tsc_per_ms]
+    add rax, [mv_idle]
+    cmp rax, [mv_now]
+    ja .out
+    push rbx
+    push rcx
+    push rdi
+    lea rbx, [mv_slots]                 ; (all free, nothing moving)
+.slot:
+    xor ecx, ecx
+.level:
+    imul rdi, rcx, SF_SIZE
+    lea rdi, [rbx + rdi + MV_PIC]
+    call sf_free
+    inc ecx
+    cmp ecx, MV_LEVELS
+    jb .level
+    add rbx, MV_SIZE
+    lea rax, [mv_slots + MV_SIZE * MV_MAX]
+    cmp rbx, rax
+    jb .slot
+    lea rdi, [mv_black]
+    call sf_free
+    mov byte [mv_held], 0
+    pop rdi
+    pop rcx
+    pop rbx
+    mov rax, -1
 .out:
     ret
 
@@ -402,7 +451,8 @@ mv_begin:
     ret
 
 ; mv_end(RBX = a slot): done: the window it was drawn as it is again, and
-; where it was drawn, composed; its picture freed. Preserves all.
+; where it was drawn, composed; its picture's memory kept (mv_spare frees
+; it). Preserves all.
 mv_end:
     push rax
     push rcx
@@ -425,14 +475,6 @@ mv_end:
 .dock:
     call dock_damage                    ; (its picture there now)
 .free:
-    xor ecx, ecx
-.level:
-    imul rax, rcx, SF_SIZE
-    lea rdi, [rbx + rax + MV_PIC]
-    call sf_free
-    inc ecx
-    cmp ecx, MV_LEVELS
-    jb .level
     mov dword [rbx + MV_KIND], 0
     mov qword [rbx + MV_WIN], 0
     pop rdi
@@ -442,8 +484,8 @@ mv_end:
     pop rax
     ret
 
-; mv_slot -> RBX = a free slot, cleared but for its picture (freed), CF if
-; none. Preserves others.
+; mv_slot -> RBX = a free slot, cleared, its picture empty (its memory, if
+; it has any, kept), CF if none. Preserves others.
 mv_slot:
     push rax
     lea rbx, [mv_slots]
@@ -464,6 +506,15 @@ mv_slot:
     mov ecx, MV_PIC
     xor eax, eax
     rep stosb
+    xor ecx, ecx                        ; its levels: none yet
+.level:
+    imul rdi, rcx, SF_SIZE
+    mov qword [rbx + rdi + MV_PIC + SF_W], 0
+    mov qword [rbx + rdi + MV_PIC + SF_H], 0
+    inc ecx
+    cmp ecx, MV_LEVELS
+    jb .level
+    mov byte [mv_held], 1               ; (memory, perhaps, from now)
     pop rdi
     pop rcx
     pop rax
@@ -968,6 +1019,34 @@ mv_picture:
     mov rdi, [rbx + MV_PIC + SF_PTR]
     mov rcx, r14
     imul rcx, r15
+    movdqa xmm5, [mv_green]
+    pcmpeqb xmm6, xmm6
+    movdqa xmm7, [mv_alpha]
+.four:
+    cmp rcx, 4                          ; four at once
+    jb .rest
+    movdqu xmm0, [rsi]                  ; over black: their colors
+    movdqu xmm1, [rdi]                  ; over white: and what shows through
+    psubusb xmm1, xmm0                  ; (green: white's less black's)
+    pand xmm1, xmm5
+    psrld xmm1, 8
+    movdqa xmm2, xmm1                   ; in each byte of its pixel
+    pslld xmm2, 8
+    por xmm1, xmm2
+    movdqa xmm2, xmm1
+    pslld xmm2, 16
+    por xmm1, xmm2
+    pxor xmm1, xmm6                     ; how much of each there is
+    por xmm0, xmm7                      ; its alpha that; its colors no more
+    pminub xmm0, xmm1
+    movdqu [rdi], xmm0
+    add rsi, 16
+    add rdi, 16
+    sub rcx, 4
+    jmp .four
+.rest:
+    test rcx, rcx
+    jz .mixed
 .px:
     mov eax, [rsi]                      ; over black: its color, premultiplied
     mov edx, [rdi]                      ; over white: and what shows through
@@ -1017,8 +1096,7 @@ mv_picture:
     add rdi, 4
     dec rcx
     jnz .px
-    lea rdi, [mv_black]                 ; (not kept: it may be large)
-    call sf_free
+.mixed:
     lea rsi, [rbx + MV_PIC]             ; its halves, to draw it small
     mov r13d, 1
 .half:
@@ -1992,6 +2070,9 @@ cmd_motion:
     ret
 
 section .rodata
+align 16
+mv_green:       times 4 dd 0x0000FF00   ; mv_picture's: a pixel's green,
+mv_alpha:       times 4 dd 0xFF000000   ; its alpha
 str_mv_on:      db 'on', 0
 str_mv_off:     db 'off', 0
 str_mv_slow:    db 'slow', 0
@@ -2004,7 +2085,9 @@ mv_scale:       dd 1                    ; how slow: 1, 10; 0: no motion
 section .bss
 alignb 8
 mv_now:         resq 1                  ; the step's time
+mv_idle:        resq 1                  ; since when nothing moves (0: it does)
 mv_kicked:      resb 1                  ; something began during it
+mv_held:        resb 1                  ; pictures' memory may be kept
 alignb 8
 mv_slots:       resb MV_SIZE * MV_MAX
 mv_black:       resb SF_SIZE            ; a window over black, while pictured

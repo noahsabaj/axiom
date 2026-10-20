@@ -1793,6 +1793,7 @@ ds_say:
     xor eax, eax
     mov ecx, DS_PARTS + 4
     rep stosq
+    call ml_say                         ; and what held the main loop longest
     pop r15
     pop r14
     pop r13

@@ -629,6 +629,7 @@ SEL_TSS0        equ 0x28                ; CPU n uses SEL_TSS0 + 16 * n
 VEC_KBD         equ 0x21
 VEC_USB         equ 0x22
 VEC_NET         equ 0x23
+VEC_SERIAL      equ 0x24                ; COM1's bytes in, to the BSP
 VEC_TIMER       equ 0x30
 VEC_WAKE        equ 0x40
 VEC_TLB         equ 0x41

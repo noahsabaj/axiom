@@ -115,6 +115,7 @@ kernel_main:
     mov eax, [pci_count]
     KLOG "pci: %u functions", rax
     call kbd_init
+    call serial_irq_init                ; what COM1 types, as it comes
     call usb_init
     call disk_init
     call crypto_boot
@@ -146,50 +147,90 @@ kernel_main:
     imul rcx, rax, 4
     mov [usb_poll_ticks], rcx           ; controllers without interrupts
 
+; the main loop's parts, each timed: 'win speed' says the slowest (ml_say)
+ML_USB          equ 0
+ML_NET          equ 1
+ML_LOG          equ 2
+ML_POINTER      equ 3
+ML_PROGRAMS     equ 4
+ML_IOMMU        equ 5
+ML_SHELL        equ 6
+ML_START        equ 7
+ML_HARNESS      equ 8
+ML_UPDATE       equ 9
+ML_BATTERY      equ 10
+ML_LOAD         equ 11
+ML_KEYS         equ 12
+ML_DESK         equ 13
+ML_TERM         equ 14
+ML_MOTION       equ 15
+ML_COMPOSE      equ 16
+ML_REFRESH      equ 17
+ML_MANDEL       equ 18
+ML_PARTS        equ 19
+
+; ML_TIMED function, part: called (what it is given kept), and the longest
+; it took kept by its part
+%macro ML_TIMED 2
+    push rax
+    push rdx
+    RDTSC64
+    mov [ml_began], rax
+    pop rdx
+    pop rax
+    call %1
+    RDTSC64
+    sub rax, [ml_began]
+    cmp rax, [ml_longest + %2 * 8]
+    jbe %%kept
+    mov [ml_longest + %2 * 8], rax
+%%kept:
+%endmacro
+
 ; -----------------------------------------------------------------------------
 ;  main_loop: input, telemetry twice a second, demo frames; in between, the
 ;  thread 'main' parks until the next of them, or until a device interrupts
 ; -----------------------------------------------------------------------------
 main_loop:
-    call usb_poll
-    call usb_service
-    call net_service
-    call log_service
-    call pointer_service
-    call user_service
-    call iommu_service
-    call shell_service                  ; the rest of a line, after a command
-    call start_service                  ; START.TXT's lines, at each start
-    call harness_service                ; a test run's next line
-    call update_service                 ; a trial not kept in time: a restart
-    call battery_service                ; the battery hold's minute
-    call load_service                   ; the load average's 5 s
+    ML_TIMED usb_poll, ML_USB
+    ML_TIMED usb_service, ML_USB
+    ML_TIMED net_service, ML_NET
+    ML_TIMED log_service, ML_LOG
+    ML_TIMED pointer_service, ML_POINTER
+    ML_TIMED user_service, ML_PROGRAMS
+    ML_TIMED iommu_service, ML_IOMMU
+    ML_TIMED shell_service, ML_SHELL    ; the rest of a line, after a command
+    ML_TIMED start_service, ML_START    ; START.TXT's lines, at each start
+    ML_TIMED harness_service, ML_HARNESS ; a test run's next line
+    ML_TIMED update_service, ML_UPDATE  ; a trial not kept in time: a restart
+    ML_TIMED battery_service, ML_BATTERY ; the battery hold's minute
+    ML_TIMED load_service, ML_LOAD      ; the load average's 5 s
 .keys:
     call key_next                       ; keys down and up, until a key code's turn
     jc .input
-    call win_key_event                  ; to a program with the keys that asks
+    ML_TIMED win_key_event, ML_KEYS     ; to a program with the keys that asks
     jmp .keys
 .input:
     call kbd_getc                       ; once the keys before it are out
     test eax, eax
     jz .typed
-    call desk_key                       ; to the window with the keys
+    ML_TIMED desk_key, ML_KEYS          ; to the window with the keys
     jmp .keys
 .typed:
     call key_pending                    ; keys down and up since
     jnz .keys
 .refresh:
-    call desk_service                   ; windows closing go
-    call term_service                   ; what was printed, drawn
-    call motion_service                 ; what moves, a step on
-    call desk_update                    ; and what changed, shown
+    ML_TIMED desk_service, ML_DESK      ; windows closing go
+    ML_TIMED term_service, ML_TERM      ; what was printed, drawn
+    ML_TIMED motion_service, ML_MOTION  ; what moves, a step on
+    ML_TIMED desk_update, ML_COMPOSE    ; and what changed, shown
     RDTSC64
     cmp rax, [next_refresh]
     jb .demo
     add rax, [refresh_ticks]
     mov [next_refresh], rax
-    call ui_refresh
-    call desk_tick                      ; the bar's clock, each new minute
+    ML_TIMED ui_refresh, ML_REFRESH
+    ML_TIMED desk_tick, ML_REFRESH      ; the bar's clock, each new minute
 .demo:
     call ui_demo_shown                  ; minimised: nothing to draw
     jz .sleep
@@ -205,8 +246,8 @@ main_loop:
     add rax, [frame_ticks]
     mov [next_frame], rax
 .render:
-    call mandel_frame
-    call ui_demo_stats
+    ML_TIMED mandel_frame, ML_MANDEL
+    ML_TIMED ui_demo_stats, ML_MANDEL
     jmp main_loop
 .sleep:
     cli
@@ -284,6 +325,78 @@ boot_stop:
     hlt
     jmp boot_stop
 
+; ml_say: the main loop's three slowest parts since it was last asked, each
+; by the longest it took at once ('win speed'); then from 0
+ml_say:
+    push r12
+    push r13
+    sub rsp, 48                         ; three names, three times
+    mov r12, rsp
+    xor r13d, r13d
+.pick:
+    lea rdx, [ml_longest]               ; the slowest left
+    xor ecx, ecx
+    xor r8d, r8d
+.find:
+    mov rax, [rdx + rcx * 8]
+    cmp rax, [rdx + r8 * 8]
+    jbe .next
+    mov r8d, ecx
+.next:
+    inc ecx
+    cmp ecx, ML_PARTS
+    jb .find
+    mov rax, [rdx + r8 * 8]
+    mov qword [rdx + r8 * 8], 0
+    mov ecx, 100                        ; in hundredths of a ms
+    mul rcx
+    div qword [tsc_per_ms]
+    mov [r12 + r13 + 8], rax
+    lea rax, [ml_names]
+    mov rax, [rax + r8 * 8]
+    mov [r12 + r13], rax
+    add r13d, 16
+    cmp r13d, 48
+    jb .pick
+    KLOG "desk: the main loop's slowest: %s %h ms, %s %h ms, %s %h ms", qword [r12], qword [r12 + 8], qword [r12 + 16], qword [r12 + 24], qword [r12 + 32], qword [r12 + 40]
+    lea rdi, [ml_longest]               ; from 0
+    xor eax, eax
+    mov ecx, ML_PARTS
+    rep stosq
+    add rsp, 48
+    pop r13
+    pop r12
+    ret
+
+section .rodata
+align 8
+ml_names:       dq str_ml_usb, str_ml_net, str_ml_log, str_ml_pointer
+                dq str_ml_programs, str_ml_iommu, str_ml_shell, str_ml_start
+                dq str_ml_harness, str_ml_update, str_ml_battery, str_ml_load
+                dq str_ml_keys, str_ml_desk, str_ml_term, str_ml_motion
+                dq str_ml_compose, str_ml_refresh, str_ml_mandel
+str_ml_usb:     db 'usb', 0
+str_ml_net:     db 'net', 0
+str_ml_log:     db 'log', 0
+str_ml_pointer: db 'pointer', 0
+str_ml_programs: db 'programs', 0
+str_ml_iommu:   db 'iommu', 0
+str_ml_shell:   db 'shell', 0
+str_ml_start:   db 'start', 0
+str_ml_harness: db 'harness', 0
+str_ml_update:  db 'update', 0
+str_ml_battery: db 'battery', 0
+str_ml_load:    db 'load', 0
+str_ml_keys:    db 'keys', 0
+str_ml_desk:    db 'desk', 0
+str_ml_term:    db 'terminal', 0
+str_ml_motion:  db 'motion', 0
+str_ml_compose: db 'compose', 0
+str_ml_refresh: db 'refresh', 0
+str_ml_mandel:  db 'mandelbrot', 0
+
+section .text
+
 section .bss
 alignb 8
 next_refresh:   resq 1
@@ -291,3 +404,5 @@ next_frame:     resq 1
 refresh_ticks:  resq 1
 frame_ticks:    resq 1
 usb_poll_ticks: resq 1
+ml_began:       resq 1
+ml_longest:     resq ML_PARTS

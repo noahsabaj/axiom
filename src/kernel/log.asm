@@ -185,6 +185,10 @@ log_save:
 .write:
     mov rcx, [log_len]
     mov [log_saving], rcx
+    push rdx
+    RDTSC64
+    mov [log_began], rax
+    pop rdx
     mov bl, [r14 + VO_WRITABLE]
     mov byte [r14 + VO_WRITABLE], 1
     lea rsi, [str_log_name]
@@ -193,6 +197,11 @@ log_save:
     mov [r14 + VO_WRITABLE], bl
     mov byte [log_busy], 0
     jc .fail
+    push rdx
+    RDTSC64
+    sub rax, [log_began]
+    mov [log_took], rax
+    pop rdx
     mov rcx, [log_saving]
     mov [log_saved], rcx
     clc
@@ -304,6 +313,10 @@ cmd_log:
     cmp byte [log_auto], 0
     cmove rcx, rdx
     KLOG "log: %b in memory, %b saved; automatic saving %s", qword [log_len], qword [log_saved], rcx
+    mov rax, [log_took]
+    xor edx, edx
+    div qword [tsc_per_ms]
+    KLOG "log: the last save took %u ms", rax
     cmp dword [log_fs], 0
     je .unknown
     call log_volume
@@ -351,6 +364,8 @@ log_len:        resq 1
 log_saved:      resq 1
 log_saving:     resq 1
 log_next:       resq 1
+log_began:      resq 1
+log_took:       resq 1
 log_serial:     resd 1
 log_fs:         resd 1
 log_buf:        resb LOG_MAX

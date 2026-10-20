@@ -36,7 +36,7 @@ def result(ok, text):
 
 SCRIPT = [
     "until log: kept in", "wait 1.5",
-    "type mhello one two\\n", "until mhello: window open", "wait 0.5",
+    "type mhello one two\\n", "until mhello: window open", "until ' opens", "wait 0.5",
     "shot build/test/masm/open.png",
     "sendkey a", "wait 0.4",
     "type q", "until run: MHELLO exited", "wait 0.3",

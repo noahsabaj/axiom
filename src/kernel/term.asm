@@ -88,7 +88,10 @@ TW_VP           equ TW_VT + 120         ; VT_PARAMS dwords
 TW_VOSC         equ TW_VP + VT_PARAMS * 4
 TW_VREPLY       equ TW_VOSC + VT_OSC
 TW_VTITLE       equ TW_VREPLY + VT_REPLY
-TW_SIZE         equ TW_VTITLE + WN_TITLE_MAX
+TW_AHEAD_N      equ TW_VTITLE + WN_TITLE_MAX    ; dword: keys typed while a command ran,
+TW_AHEAD        equ TW_AHEAD_N + 4      ; TW_AHEAD_MAX of them, for the prompt (shell.asm)
+TW_SIZE         equ TW_AHEAD + TW_AHEAD_MAX
+TW_AHEAD_MAX    equ 252
 VT_PARAMS       equ 16
 VT_OSC          equ 256
 VT_REPLY        equ 128

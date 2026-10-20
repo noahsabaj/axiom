@@ -537,6 +537,8 @@ serial_poll:
     je .out
     push rax
     push rdx
+    pushfq                              ; (its interrupt polls too: not in
+    cli                                 ; the middle of this, nor out of order)
 .next:
     mov dx, 0x3F8 + 5
     in al, dx
@@ -552,12 +554,10 @@ serial_poll:
     jne .not_del
     mov al, 8
 .not_del:
-    pushfq
-    cli
     call kbd_push
-    popfq
     jmp .next
 .done:
+    popfq
     pop rdx
     pop rax
 .out:

@@ -105,7 +105,7 @@ def script(tag):
     return [
         "until log: kept in", "wait 1.5",
         'type rhello one "two words"\\n', "until run: RHELLO exited", "wait 0.3",
-        "type rdemo\\n", "until rdemo: first frame", "wait 0.5",
+        "type rdemo\\n", "until rdemo: first frame", "until ' opens", "wait 0.5",
         f"shot build/test/rust/{tag}open.png",
         "type x", "wait 0.2", "sendkey ctrl-a", "wait 0.2", "sendkey f5", "wait 0.5",
         f"drag {win(*FROM)} {win(*TO)}", "wait 0.8",
@@ -127,7 +127,7 @@ def script(tag):
         "type g", "until rdemo: pointer Arrow", "wait 0.3",
         f"abs {at(CX + 14 * PT, CY - TITLE // 2)} left",   # its close button
         "until run: RDEMO exited", "wait 0.3",
-        "type rdemo --full\\n", "until rdemo: first frame", "wait 0.5",
+        "type rdemo --full\\n", "until rdemo: first frame", "until ' opens", "wait 0.5",
         f"shot build/test/rust/{tag}full.png",
         "type q", "until run: RDEMO exited", "wait 0.3",
     ]
@@ -136,7 +136,7 @@ def script(tag):
 def script_usb():
     return [
         "until log: kept in", "wait 1.5",
-        "type rdemo\\n", "until rdemo: first frame", "wait 0.5",
+        "type rdemo\\n", "until rdemo: first frame", "until ' opens", "wait 0.5",
         "sendkey ctrl-a", "wait 0.3", "sendkey f5", "wait 0.3", "sendkey up", "wait 0.3",
         "key w down", "wait 0.1", "key w down", "wait 0.1", "key w down", "wait 0.1",
         "key w up", "wait 0.4",

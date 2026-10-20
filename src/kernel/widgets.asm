@@ -260,7 +260,7 @@ wg_copy_in:
     ret
 
 ; wg_tick: from desk_tick, the clock just read: the cards again when the
-; minute turns, and every WG_EVERY_MS. Preserves all.
+; minute turns, the system's every WG_EVERY_MS. Preserves all.
 wg_tick:
     push rax
     push rcx
@@ -277,6 +277,8 @@ wg_tick:
     call uptime_ms
     cmp rax, [wg_next]
     jb .out
+    call wg_paint_system                ; between minutes, only its numbers
+    jmp .out
 .paint:
     call wg_paint
 .out:
@@ -324,6 +326,55 @@ wg_paint:
     mov rsi, [wg_y]
     mov rdx, [wg_w]
     mov rcx, [wg_h]
+    call desk_damage
+.done:
+    pop rbx
+.out:
+    ret
+
+; wg_paint_system: the system's card alone, over its glass; then shown
+; (the clock's and the month's change only with the minute). Preserves RBX,
+; RBP, R12-R15.
+wg_paint_system:
+    cmp byte [wg_ok], 0
+    je .out
+    push rbx
+    lea rbx, [wg_cards + 2 * WC_SIZE]
+    mov rax, [wg_bg + SF_PITCH]         ; the glass again, its rows (the two
+    imul rax, [rbx + WC_Y]              ; the same size: the same pitch)
+    mov rdx, [rbx + WC_X]
+    lea rax, [rax + rdx * 4]
+    mov rsi, [wg_bg + SF_PTR]
+    add rsi, rax
+    mov rdi, [wg_sf + SF_PTR]
+    add rdi, rax
+    mov rdx, [rbx + WC_H]
+.row:
+    push rsi
+    push rdi
+    mov rcx, [rbx + WC_W]
+    rep movsd
+    pop rdi
+    pop rsi
+    add rsi, [wg_bg + SF_PITCH]
+    add rdi, [wg_bg + SF_PITCH]
+    dec rdx
+    jnz .row
+    call uptime_ms
+    add rax, WG_EVERY_MS
+    mov [wg_next], rax
+    lea rdi, [wg_sf]
+    call gfx_target
+    call wg_system
+    call gfx_target_back
+    cmp byte [desk_ready], 0
+    je .done
+    mov rdi, [wg_x]
+    add rdi, [rbx + WC_X]
+    mov rsi, [wg_y]
+    add rsi, [rbx + WC_Y]
+    mov rdx, [rbx + WC_W]
+    mov rcx, [rbx + WC_H]
     call desk_damage
 .done:
     pop rbx

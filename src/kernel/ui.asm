@@ -951,14 +951,14 @@ ui_tile_label:
 ; -----------------------------------------------------------------------------
 ui_refresh:
     push rbx
-    call telemetry_sample_all
     call cpu_package_power
     mov rbx, [cpu_win]                  ; the tiles, if they are seen
     test rbx, rbx
     jz .out
     test dword [rbx + WN_FLAGS], WF_SHOWN
     jz .out
-    call cpu_paint
+    call telemetry_sample_all           ; each CPU's clock and heat, for them
+    call cpu_paint                      ; (waking every CPU only then)
     mov rdi, rbx
     call win_damage_all
 .out:

@@ -63,8 +63,8 @@ sh_echo:
     jmp con_putc
 
 ; shell_wait: the command runs on (a fetch); the prompt of the terminal it
-; prints to waits for shell_resume, and keys but ctrl+C are ignored
-; meanwhile. Preserves all.
+; prints to waits for shell_resume. Keys typed meanwhile are kept, and typed
+; once it is back (ctrl+C stops it, and drops them). Preserves all.
 shell_wait:
     push rax
     call con_target
@@ -76,8 +76,9 @@ shell_wait:
     ret
 
 ; shell_resume: what the prompt of the terminal this thread prints to
-; waited for is over: the prompt comes back, or what was left of the line
-; runs, from the main loop (shell_service). Preserves all.
+; waited for is over: what was left of the line runs, or the prompt comes
+; back and the keys typed meanwhile after it, from the main loop
+; (shell_service), where the keys come too. Preserves all.
 shell_resume:
     push rax
     call con_target
@@ -85,13 +86,6 @@ shell_resume:
     jz .out
     cmp byte [rax + TW_SH_WAIT], 0
     je .out
-    cmp byte [rax + TW_SH_REST], 0
-    jne .rest
-    mov byte [rax + TW_SH_WAIT], 0
-    mov byte [rax + TW_SH_FAILED], 0    ; (nothing after it to know)
-    call shell_prompt
-    jmp .out
-.rest:
     mov byte [rax + TW_SH_WAIT], 2
     mov byte [shell_pending], 1
     push rdi
@@ -132,13 +126,18 @@ shell_service:
     ret
 
 ; shell_rest: what was left of the line, in the terminal this thread prints
-; to (TW_SH_REST)
+; to (TW_SH_REST); then the prompt, and the keys typed meanwhile
 shell_rest:
     push rbx
     call con_target
     mov rbx, rax
     test rbx, rbx
     jz .out
+    cmp byte [rbx + TW_SH_REST], 0
+    jne .rest
+    mov byte [rbx + TW_SH_FAILED], 0    ; (nothing after it to know)
+    jmp .prompt
+.rest:
     lea rdi, [sh_line]
     lea rsi, [rbx + TW_SH_REST]
     mov ecx, LINE_MAX + 1
@@ -157,8 +156,38 @@ shell_rest:
     jne .out
 .prompt:
     call shell_prompt
+    call sh_ahead
 .out:
     pop rbx
+    ret
+
+; sh_ahead(RBX = a terminal, its prompt back): the keys typed while its
+; command ran, typed now, until a command runs on again (the rest kept for
+; then). Preserves RBX.
+sh_ahead:
+    push r12
+    xor r12d, r12d
+.next:
+    cmp r12d, [rbx + TW_AHEAD_N]
+    jae .all
+    cmp byte [rbx + TW_SH_WAIT], 0
+    jne .later
+    movzx edi, byte [rbx + TW_AHEAD + r12]
+    inc r12d
+    call shell_key
+    jmp .next
+.later:
+    mov ecx, [rbx + TW_AHEAD_N]         ; what is left, to the front
+    sub ecx, r12d
+    mov [rbx + TW_AHEAD_N], ecx
+    lea rdi, [rbx + TW_AHEAD]
+    lea rsi, [rdi + r12]
+    rep movsb
+    jmp .out
+.all:
+    mov dword [rbx + TW_AHEAD_N], 0
+.out:
+    pop r12
     ret
 
 ; sh_secret(RDI = line) -> CF if it sets a secret ('claude key <key>'):
@@ -224,7 +253,7 @@ shell_key:
     cmp eax, 3                          ; ctrl+C, always
     je .cancel
     cmp byte [rbx + TW_SH_WAIT], 0
-    jne .out
+    jne .ahead
     cmp eax, 10
     je .enter
     cmp eax, 8
@@ -281,9 +310,26 @@ shell_key:
     mov dword [rbx + TW_SH_LEN], 0
     call shell_prompt
     jmp .out
+.ahead:                                 ; a command runs on: kept for the
+    cmp eax, 8                          ; prompt (sh_ahead), the line's keys
+    je .keep
+    cmp eax, 10
+    je .keep
+    cmp eax, 32
+    jb .out
+    cmp eax, 126
+    ja .out
+.keep:
+    mov ecx, [rbx + TW_AHEAD_N]
+    cmp ecx, TW_AHEAD_MAX
+    jae .out
+    mov [rbx + TW_AHEAD + rcx], al
+    inc dword [rbx + TW_AHEAD_N]
+    jmp .out
 .cancel:
     mov byte [rbx + TW_SH_WAIT], 0      ; (the prompt comes back below)
-    mov byte [rbx + TW_SH_REST], 0      ; and the rest of the line is dropped
+    mov byte [rbx + TW_SH_REST], 0      ; and the rest of the line is dropped,
+    mov dword [rbx + TW_AHEAD_N], 0     ; and what was typed meanwhile
     mov rdi, rbx                        ; what this terminal started stops:
     call net_forget                     ; a ping, a lookup or a fetch,
     mov rdi, rbx
@@ -1687,10 +1733,12 @@ cmd_info:
     pop rbx
     ret
 
-; cpus: each logical CPU, in the dashboard's order
+; cpus: each logical CPU, in the dashboard's order; its clock since last
+; asked, and its heat now
 cmd_cpus:
     push rbx
     push r12
+    call telemetry_sample_all
     COLUMN 'cpu', FT_TEXT
     COLUMN 'kind', FT_TEXT
     COLUMN 'apic', FT_INT

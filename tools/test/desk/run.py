@@ -195,7 +195,7 @@ def script():
         "type x", "wait 0.3", "sendkey backspace", "wait 0.3", *win("home"),
         "type win close 6\\n", "until desk: shell 3 closes", "wait 0.3",
         # a program's window: paint, then a shell to work from
-        "type run paint 600 400\\n", "until paint: a window", "wait 0.5",
+        "type run paint 600 400\\n", "until paint: a window", "until ' opens", "wait 0.5",
         # (Terminal in the dock: the first click brings shell 1 forward, the
         # second opens a shell)
         f"abs {at(*dock(0, 8))} left", "wait 0.5",
@@ -210,7 +210,7 @@ def script():
         f"abs {at(*button(PX, PY, CLOSE))} left",
         "until run: PAINT exited", "wait 0.5", *win("paint closed"),
         # again, killed by ctrl+C in its shell
-        "type run paint\\n", "until paint: a window", "wait 0.5",
+        "type run paint\\n", "until paint: a window", "until ' opens", "wait 0.5",
         f"abs {at(*SHELL4)} left", "wait 0.3", "sendkey ctrl-c", "until run: PAINT", "wait 0.5",
         f"abs {at(*SHELL1)} left", "wait 0.3", *win("paint killed"),
         # the menus: the mark's, then File's by the arrow: New Terminal

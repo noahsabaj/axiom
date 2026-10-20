@@ -568,7 +568,12 @@ wo_open:
     pop rdi
     pop rbx
 .focus:
-    jmp win_focus
+    push rdi
+    call win_focus                      ; with the keys, and said (a test
+    pop rdi                             ; types into it from here)
+    lea rax, [rdi + WN_TITLE]
+    KLOG "desk: '%s' opens", rax
+    ret
 .full:
     lea rax, [rsp + 8]
     KLOG "desk: no room for '%s'", rax
