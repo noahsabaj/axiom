@@ -799,6 +799,7 @@ TCO_TMR         equ 0x12                    ; the count: ticks of 0.6 s
 TCO_TICKS       equ 100                     ; counted twice: a reset 2 minutes on
 TCO_TMR_HLT     equ 0x0800
 TCO_NO_REBOOT   equ 0x0001                  ; TCO1_CNT's, on version 6
+PWRM_ACPI_TMR_CTL equ 0xFE0018FC            ; Tiger Lake's PMC (PWRMBASE 0xFE000000)
 
 tco_start:
     cmp byte [tco_tried], 0                 ; once: for a test run, a trial, or both
@@ -825,6 +826,12 @@ tco_start:
     jz .none
     mov [tco_base], ax
     mov byte [tco_v6], 1
+    mov edx, PWRM_ACPI_TMR_CTL              ; Tiger Lake counts the TCO's ticks
+    mov eax, [rdx]                          ; only while its ACPI timer runs,
+    cmp eax, -1                             ; and hp-1's firmware turns that
+    je .found                               ; off (ACPI_TIM_DIS): on
+    and eax, ~2
+    mov [rdx], eax
     jmp .found
 .ich9:
     mov eax, 0x8000F800                     ; 0:31.0, the LPC bridge

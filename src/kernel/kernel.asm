@@ -137,6 +137,7 @@ section .text
 %include "efivar.asm"
 %include "harness.asm"
 %include "update.asm"
+%include "watch.asm"
 %include "start.asm"
 %include "ec.asm"
 %include "battery.asm"

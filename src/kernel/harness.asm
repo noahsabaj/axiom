@@ -450,6 +450,7 @@ harness_directive:
     lea rdi, [str_hs_end]
     call harness_word
     jnc .end
+.shell:
     stc                                 ; a shell line
     jmp .out
 .sleep:
@@ -500,7 +501,7 @@ harness_directive:
     jmp .done
 .watchdog:
     call arg_uint
-    jc .bad
+    jc .shell                           ; 'watchdog on' and the like: the shell's
     mov edi, eax
     call tco_set
     KLOG "harness: watchdog %u s", rax

@@ -505,6 +505,8 @@ upd_keep_now:
     jne .run                            ; a test run's watchdog, still
     cmp word [tco_base], 0
     je .run                             ; (none)
+    cmp byte [watch_on], 0
+    jne .kept                           ; 'watchdog on': it stays on
     call tco_stop
     jc .running
     mov byte [upd_watch], 0
@@ -513,6 +515,10 @@ upd_keep_now:
 .running:
     mov qword [upd_stuck_at], -1        ; reloaded for as long as Axiom runs
     KLOG "update: the watchdog would not stop; it is reloaded for as long as Axiom runs"
+    jmp .done
+.kept:
+    mov byte [upd_watch], 0
+    KLOG "update: the watchdog stays on ('watchdog on' reloads it)"
     jmp .done
 .run:
     mov byte [upd_watch], 0             ; the test run reloads it, and ends it

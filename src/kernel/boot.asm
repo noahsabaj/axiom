@@ -167,7 +167,8 @@ ML_MOTION       equ 15
 ML_COMPOSE      equ 16
 ML_REFRESH      equ 17
 ML_MANDEL       equ 18
-ML_PARTS        equ 19
+ML_WATCH        equ 19
+ML_PARTS        equ 20
 
 ; ML_TIMED function, part: called (what it is given kept), and the longest
 ; it took kept by its part
@@ -203,6 +204,7 @@ main_loop:
     ML_TIMED start_service, ML_START    ; START.TXT's lines, at each start
     ML_TIMED harness_service, ML_HARNESS ; a test run's next line
     ML_TIMED update_service, ML_UPDATE  ; a trial not kept in time: a restart
+    ML_TIMED watch_service, ML_WATCH    ; the watchdog kept: reloaded
     ML_TIMED battery_service, ML_BATTERY ; the battery hold's minute
     ML_TIMED load_service, ML_LOAD      ; the load average's 5 s
 .keys:
@@ -311,6 +313,7 @@ main_loop:
     cmp rcx, rax
     cmovb rax, rcx
 .armed:
+    call watch_deadline                 ; the watchdog's next reload
     call motion_deadline                ; the next step of what moves
     call net_deadline                   ; DHCP, ARP, ping, polling
     mov rdi, rax
@@ -374,7 +377,7 @@ ml_names:       dq str_ml_usb, str_ml_net, str_ml_log, str_ml_pointer
                 dq str_ml_programs, str_ml_iommu, str_ml_shell, str_ml_start
                 dq str_ml_harness, str_ml_update, str_ml_battery, str_ml_load
                 dq str_ml_keys, str_ml_desk, str_ml_term, str_ml_motion
-                dq str_ml_compose, str_ml_refresh, str_ml_mandel
+                dq str_ml_compose, str_ml_refresh, str_ml_mandel, str_ml_watch
 str_ml_usb:     db 'usb', 0
 str_ml_net:     db 'net', 0
 str_ml_log:     db 'log', 0
@@ -392,6 +395,7 @@ str_ml_desk:    db 'desk', 0
 str_ml_term:    db 'terminal', 0
 str_ml_motion:  db 'motion', 0
 str_ml_compose: db 'compose', 0
+str_ml_watch:   db 'watchdog', 0
 str_ml_refresh: db 'refresh', 0
 str_ml_mandel:  db 'mandelbrot', 0
 
