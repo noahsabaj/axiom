@@ -15,12 +15,23 @@
 ;  ACPI_TIM_DIS): tco_find turns it on, as the loader does. The count is
 ;  seen moving once, at the first reload; a count that does not move is
 ;  said, and the watchdog is off.
+;
+;  The network too: while the watchdog is on, 5 minutes with no network (no
+;  address, or no link on the interface that has it; 'watchdog net' for
+;  another time, or off) end in a full reset, the platform's power cycled
+;  (power_cycle). A machine reached only over the network is no use without
+;  it, and a card that kept its state through a warm reset comes back
+;  (hp-1's RTL8821CE, after Linux restarted without stopping it). The log
+;  goes into AxiomLog first, unless one is there that no one has read.
 ; =============================================================================
 
 WATCH_SECONDS   equ 120                 ; unless 'watchdog on' says
 WATCH_MIN       equ 10
 WATCH_MAX       equ 600
 WATCH_WAKE      equ 10                  ; the main loop round at least this often (s)
+WATCH_NET       equ 300                 ; no network this long: a full reset (s)
+WATCH_NET_MIN   equ 30
+WATCH_NET_MAX   equ 3600
 TCO_STS1        equ 0x04                ; TCO1_STS: bit 3 TIMEOUT, the first count out
 TCO_STS2        equ 0x06                ; TCO2_STS: bit 1 SECOND_TO_STS, the reset
 TCO_CNT1        equ 0x08                ; TCO1_CNT: bit 11 TMR_HLT; bit 0 NO_REBOOT (v6)
@@ -218,6 +229,7 @@ watch_service:
     sub edx, TCO_STS1
     mov ax, 1
     out dx, ax                          ; TCO_RLD: from the top
+    call watch_net_check
 .out:
     pop rdx
     pop rcx
@@ -228,6 +240,75 @@ watch_service:
     call watch_halt
     KLOG "watchdog: its count does not move (its clock is off): no watchdog"
     jmp .out
+
+; watch_net_check: from watch_service, once a second. The network seen, or
+; missed for watch_net_secs: a full reset. Preserves all.
+watch_net_check:
+    cmp qword [watch_net_secs], 0
+    jne .on
+    ret
+.on:
+    push rax
+    push rcx
+    push rdx
+    RDTSC64
+    call watch_net_ok
+    jc .down
+    mov [watch_net_seen], rax
+    jmp .out
+.down:
+    mov rcx, [tsc_per_ms]
+    imul rcx, [watch_net_secs]
+    imul rcx, rcx, 1000
+    add rcx, [watch_net_seen]
+    cmp rax, rcx
+    jae watch_net_reset
+.out:
+    pop rdx
+    pop rcx
+    pop rax
+    ret
+
+; watch_net_ok -> CF unless the network is there: an address, and a link
+; on the interface that has it. Preserves all.
+watch_net_ok:
+    cmp dword [net_ip], 0
+    je .down
+    push rax
+    mov rax, [net_nic]
+    test rax, rax
+    jz .gone
+    cmp dword [rax + NI_SPEED], 0
+    jle .gone
+    pop rax
+    clc
+    ret
+.gone:
+    pop rax
+.down:
+    stc
+    ret
+
+; watch_net_reset: no network for watch_net_secs. The log into AxiomLog
+; (unless one is there still, so a machine that stays off the network does
+; not write the variable store's flash every few minutes), then a full
+; reset. Never returns.
+watch_net_reset:
+    KLOG "watchdog: no network for %u s: a full reset, the machine's power cycled, so a network card stuck since the last start comes back", qword [watch_net_secs]
+    cmp byte [harness_on], 0
+    jne .save                           ; a test run's log, as harness_end would
+    lea rsi, [name_axiom_log]
+    lea rdx, [axiom_guid]
+    lea rdi, [harness_buf]
+    mov ecx, HARNESS_BUF
+    call efi_get_variable
+    jnc .kept
+.save:
+    call harness_save
+    jmp power_cycle
+.kept:
+    KLOG "watchdog: AxiomLog has a log no one has read: kept, not written over"
+    jmp power_cycle
 
 ; watch_deadline(RAX = when the main loop would wake next, TSC) -> RAX, no
 ; later than WATCH_WAKE s after the last reload. Preserves others.
@@ -262,6 +343,7 @@ watch_show:
     je .off
     movzx eax, word [tco_base]
     KLOG "watchdog: on: the machine resets at most %u s after Axiom's main loop stops (TCO at I/O %x)", qword [watch_secs], rax
+    call watch_net_show
     jmp .reset
 .off:
     KLOG "watchdog: off ('watchdog on' starts it)"
@@ -296,7 +378,12 @@ watch_cmd_on:
     jc .locked
     mov [watch_secs], rbx
     mov byte [watch_checked], 0
+    cmp byte [watch_net_set], 0
+    jne .net_said
+    mov qword [watch_net_secs], WATCH_NET
+.net_said:
     RDTSC64
+    mov [watch_net_seen], rax           ; the network's time from now
     mov rcx, [tsc_per_ms]
     imul rcx, rcx, 1000
     add rax, rcx
@@ -304,6 +391,7 @@ watch_cmd_on:
     mov byte [watch_on], 1
     movzx eax, word [tco_base]
     KLOG "watchdog: on: the machine resets at most %u s after Axiom's main loop stops (TCO at I/O %x)", rbx, rax
+    call watch_net_show
     cmp byte [watch_reset], 0
     je .ok
     KLOG "watchdog: it reset this machine before this start"
@@ -323,6 +411,48 @@ watch_cmd_on:
     stc
 .out:
     pop rbx
+    ret
+
+; watch_net_show: what the watchdog does about the network. Preserves all.
+watch_net_show:
+    cmp qword [watch_net_secs], 0
+    je .none
+    KLOG "watchdog: and with no network for %u s, a full reset (its power cycled)", qword [watch_net_secs]
+    ret
+.none:
+    KLOG "watchdog: the network is not watched ('watchdog net <seconds>' watches it)"
+    ret
+
+; watchdog net <seconds>|off: how long with no network before a full reset,
+; while the watchdog is on (300 s unless said), or never
+watch_cmd_net:
+    cmp edi, 1
+    jne .usage
+    mov rsi, [rsi]
+    cmp dword [rsi], 'off'              ; "off", and its terminating zero
+    je .off
+    call arg_uint
+    jc .usage
+    cmp eax, WATCH_NET_MIN
+    jb .usage
+    cmp eax, WATCH_NET_MAX
+    ja .usage
+    mov [watch_net_secs], rax
+    mov byte [watch_net_set], 1
+    RDTSC64
+    mov [watch_net_seen], rax
+    call watch_net_show
+    clc
+    ret
+.off:
+    mov qword [watch_net_secs], 0
+    mov byte [watch_net_set], 1
+    call watch_net_show
+    clc
+    ret
+.usage:
+    KLOG "usage: watchdog net <seconds>|off: %u to %u, %u unless said", WATCH_NET_MIN, WATCH_NET_MAX, WATCH_NET
+    stc
     ret
 
 ; watchdog off
@@ -357,6 +487,7 @@ watch_cmd_test:
 watch_actions:
     ACTION  '',     watch_show,     '', 'whether the watchdog is on: the chipset resets the machine when Axiom stops', 0
     ACTION  'on',   watch_cmd_on,   '[<seconds>]', "the TCO watchdog started, reloaded while Axiom's main loop goes round; a reset that long after it stops (120 s unless said)", 0
+    ACTION  'net',  watch_cmd_net,  '<seconds>|off', 'while it is on: no network that long, a full reset, the power cycled (300 s unless said)', 0
     ACTION  'off',  watch_cmd_off,  '', 'the watchdog stopped', 0
     ACTION  'test', watch_cmd_test, '', 'with the watchdog on: the main loop stopped here for good, to see it reset the machine', 0
     dq 0, 0, 0, 0, 0
@@ -372,7 +503,10 @@ watch_on:       resb 1                  ; 'watchdog on': the main loop reloads i
 watch_checked:  resb 1                  ; its count seen moving
 watch_v6:       resb 1                  ; Tiger Lake's TCO: NO_REBOOT in TCO1_CNT
 watch_reset:    resb 1                  ; it reset the machine before this start
+watch_net_set:  resb 1                  ; 'watchdog net' said how long, or off
 alignb 8
+watch_net_secs: resq 1                  ; no network this long: a full reset; 0 never
+watch_net_seen: resq 1                  ; TSC: the network last there (or the start)
 watch_pet_at:   resq 1                  ; TSC: the next reload, at the soonest
 watch_secs:     resq 1                  ; when it resets, after the last reload
 watch_ticks:    resq 1                  ; its count from the top (TCO_TMR)

@@ -74,6 +74,25 @@ power_reboot:
     hlt
     jmp .hang
 
+; power_cycle: a full reset straight from the chipset (CF9's FULL_RST: the
+; platform's power off for a few seconds, then on), not the firmware's
+; ResetSystem, which may keep the power on: devices that hold their state
+; through a warm reset start afresh (watch.asm, a network missing). The
+; usual ways if it did not happen. Never returns.
+power_cycle:
+    call rtw_leave
+    call battery_leave
+    call log_final
+    cli
+    mov dx, 0xCF9
+    mov al, 0x02
+    out dx, al
+    mov al, 0x0E                        ; FULL_RST | RST_CPU | SYS_RST
+    out dx, al
+    mov edi, 50000
+    call delay_us
+    jmp power_reboot
+
 power_off:
     call rtw_leave
     call battery_leave
