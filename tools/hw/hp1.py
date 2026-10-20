@@ -32,8 +32,8 @@
                                                under Ubuntu, through tools/hw/ecmap.py
 
 axiom1 is the test before Ubuntu goes (Stage C): Axiom alone on hp-1,
-fleet's node over Wi-Fi. It installs build/esp, makes START.TXT 'fleet &',
-and starts tools/hw/axiom1.txt as a test run; from here, while hp-1 runs
+fleet's node over Wi-Fi. It installs build/esp, makes START.TXT 'watchdog
+on' and 'fleet &' (a hang resets the machine), and starts tools/hw/axiom1.txt as a test run; from here, while hp-1 runs
 Axiom, it reaches axiom-1 over fleet (a job, its info), and ends the run
 with the job `hello axiom1-done`. With --update, the job `update
 kernel.bin` instead: hp-1 restarts, and a second run is kernel A's trial,
@@ -261,7 +261,7 @@ def axiom1(update, wait, keep):
     if "Home/fleet: node.json, cert.pem, key.pem" not in status:
         sys.exit("hp1.py: no /Home/fleet for axiom-1 on hp-1: hp1.py home first")
     print(node("install").strip(), flush=True)
-    print(node("start", start=["fleet &"]).strip(), flush=True)
+    print(node("start", start=["watchdog on", "fleet &"]).strip(), flush=True)
     PROJECT.mkdir(parents=True, exist_ok=True)
     (PROJECT / "README.txt").write_text("hp1.py axiom1's project on axiom-1\n", encoding="utf-8")
     kernel = PROJECT / "kernel.bin"
