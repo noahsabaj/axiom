@@ -107,7 +107,9 @@ DI_X            equ 16                  ; where it is
 DI_ICON         equ 24                  ; its picture: a surface
 DI_LABEL        equ 32
 DI_RUN          equ 40                  ; dword: it has windows
-DI_SIZE         equ 48
+DI_MX           equ 48                  ; magnified (motion.asm): its left,
+DI_MS           equ 56                  ; its side
+DI_SIZE         equ 64
 DK_APP          equ 0
 DK_EXTRA        equ 1                   ; a program's that is not one of the apps
 DK_MIN          equ 2                   ; a window minimised
@@ -210,6 +212,46 @@ desk_metrics:
     sub rax, [m_dock_gap]
     sub rax, [m_dock_h]
     mov [m_dock_y], rax
+    push rcx
+    push rdx
+    mov rax, [m_icon]                   ; magnified, an icon is at most 1.6
+    imul rax, rax, 8                    ; times as big (even)
+    add rax, 9
+    xor edx, edx
+    mov ecx, 10
+    div rcx
+    add rax, rax
+    mov [m_icon_big], rax
+    mov rax, [m_icon]                   ; the magnifying reaches 2.5 places
+    add rax, [m_dock_space]
+    imul rax, rax, 5
+    shr rax, 1
+    mov [m_dock_reach], rax
+    shl rax, 3                          ; and the glass may grow each way:
+    xor edx, edx                        ; 0.6 (reach 8/15 + icon/2 + pad)
+    mov ecx, 15
+    div rcx
+    mov rcx, [m_icon]
+    shr rcx, 1
+    add rax, rcx
+    add rax, [m_dock_pad]
+    imul rax, rax, 3
+    xor edx, edx
+    mov ecx, 5
+    div rcx
+    add rax, 2
+    mov [m_dock_ext], rax
+    mov rax, [m_icon]                   ; an app starting: how high it bounces
+    shr rax, 1
+    mov [m_bounce], rax
+    mov rax, [m_dock_y]                 ; the top of all the dock draws, but
+    add rax, [m_dock_pad]               ; the names
+    add rax, [m_icon]
+    sub rax, [m_icon_big]
+    sub rax, [m_bounce]
+    mov [m_dock_top], rax
+    pop rdx
+    pop rcx
     mov edi, 6                          ; windows stop a little above it
     call pt
     mov rdi, [m_dock_y]
@@ -1782,10 +1824,13 @@ dock_pane:
     mov [rax + GL_B], rcx
     lea rcx, [rcx + rcx * 2]
     mov [rax + GL_M], rcx
-    mov rcx, [dock_x]
+    mov rcx, [dock_x]                   ; as wide as it may grow, magnified
+    sub rcx, [m_dock_ext]
     cmp rcx, [rax + GL_X]
     jne .moved
     mov rcx, [dock_w]
+    add rcx, [m_dock_ext]
+    add rcx, [m_dock_ext]
     cmp rcx, [rax + GL_W]
     jne .moved
     mov rcx, [m_dock_y]
@@ -1796,8 +1841,11 @@ dock_pane:
     je .out
 .moved:
     mov rcx, [dock_x]
+    sub rcx, [m_dock_ext]
     mov [rax + GL_X], rcx
     mov rcx, [dock_w]
+    add rcx, [m_dock_ext]
+    add rcx, [m_dock_ext]
     mov [rax + GL_W], rcx
     mov rcx, [m_dock_y]
     mov [rax + GL_Y], rcx
@@ -1867,7 +1915,7 @@ desk_compose:
     call motion_paint
     DS_LAP DS_WINS
     lea rax, [r13 + r15]                ; the dock, if it is in it
-    cmp rax, [m_dock_y]
+    cmp rax, [m_dock_top]
     jle .tip
     call dock_paint
 .tip:
@@ -2799,6 +2847,7 @@ dock_layout:
     inc rbx
     jmp .x
 .placed:
+    call dock_magnify                   ; magnified as it is now,
     call dock_pane                      ; its glass,
     call dock_damage                    ; and where it is now
     pop r14
@@ -2839,43 +2888,63 @@ dock_running:
     pop rcx
     ret
 
-; dock_damage: the dock and the name over it. Preserves all.
+; dock_damage: the dock and the name over it, where they were drawn last
+; and where they are now. Preserves all.
 dock_damage:
+    push rax
     push rdi
     push rsi
     push rdx
     push rcx
+    push r8
     cmp qword [dock_w], 0
     je .out
-    xor edi, edi                        ; the width of the screen: a name
-    mov rsi, [m_dock_y]                 ; may stand past the dock's ends
-    sub rsi, [m_tip_h]
-    sub rsi, [m_tip_gap]
-    sub rsi, [m_tip_gap]
-    mov rdx, [scr_w]
-    mov rcx, [scr_h]
+    call dock_extent
+    mov rax, [dock_seen_x0]             ; with where it was drawn
+    mov [dock_seen_x0], rdi
+    cmp rax, rdi
+    jge .x0
+    mov rdi, rax
+.x0:
+    mov rax, [dock_seen_x1]
+    mov [dock_seen_x1], rdx
+    cmp rax, rdx
+    jle .x1
+    mov rdx, rax
+.x1:
+    mov rax, [dock_seen_y0]
+    mov [dock_seen_y0], rsi
+    cmp rax, rsi
+    jge .y0
+    mov rsi, rax
+.y0:
+    sub rdx, rdi
+    mov rcx, [scr_h]                    ; down to the screen's bottom
     sub rcx, rsi
-    push r8
     lea r8, [dock_gl]                   ; its own: its glass is as it was
     call desk_damage_own
-    pop r8
 .out:
+    pop r8
     pop rcx
     pop rdx
     pop rsi
     pop rdi
+    pop rax
     ret
 
-; dock_paint: the dock, within the clip
+; dock_paint: the dock, within the clip: its icons magnified round the
+; pointer (DI_MX, DI_MS), an app's bouncing as it starts
 dock_paint:
     push rbx
     push r12
     push r13
+    push r14
     cmp qword [dock_w], 0
     je .out
-    mov rdi, [dock_x]                   ; glass: blurred, tinted, outlined
+    mov rdi, [dock_mx0]                 ; glass: blurred, tinted, outlined
     mov rsi, [m_dock_y]
-    mov rdx, [dock_w]
+    mov rdx, [dock_mx1]
+    sub rdx, rdi
     mov rcx, [m_dock_h]
     lea rax, [dock_gl]
     mov r10, [m_dock_r]
@@ -2893,13 +2962,14 @@ dock_paint:
 .item:
     cmp rbx, [dock_n]
     jae .out
-    cmp rbx, [dock_sep]                 ; the line before the minimised
-    jne .icon
+    cmp rbx, [dock_sep]                 ; the line before the minimised:
+    jne .icon                           ; midway from the item before
     test rbx, rbx
     jz .icon
-    mov rdi, [r12 + DI_X]
-    sub rdi, [m_dock_space]
-    dec rdi
+    mov rdi, [r12 - DI_SIZE + DI_MX]
+    add rdi, [r12 - DI_SIZE + DI_MS]
+    add rdi, [r12 + DI_MX]
+    sar rdi, 1
     mov rsi, [m_dock_y]
     add rsi, [m_dock_pad]
     add rsi, [m_dock_pad]
@@ -2920,7 +2990,22 @@ dock_paint:
     mov rdx, [r12 + DI_ICON]
     cmp qword [rdx + SF_PTR], 0
     je .dot
-    mov rdi, [r12 + DI_X]               ; centred in its place
+    xor r13d, r13d                      ; R13: how far up, bouncing
+    cmp dword [r12 + DI_KIND], DK_APP
+    jne .alpha
+    mov eax, [r12 + DI_APP]
+    call dock_rise
+    mov r13, rax
+.alpha:
+    mov r8d, 256
+    cmp rbx, [dock_press]               ; held down: darker
+    jne .sized
+    mov r8d, 170
+.sized:
+    mov r14, [r12 + DI_MS]              ; R14: its side
+    cmp r14, [m_icon]
+    jne .scaled
+    mov rdi, [r12 + DI_MX]              ; as made: centred in its place
     mov rax, [m_icon]
     sub rax, [rdx + SF_W]
     sar rax, 1
@@ -2931,17 +3016,54 @@ dock_paint:
     sub rax, [rdx + SF_H]
     sar rax, 1
     add rsi, rax
-    mov r8d, 256
-    cmp rbx, [dock_press]               ; held down: darker
-    jne .draw
-    mov r8d, 170
-.draw:
+    sub rsi, r13
     call gfx_image
+    jmp .dot
+.scaled:
+    mov r9d, r8d                        ; magnified: from an app's big icon,
+    mov r8, rdx                         ; else its own scaled; centred in its
+    cmp dword [r12 + DI_KIND], DK_APP   ; place, on the icons' line
+    jne .from
+    mov eax, [r12 + DI_APP]
+    imul rax, rax, SF_SIZE
+    lea rcx, [app_icons_big]
+    add rax, rcx
+    cmp qword [rax + SF_PTR], 0
+    je .from
+    mov r8, rax
+.from:
+    mov rax, [rdx + SF_W]               ; the size: its own, scaled
+    imul rax, r14
+    xor edx, edx
+    div qword [m_icon]
+    mov rsi, rax                        ; (w)
+    mov rdx, [r12 + DI_ICON]
+    mov rax, [rdx + SF_H]
+    imul rax, r14
+    xor edx, edx
+    div qword [m_icon]
+    mov rcx, rax                        ; h
+    mov rdx, rsi                        ; w
+    mov rdi, r14
+    sub rdi, rdx
+    sar rdi, 1
+    add rdi, [r12 + DI_MX]
+    mov rsi, [m_dock_y]
+    add rsi, [m_dock_pad]
+    add rsi, [m_icon]
+    sub rsi, r14
+    mov rax, r14
+    sub rax, rcx
+    sar rax, 1
+    add rsi, rax
+    sub rsi, r13
+    mov r10d, 1
+    call pic_draw
 .dot:
     cmp qword [r12 + DI_RUN], 0
     je .next
-    mov rdi, [r12 + DI_X]
-    mov rax, [m_icon]
+    mov rdi, [r12 + DI_MX]
+    mov rax, [r12 + DI_MS]
     sub rax, [m_dot]
     sar rax, 1
     add rdi, rax
@@ -2960,6 +3082,7 @@ dock_paint:
     inc rbx
     jmp .item
 .out:
+    pop r14
     pop r13
     pop r12
     pop rbx
@@ -2976,6 +3099,13 @@ tip_paint:
     imul rbx, rbx, DI_SIZE
     lea rax, [dock_items]
     add rbx, rax
+    cmp dword [rbx + DI_KIND], DK_APP   ; not while it bounces, starting
+    jne .named
+    mov eax, [rbx + DI_APP]
+    lea rcx, [dock_bounce]
+    cmp qword [rcx + rax * 8], 0
+    jne .out
+.named:
     mov rdi, [rbx + DI_LABEL]
     mov esi, [f_body]
     call uf_width
@@ -2983,17 +3113,30 @@ tip_paint:
     lea rdx, [rax + 0]
     add rdx, [m_tip_pad]
     add rdx, [m_tip_pad]                ; the pill's
-    mov rdi, [rbx + DI_X]
-    mov rax, [m_icon]
+    mov rdi, [rbx + DI_MX]
+    mov rax, [rbx + DI_MS]
     sub rax, rdx
     sar rax, 1
     add rdi, rax
+    mov rax, [scr_w]                    ; on the screen
+    sub rax, rdx
+    cmp rdi, rax
+    jle .right
+    mov rdi, rax
+.right:
     test rdi, rdi
     jns .left
     xor edi, edi
 .left:
     mov r13, rdi
+    mov rsi, [m_dock_y]                 ; over the item's top, or the dock's
+    add rsi, [m_dock_pad]
+    add rsi, [m_icon]
+    sub rsi, [rbx + DI_MS]
+    cmp rsi, [m_dock_y]
+    jle .over
     mov rsi, [m_dock_y]
+.over:
     sub rsi, [m_tip_gap]
     sub rsi, [m_tip_h]
     mov rcx, [m_tip_h]
@@ -3026,23 +3169,32 @@ tip_paint:
     pop rbx
     ret
 
-; dock_at(RDI x, RSI y) -> RAX = the item there, CF if none. Preserves others.
+; dock_at(RDI x, RSI y) -> RAX = the item there (as magnified), CF if none.
+; Preserves others.
 dock_at:
     push rcx
     push rdx
-    cmp rsi, [m_dock_y]
-    jl .none
     xor ecx, ecx
     lea rdx, [dock_items]
 .each:
     cmp rcx, [dock_n]
     jae .none
-    mov rax, [rdx + DI_X]
+    mov rax, [rdx + DI_MX]
     cmp rdi, rax
     jl .next
-    add rax, [m_icon]
+    add rax, [rdx + DI_MS]
     cmp rdi, rax
-    jl .found
+    jge .next
+    mov rax, [m_dock_y]                 ; below its top, or the dock's
+    add rax, [m_dock_pad]
+    add rax, [m_icon]
+    sub rax, [rdx + DI_MS]
+    cmp rax, [m_dock_y]
+    jle .top
+    mov rax, [m_dock_y]
+.top:
+    cmp rsi, rax
+    jge .found
 .next:
     add rdx, DI_SIZE
     inc rcx
@@ -3076,8 +3228,8 @@ dock_spot:
     inc rcx
     jmp .each
 .found:
-    mov rax, [r8 + DI_ICON]             ; its size, centred in its place
-    mov rdx, [rax + SF_W]
+    mov rax, [r8 + DI_ICON]             ; its size (as magnified), centred
+    mov rdx, [rax + SF_W]               ; in its place, on the icons' line
     mov rcx, [rax + SF_H]
     test rdx, rdx
     jz .square
@@ -3087,26 +3239,36 @@ dock_spot:
     mov rdx, [m_icon]
     mov rcx, rdx
 .sized:
-    mov rdi, [m_icon]
+    push r9
+    mov r9, rdx
+    mov rax, rcx
+    imul rax, [r8 + DI_MS]
+    xor edx, edx
+    div qword [m_icon]
+    mov rcx, rax                        ; h
+    mov rax, r9
+    imul rax, [r8 + DI_MS]
+    xor edx, edx
+    div qword [m_icon]
+    mov rdx, rax                        ; w
+    pop r9
+    mov rdi, [r8 + DI_MS]
     sub rdi, rdx
     sar rdi, 1
-    add rdi, [r8 + DI_X]
-    mov rsi, [m_icon]
+    add rdi, [r8 + DI_MX]
+    mov rsi, [r8 + DI_MS]
     sub rsi, rcx
     sar rsi, 1
     add rsi, [m_dock_y]
     add rsi, [m_dock_pad]
+    add rsi, [m_icon]
+    sub rsi, [r8 + DI_MS]
     pop r8
     clc
     ret
 .none:
     pop r8
     stc
-    ret
-
-; dock_motion -> EAX = 1 if the dock moves on (motion_service's step)
-dock_motion:
-    xor eax, eax
     ret
 
 ; dock_click(RAX = an item): what it is for
@@ -3154,9 +3316,13 @@ app_open:
     xor edx, edx
     mov ecx, 1                          ; not tied to a prompt
     call user_start
-    jmp .out
+    jc .out
+    jmp .bounce
 .terminal:
     call term_new
+.bounce:
+    mov edi, ebx                        ; its icon bounces as it starts
+    call dock_bounce_start
 .out:
     pop rbx
     ret
@@ -3707,6 +3873,7 @@ desk_motion:
 ; the dock's names
 desk_hover:
     call mn_hover                       ; an open menu's item, or another menu
+    call dock_point                     ; the dock magnified round it
     push rbx
     mov rdi, [ptr_x]
     mov rsi, [ptr_y]
@@ -4075,6 +4242,11 @@ m_dock_gap:     resq 1                  ; under the dock,
 m_dock_r:       resq 1                  ; its corners,
 m_dock_h:       resq 1
 m_dock_y:       resq 1                  ; its top
+m_dock_top:     resq 1                  ; its icons' highest, magnified
+m_icon_big:     resq 1                  ; an icon, magnified the most
+m_dock_reach:   resq 1                  ; how far the magnifying reaches
+m_dock_ext:     resq 1                  ; how far the glass grows each way
+m_bounce:       resq 1                  ; how high an icon bounces
 m_dot:          resq 1                  ; an app that runs
 m_work_y1:      resq 1                  ; where windows that fill stop
 m_blur:         resq 1                  ; the glass's blur

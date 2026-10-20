@@ -1490,6 +1490,467 @@ pd_v:
     ret
 
 ; -----------------------------------------------------------------------------
+;  The dock: magnified round the pointer, an app's icon bouncing as it starts
+;
+;  Over the dock, each icon grows by how near the pointer it is: 1 + g f(d),
+;  f a smooth bump (1 - (d/R)^2)^2 reaching R, 2.5 places. Each moves away
+;  from the pointer by g F(d), F the bump's integral, so that they stand side
+;  by side as they grow; the one under the pointer stays under it (so where
+;  the pointer is, dock_at finds the item it would have unmagnified). g eases
+;  to 0.6 as the pointer comes, back to 0 as it goes. Icons grow upwards,
+;  over the glass, which widens round them.
+; -----------------------------------------------------------------------------
+
+DOCK_G          equ 39322               ; magnified the most: 0.6 bigger, 16.16
+DOCK_RAMP_MS    equ 160                 ; to that, or back
+BOUNCE_MS       equ 500                 ; an icon's bounce, up and down
+BOUNCE_MAX      equ 3                   ; at most, with no window yet
+
+; dock_point: the pointer moved: over the dock, it magnifies round it; off
+; it, back. Preserves all.
+dock_point:
+    push rax
+    push rcx
+    call mv_on
+    jz .off
+    xor ecx, ecx                        ; ECX: over it
+    cmp qword [dock_w], 0
+    je .set
+    cmp byte [drag_mode], DRAG_NONE
+    jne .set
+    mov rax, [ptr_y]
+    cmp rax, [dock_mtop]
+    jl .set
+    mov rax, [ptr_x]
+    cmp rax, [dock_mx0]
+    jl .set
+    cmp rax, [dock_mx1]
+    jge .set
+    mov ecx, 1
+    cmp rax, [dock_px]                  ; round it, as it moves
+    je .set
+    mov [dock_px], rax
+    cmp qword [dock_ramp], 0
+    je .set
+    call dock_magnify
+    call dock_damage
+.set:
+    cmp cl, [dock_over]
+    je .out
+    mov [dock_over], cl                 ; magnifying, or back: from now
+    push rdx
+    RDTSC64
+    mov [dock_ramp_t], rax
+    pop rdx
+    call mv_kick
+.out:
+    pop rcx
+    pop rax
+    ret
+.off:
+    mov byte [dock_over], 0             ; (motion off: not at all)
+    cmp qword [dock_ramp], 0
+    je .out
+    mov qword [dock_ramp], 0
+    call dock_magnify
+    call dock_damage
+    jmp .out
+
+; dock_motion -> EAX = 1 while the dock moves on: magnifying or back, an
+; app's icon bouncing (motion_service's step)
+dock_motion:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r12
+    xor r12d, r12d                      ; R12D: it moves on
+    cmp dword [mv_scale], 0
+    je .still                           ; (motion off: dock_point undoes it)
+    mov rax, [dock_ramp]                ; magnifying, or back
+    movzx ecx, byte [dock_over]
+    shl ecx, 16
+    cmp rax, rcx
+    je .bounces
+    mov rax, [mv_now]
+    mov rdx, rax
+    xchg rdx, [dock_ramp_t]
+    sub rax, rdx                        ; since the last step
+    jae .since
+    xor eax, eax
+.since:
+    mov rcx, [tsc_per_ms]               ; (a tenth of a second at most)
+    imul rcx, rcx, 100
+    cmp rax, rcx
+    jbe .step
+    mov rax, rcx
+.step:
+    shl rax, 16                         ; of the whole way
+    mov rcx, [tsc_per_ms]
+    imul rcx, rcx, DOCK_RAMP_MS
+    mov edx, [mv_scale]
+    imul rcx, rdx
+    xor edx, edx
+    div rcx
+    mov rcx, [dock_ramp]
+    cmp byte [dock_over], 0
+    je .back
+    add rcx, rax
+    cmp rcx, 1 << 16
+    jb .ramped
+    mov ecx, 1 << 16
+    jmp .ramped
+.back:
+    sub rcx, rax
+    ja .ramped
+    xor ecx, ecx
+.ramped:
+    mov [dock_ramp], rcx
+    call dock_magnify
+    call dock_damage
+    movzx eax, byte [dock_over]
+    shl eax, 16
+    cmp rcx, rax
+    je .bounces
+    mov r12d, 1
+.bounces:
+    xor ebx, ebx                        ; each app's icon bouncing
+    xor esi, esi                        ; ESI: any
+.app:
+    lea rax, [dock_bounce]
+    mov rcx, [rax + rbx * 8]
+    test rcx, rcx
+    jz .app_next
+    mov esi, 1
+    mov rax, [mv_now]
+    sub rax, rcx
+    jbe .going
+    mov rcx, [tsc_per_ms]
+    imul rcx, rcx, BOUNCE_MS
+    mov edx, [mv_scale]
+    imul rcx, rdx
+    xor edx, edx
+    div rcx                             ; RAX: bounces done
+    lea rcx, [dock_bounces]
+    cmp rax, [rcx + rbx * 8]
+    je .going                           ; this one goes on
+    mov [rcx + rbx * 8], rax            ; one more done: it stays down if its
+    cmp rax, BOUNCE_MAX                 ; window is there, or that was enough
+    jae .stop
+    mov edi, ebx
+    call dock_running
+    test eax, eax
+    jz .going
+.stop:
+    lea rax, [dock_bounce]
+    mov qword [rax + rbx * 8], 0
+    jmp .app_next
+.going:
+    mov r12d, 1
+.app_next:
+    inc ebx
+    cmp ebx, DOCK_APPS
+    jb .app
+    test esi, esi
+    jz .still
+    call dock_damage
+.still:
+    mov eax, r12d
+    pop r12
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; dock_magnify: each item's place and side, magnified round dock_px as far
+; as dock_ramp has come (DI_MX its left, DI_MS its side); the glass's ends
+; round them (dock_mx0, dock_mx1), the icons' top (dock_mtop). Preserves all.
+dock_magnify:
+    push rax
+    push rcx
+    push rdx
+    push rsi
+    push r8
+    push r9
+    push r10
+    push r11
+    mov rax, [dock_ramp]                ; g: of DOCK_G, eased (p^2 (3 - 2p))
+    mov rcx, rax
+    imul rcx, rax
+    mov rdx, 3 << 16
+    sub rdx, rax
+    sub rdx, rax
+    imul rcx, rdx
+    shr rcx, 32
+    imul rcx, rcx, DOCK_G
+    shr rcx, 16
+    mov [dock_gm], rcx
+    mov rsi, [m_icon]                   ; RSI: the biggest
+    lea r8, [dock_items]
+    xor r9d, r9d
+.item:
+    cmp r9, [dock_n]
+    jae .ends
+    mov r10, [m_icon]                   ; R10: its middle, unmagnified
+    shr r10, 1
+    add r10, [r8 + DI_X]
+    mov r11, r10                        ; R11: the pointer to it
+    sub r11, [dock_px]
+    mov rax, r11
+    test rax, rax
+    jns .near
+    neg rax
+.near:
+    call dock_bump                      ; RAX = f, RDX = F
+    imul rax, [dock_gm]                 ; its side: 1 + g f times
+    shr rax, 16
+    imul rax, [m_icon]
+    add rax, 1 << 15
+    shr rax, 16
+    add rax, [m_icon]
+    mov [r8 + DI_MS], rax
+    cmp rax, rsi
+    jbe .side
+    mov rsi, rax
+.side:
+    mov rax, rdx                        ; its middle: g F further away
+    imul rax, [dock_gm]
+    mov rcx, 1 << 31
+    add rax, rcx
+    shr rax, 32
+    test r11, r11
+    jns .away
+    neg rax
+.away:
+    add rax, r10
+    mov rcx, [r8 + DI_MS]
+    shr rcx, 1
+    sub rax, rcx
+    mov [r8 + DI_MX], rax
+    add r8, DI_SIZE
+    inc r9
+    jmp .item
+.ends:
+    mov rax, [m_dock_y]                 ; the icons' top (the glass's, if
+    add rax, [m_dock_pad]               ; higher)
+    add rax, [m_icon]
+    sub rax, rsi
+    cmp rax, [m_dock_y]
+    jle .top
+    mov rax, [m_dock_y]
+.top:
+    mov [dock_mtop], rax
+    mov rax, [dock_x]                   ; the glass: round the first and the
+    mov rcx, [dock_w]                   ; last, their pad magnified as they
+    add rcx, rax                        ; are
+    mov r9, [dock_n]
+    test r9, r9
+    jz .glass
+    lea r8, [dock_items]
+    mov rax, [r8 + DI_MS]
+    imul rax, [m_dock_pad]
+    xor edx, edx
+    div qword [m_icon]
+    neg rax
+    add rax, [r8 + DI_MX]
+    mov r10, rax
+    imul r9, r9, DI_SIZE
+    lea r8, [r8 + r9 - DI_SIZE]
+    mov rax, [r8 + DI_MS]
+    imul rax, [m_dock_pad]
+    xor edx, edx
+    div qword [m_icon]
+    add rax, [r8 + DI_MX]
+    add rax, [r8 + DI_MS]
+    mov rcx, rax
+    mov rax, r10
+.glass:
+    mov [dock_mx0], rax
+    mov [dock_mx1], rcx
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rax
+    ret
+
+; dock_bump(RAX = how far from the pointer, px) -> RAX = f, how much an icon
+; there grows (16.16, 1 under the pointer, 0 from m_dock_reach on); RDX = F,
+; the bump's integral to there (px, 16.16). Preserves others.
+dock_bump:
+    push rcx
+    push rsi
+    push rdi
+    mov rcx, [m_dock_reach]
+    cmp rax, rcx
+    jae .past
+    shl rax, 16
+    xor edx, edx
+    div rcx                             ; t = d / R
+    mov rcx, rax
+    imul rax, rax
+    shr rax, 16
+    mov rsi, rax                        ; t^2
+    mov rdx, 1 << 16
+    sub rdx, rax
+    imul rdx, rdx
+    shr rdx, 16
+    push rdx                            ; f = (1 - t^2)^2
+    mov rax, rsi
+    imul rax, rcx
+    shr rax, 16
+    mov rdi, rax                        ; t^3
+    imul rax, rsi
+    shr rax, 16                         ; t^5
+    imul rax, rax, 3                    ; F = R (t - 2/3 t^3 + 1/5 t^5)
+    imul rdi, rdi, 10                   ;   = R (15 t - 10 t^3 + 3 t^5) / 15
+    sub rax, rdi
+    imul rcx, rcx, 15
+    add rax, rcx
+    imul rax, [m_dock_reach]
+    xor edx, edx
+    mov ecx, 15
+    div rcx
+    mov rdx, rax
+    pop rax
+    jmp .out
+.past:
+    mov rax, rcx                        ; F = R 8/15; f = 0
+    shl rax, 19
+    xor edx, edx
+    mov ecx, 15
+    div rcx
+    mov rdx, rax
+    xor eax, eax
+.out:
+    pop rdi
+    pop rsi
+    pop rcx
+    ret
+
+; dock_extent -> RDI x0, RSI y0, RDX x1: what the dock draws now, the name
+; over it too (down to the bottom of the screen). Preserves others.
+dock_extent:
+    push rax
+    push rcx
+    mov rdi, [dock_mx0]
+    sub rdi, [m_icon]                   ; (a name may stand past its ends)
+    mov rdx, [dock_mx1]
+    add rdx, [m_icon]
+    mov rsi, [dock_mtop]
+    sub rsi, [m_tip_h]
+    sub rsi, [m_tip_gap]
+    sub rsi, [m_tip_gap]
+    xor ecx, ecx                        ; an icon bouncing: higher still
+.bounce:
+    lea rax, [dock_bounce]
+    cmp qword [rax + rcx * 8], 0
+    jne .up
+    inc ecx
+    cmp ecx, DOCK_APPS
+    jb .bounce
+    jmp .out
+.up:
+    sub rsi, [m_bounce]
+.out:
+    pop rcx
+    pop rax
+    ret
+
+; dock_rise(EAX = an app) -> RAX = how far up its icon is, bouncing.
+; Preserves others.
+dock_rise:
+    push rcx
+    push rdx
+    mov eax, eax
+    lea rcx, [dock_bounce]
+    mov rcx, [rcx + rax * 8]
+    test rcx, rcx
+    jz .none
+    mov rax, [mv_now]
+    sub rax, rcx
+    jbe .none
+    mov edx, [mv_scale]
+    test edx, edx
+    jz .none
+    mov rcx, [tsc_per_ms]
+    imul rcx, rcx, BOUNCE_MS
+    imul rcx, rdx
+    xor edx, edx
+    div rcx                             ; RDX: into this bounce
+    mov rax, rdx
+    shl rax, 16
+    xor edx, edx
+    div rcx                             ; u: how far, 16.16
+    mov rcx, 1 << 16                    ; up and down: 4 u (1 - u)
+    sub rcx, rax
+    imul rax, rcx
+    shr rax, 14
+    imul rax, [m_bounce]
+    shr rax, 16
+    jmp .out
+.none:
+    xor eax, eax
+.out:
+    pop rdx
+    pop rcx
+    ret
+
+; dock_bounce_start(EDI = an app): its icon bounces as it starts, until its
+; window is there. Preserves all.
+dock_bounce_start:
+    call mv_on
+    jz .out
+    cmp edi, DOCK_APPS
+    jae .out
+    push rax
+    push rcx
+    push rdx
+    mov ecx, edi
+    lea rax, [dock_bounce]
+    cmp qword [rax + rcx * 8], 0
+    jne .done                           ; bouncing already
+    RDTSC64
+    lea rdx, [dock_bounce]
+    mov [rdx + rcx * 8], rax
+    lea rdx, [dock_bounces]
+    mov qword [rdx + rcx * 8], 0
+    call mv_kick
+.done:
+    pop rdx
+    pop rcx
+    pop rax
+.out:
+    ret
+
+section .data
+align 8
+dock_seen_x0:   dq 0x7FFFFFFFFFFFFFFF   ; the dock as drawn last: its left,
+dock_seen_x1:   dq -0x7FFFFFFFFFFFFFFF  ; its right,
+dock_seen_y0:   dq 0x7FFFFFFFFFFFFFFF   ; its top
+dock_mtop:      dq 0x3FFFFFFFFFFFFFFF   ; its icons' top, magnified
+
+section .bss
+alignb 8
+dock_ramp:      resq 1                  ; how magnified: 0..65536, to be eased
+dock_ramp_t:    resq 1                  ; when it last stepped
+dock_px:        resq 1                  ; round where
+dock_gm:        resq 1                  ; g: the most bigger, 16.16
+dock_mx0:       resq 1                  ; the glass magnified: its left,
+dock_mx1:       resq 1                  ; its right
+dock_bounce:    resq DOCK_APPS          ; each app: when it began bouncing,
+dock_bounces:   resq DOCK_APPS          ; and its bounces done
+dock_over:      resb 1                  ; the pointer is over the dock
+
+section .text
+
+; -----------------------------------------------------------------------------
 ;  motion [on | off | slow]
 ; -----------------------------------------------------------------------------
 cmd_motion:
