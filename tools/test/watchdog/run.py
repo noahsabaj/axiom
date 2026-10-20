@@ -15,7 +15,10 @@ Three boots side by side (build/esp, built first):
     'watchdog on 60': 30 s with no network, the log into AxiomLog and a
     full reset (QEMU ends), no panic;
   - netok: QEMU's network (rtl8139, its DHCP); 'watchdog net 30', 'watchdog
-    on 60', an address; 45 s on, no reset.
+    on 60', an address; 45 s on, no reset;
+  - gateway: QEMU's network, then 'ip' with a gateway no one answers for:
+    an address and a link, but no network: a full reset after 30 s, saying
+    why.
 Outputs go to build/test/watchdog/.
 """
 import pathlib
@@ -54,9 +57,14 @@ def main():
     netok = ["type watchdog net 30\\n", "until and with no network for 30 s",
              "type watchdog on 60\\n", "until watchdog: on:", "until dhcp: address",
              "wait 45", "type watchdog\\n", "until watchdog: on:"]
+    gateway = ["until dhcp: address", "type ip 10.0.2.15/24 10.0.2.99\\n", "wait 1",
+               "type watchdog net 30\\n", "until and with no network for 30 s",
+               "type watchdog on 60\\n", "until watchdog: on:",
+               "until watchdog: no network for 30 s", "ended"]
     runs = boot_all(OUT, {"watch": (script, ["--smp", "2"], 90),
                           "net": (net, ["--smp", "2"], 120),
-                          "netok": (netok, ["--smp", "2", "--nic", "rtl8139"], 120)})
+                          "netok": (netok, ["--smp", "2", "--nic", "rtl8139"], 120),
+                          "gateway": (gateway, ["--smp", "2", "--nic", "rtl8139"], 120)})
     log, err = runs["watch"]
     ended = "ended by itself" in err
     result("watchdog: off ('watchdog on' starts it)" in log, "'watchdog' says it is off")
@@ -81,8 +89,8 @@ def main():
     log, err = runs["net"]
     result("usage: watchdog net <seconds>|off: 30 to 3600, 300 unless said" in log,
            "net: 'watchdog net 10' is too short: its usage")
-    result("watchdog: no network for 30 s: a full reset, the machine's power cycled" in log,
-           "net: no network card, 30 s: a full reset")
+    result("watchdog: no network for 30 s: a full reset, the machine's power cycled" in log
+           and "(lately: no address)" in log, "net: no network card, 30 s: a full reset")
     result("goes into AxiomLog" in log, "net: the log into AxiomLog first")
     result("ended by itself" in err, "net: the machine reset (QEMU ends)")
     result("AXIOM PANIC" not in log, "net: no panic")
@@ -92,6 +100,13 @@ def main():
     result(log.count("watchdog: on: the machine resets at most 60 s") == 2 and
            "watchdog: no network for" not in log and "ended by itself" not in err,
            "netok: 45 s on with the network, no reset")
+
+    log, err = runs["gateway"]
+    result("watchdog: no network for 30 s: a full reset" in log and
+           "(lately: the gateway does not answer)" in log,
+           "gateway: an address and a link, a gateway that never answers: a full reset")
+    result("ended by itself" in err and "AXIOM PANIC" not in log,
+           "gateway: the machine reset (QEMU ends), no panic")
     print(f"{'all passed' if not FAILS else f'{FAILS} FAILED'}")
     return 1 if FAILS else 0
 

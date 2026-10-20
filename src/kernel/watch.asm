@@ -17,8 +17,10 @@
 ;  said, and the watchdog is off.
 ;
 ;  The network too: while the watchdog is on, 5 minutes with no network (no
-;  address, or no link on the interface that has it; 'watchdog net' for
-;  another time, or off) end in a full reset, the platform's power cycled
+;  address, no link on the interface that has it, or a gateway that has not
+;  answered ARP for 3 minutes, asked each minute: a card that says it is
+;  joined but carries nothing; 'watchdog net' for another time, or off)
+;  end in a full reset, the platform's power cycled
 ;  (power_cycle). A machine reached only over the network is no use without
 ;  it, and a card that kept its state through a warm reset comes back
 ;  (hp-1's RTL8821CE, after Linux restarted without stopping it). The log
@@ -32,6 +34,9 @@ WATCH_WAKE      equ 10                  ; the main loop round at least this ofte
 WATCH_NET       equ 300                 ; no network this long: a full reset (s)
 WATCH_NET_MIN   equ 30
 WATCH_NET_MAX   equ 3600
+WATCH_GW_ASK    equ 60                  ; the gateway not heard this long: asked (s)
+WATCH_GW_EVERY  equ 30                  ; and no more often than this
+WATCH_GW_LOST   equ 180                 ; not heard this long: no network
 TCO_STS1        equ 0x04                ; TCO1_STS: bit 3 TIMEOUT, the first count out
 TCO_STS2        equ 0x06                ; TCO2_STS: bit 1 SECOND_TO_STS, the reset
 TCO_CNT1        equ 0x08                ; TCO1_CNT: bit 11 TMR_HLT; bit 0 NO_REBOOT (v6)
@@ -269,24 +274,79 @@ watch_net_check:
     pop rax
     ret
 
-; watch_net_ok -> CF unless the network is there: an address, and a link
-; on the interface that has it. Preserves all.
+; watch_net_ok -> CF unless the network is there: an address, a link on
+; the interface that has it, and the gateway (if there is one) heard within
+; WATCH_GW_LOST s; asked who it is (ARP) once it has been quiet a minute.
+; Not there: watch_net_why says what is missing. Main loop. Preserves all.
 watch_net_ok:
+    push rax
+    push rcx
+    push rdx
+    lea rcx, [str_wn_address]
     cmp dword [net_ip], 0
     je .down
-    push rax
+    lea rcx, [str_wn_link]
     mov rax, [net_nic]
     test rax, rax
-    jz .gone
+    jz .down
     cmp dword [rax + NI_SPEED], 0
-    jle .gone
-    pop rax
-    clc
-    ret
-.gone:
-    pop rax
+    jle .down
+    mov eax, [net_gw]
+    test eax, eax
+    jz .up                              ; no gateway: nothing more to hear
+    call arp_slot                       ; RDX: its entry, or another's
+    xor ecx, ecx                        ; when it was heard: never
+    cmp [rdx + AR_IP], eax
+    jne .when
+    mov rcx, [rdx + AR_TIME]
+.when:
+    RDTSC64
+    test rcx, rcx
+    jz .ask                             ; never: asked, and missing
+    sub rax, rcx                        ; how long since
+    mov rdx, [tsc_per_ms]
+    imul rdx, rdx, WATCH_GW_ASK * 1000
+    cmp rax, rdx
+    jb .up
+    call watch_gw_ask
+    mov rdx, [tsc_per_ms]
+    imul rdx, rdx, WATCH_GW_LOST * 1000
+    cmp rax, rdx
+    jb .up
+    lea rcx, [str_wn_gateway]
+    jmp .down
+.ask:
+    call watch_gw_ask
+    lea rcx, [str_wn_gateway]
 .down:
+    mov [watch_net_why], rcx
     stc
+    jmp .out
+.up:
+    clc
+.out:
+    pop rdx
+    pop rcx
+    pop rax
+    ret
+
+; watch_gw_ask: who has the gateway's address (ARP), once a WATCH_GW_EVERY
+; s at most; its answer refreshes its entry. Preserves all.
+watch_gw_ask:
+    push rax
+    push rdx
+    RDTSC64
+    cmp rax, [watch_gw_asked]
+    jb .out
+    mov rdx, [tsc_per_ms]
+    imul rdx, rdx, WATCH_GW_EVERY * 1000
+    add rdx, rax
+    mov [watch_gw_asked], rdx
+    mov eax, [net_gw]
+    call arp_ask
+.out:
+    pop rdx
+    pop rax
     ret
 
 ; watch_net_reset: no network for watch_net_secs. The log into AxiomLog
@@ -294,7 +354,7 @@ watch_net_ok:
 ; not write the variable store's flash every few minutes), then a full
 ; reset. Never returns.
 watch_net_reset:
-    KLOG "watchdog: no network for %u s: a full reset, the machine's power cycled, so a network card stuck since the last start comes back", qword [watch_net_secs]
+    KLOG "watchdog: no network for %u s: a full reset, the machine's power cycled, so a network card stuck since the last start comes back (lately: %s)", qword [watch_net_secs], qword [watch_net_why]
     cmp byte [harness_on], 0
     jne .save                           ; a test run's log, as harness_end would
     lea rsi, [name_axiom_log]
@@ -494,6 +554,10 @@ watch_actions:
 
 section .rodata
 align 4
+str_wn_address: db 'no address', 0
+str_wn_link:    db 'no link', 0
+str_wn_gateway: db 'the gateway does not answer', 0
+align 4
 watch_v6_ids:   dd 0xA0A38086           ; Tiger Lake-LP's SMBus controller
                 dd 0x43A38086           ; Tiger Lake-H's
                 dd 0
@@ -507,6 +571,8 @@ watch_net_set:  resb 1                  ; 'watchdog net' said how long, or off
 alignb 8
 watch_net_secs: resq 1                  ; no network this long: a full reset; 0 never
 watch_net_seen: resq 1                  ; TSC: the network last there (or the start)
+watch_net_why:  resq 1                  ; what was missing, the last time (text)
+watch_gw_asked: resq 1                  ; TSC: the gateway asked about again, not before
 watch_pet_at:   resq 1                  ; TSC: the next reload, at the soonest
 watch_secs:     resq 1                  ; when it resets, after the last reload
 watch_ticks:    resq 1                  ; its count from the top (TCO_TMR)
