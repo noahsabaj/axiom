@@ -17,6 +17,7 @@ void kcheck(void *target, const u64 *args, int *cf, u64 *regs);
 const char *x5_text(int error);
 extern char sha384[], sha512[], mont_setup[], mont_mul[], mont_in[], mont_out[];
 extern char mont_add[], mont_sub[], mont_exp[], bn_load[], bn_store[], sig_verify[];
+extern char sig_sign[], ec_public[];
 extern char x509_chain[], x509_leaf[], x509_parse[], x509_unix[], x509_roots[];
 extern u64 x509_extra, x509_anchor;
 extern u32 x509_depth;
@@ -24,7 +25,7 @@ extern u8 x509_key[];
 
 static void *fns[] = { sha384, sha512, mont_setup, mont_mul, mont_in, mont_out,
                        mont_add, mont_sub, mont_exp, bn_load, bn_store, sig_verify,
-                       x509_chain, x509_leaf, x509_parse, x509_unix };
+                       x509_chain, x509_leaf, x509_parse, x509_unix, sig_sign, ec_public };
 
 API u64 h_k(int fn, u64 a, u64 b, u64 c, u64 d, u64 e, u64 f, int *cf)
 {

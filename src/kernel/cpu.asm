@@ -222,8 +222,9 @@ cpu_setup_local:
     jz .no_osxsave
     or rax, 1 << 18                     ; OSXSAVE
 .no_osxsave:
-    mov cr4, rax                        ; not FSGSBASE: the FS and GS bases
-                                        ; are not kept for each thread
+    mov cr4, rax                        ; not FSGSBASE: ring 3's FS and GS bases
+                                        ; change only through the kernel, which
+                                        ; keeps them for each thread
 
     test dword [cpu_f1_ecx], 1 << 26    ; XCR0: x87 | SSE | AVX | AVX-512
     jz .no_xsave

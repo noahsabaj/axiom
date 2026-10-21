@@ -3,7 +3,9 @@
 ;
 ;  The fonts are webfont.bin (tools/mkwebfont.py), here at wf_bin, found by
 ;  the tables of gen/webfont.inc. A font is a face and a size, numbered
-;  face * WF_SIZES + size.
+;  face * WF_SIZES + size. With WF_DOC defined, the fonts are those and
+;  twice their sizes (tools/mkdocfont.py), packed at wf_pak: the program
+;  unpacks them and points wf_base at them; gen/docfont.inc has the tables.
 ;    font_entry(EDX = a font) -> R11 = its wf_fonts entry (WFT_*).
 ;      Preserves all but R11.
 ;    glyph_at(EAX = a code point, R11 = a font's entry) -> RAX = its glyph
@@ -26,6 +28,15 @@
 ;      window): the display list's items (layout.inc) inside the clip
 ;  Glyphs are blended by their coverage over what is there.
 ; =============================================================================
+
+; WF_BASE reg: where the fonts are
+%macro WF_BASE 1
+%ifdef WF_DOC
+    mov %1, [wf_base]
+%else
+    lea %1, [wf_bin]
+%endif
+%endmacro
 
 section .text
 
@@ -69,7 +80,7 @@ glyph_at:
 .got:
     imul eax, eax, WG_SIZE
     add rax, [r11 + WFT_GLYPHS]
-    lea rcx, [wf_bin]
+    WF_BASE rcx
     add rax, rcx
     pop r8
     pop rdx
@@ -307,7 +318,7 @@ blit:
     movsx ecx, byte [rax + WG_TOP]
     sub esi, ecx
     mov r10d, [rax + WG_DATA]           ; R10: its coverage
-    lea rcx, [wf_bin]
+    WF_BASE rcx
     add r10, rcx
     xor r12d, r12d                      ; columns [R12D, R13D) of it
     mov eax, [clip_x0]
@@ -495,9 +506,15 @@ draw_list:
     ret
 
 section .rodata
+%ifdef WF_DOC                           ; compose's: twice the sizes too, packed
+%include "gen/docfont.inc"
+wf_pak:         incbin "gen/docfont.pak"
+wf_pak_end:
+%else
 %include "gen/webfont.inc"
 align 16
 wf_bin:         incbin "gen/webfont.bin"
+%endif
 
 section .bss
 alignb 8

@@ -13,7 +13,12 @@ build/esp/EFI/AXIOM), boots it and checks the serial log:
     in their ring, call the kernel, or have another thread fault, killed in
     time; nothing left over), 'objects' (the console), and poweroff;
   - 'user test' on one CPU, and (unless --quick) under TCG, QEMU's own CPU
-    emulation, on four.
+    emulation, on four;
+  - files through a capability: FSTEST while vol0 is read-only (writes
+    refused) and, after 'vol 0 rw', twice (what it leaves, it cleans up),
+    then Notes writes a new file and saves it, and Files makes a folder and
+    names it; the stick's FAT, what Notes wrote and the folder, checked
+    from here.
 Outputs go to build/test/user/.
 """
 import argparse
@@ -87,7 +92,7 @@ def jobs(opts):
     text.write_text("Not a program, though long enough to have a header.\n" * 4)
     subprocess.run([sys.executable, str(ROOT / "tools" / "mkstick.py"), str(stick),
                     "--file", f"NOTAPROG.TXT={text}"], cwd=ROOT, check=True, capture_output=True)
-    names = ["four", "one"] + ([] if opts.quick else ["tcg"])
+    names = ["four", "one", "files"] + ([] if opts.quick else ["tcg"])
     for name in names:
         shutil.copyfile(stick, OUT / f"stick-{name}.img")
 
@@ -117,6 +122,19 @@ def jobs(opts):
     jobs = {
         "four": (four, ["--smp", "4", *on("four")], 120),
         "one": ([*READY, *TEST, "type poweroff\\n", "ended"], ["--smp", "1", *on("one")], 90),
+        "files": ([*READY, "type run fstest ro\\n", "until run: FSTEST exited",
+                   "type vol 0 rw\\n", "until vol0 is writable",
+                   "type run fstest\\n", "until run: FSTEST exited",
+                   "type run fstest\\n", "until run: FSTEST exited", "wait 0.3",
+                   # Notes: a new file, written, saved, closed
+                   "type run notes notes.txt\\n", "wait 3", "type Written by Notes.\\n",
+                   "wait 0.5", "sendkey ctrl-s", "wait 1", "sendkey ctrl-w",
+                   "until run: NOTES exited", "wait 0.3",
+                   # Files: a new folder, named, then the window closed
+                   "type run files\\n", "wait 3", "sendkey ctrl-shift-n", "wait 1",
+                   "type Made by Files\\n", "wait 1", "sendkey ctrl-w",
+                   "until run: FILES exited", "wait 0.3",
+                   "type poweroff\\n", "ended"], ["--smp", "2", *on("files")], 90),
     }
     if not opts.quick:
         jobs["tcg"] = ([*READY, *TEST, "type poweroff\\n", "ended"],
@@ -164,6 +182,27 @@ def four(logs):
     result("QEMU ended by itself" in err, "4 CPUs: powered off")
 
 
+def files(logs):
+    print("-- files")
+    log, err = logs["files"]
+    result("fstest: all 6 checks passed" in log, "fstest ro: writes refused, reads allowed")
+    result(log.count("fstest: all 27 checks passed") == 2, "fstest: all 27 checks, twice")
+    result(log.count("run: FSTEST exited with 0") == 3, "fstest: exited with 0, each time")
+    result("AXIOM PANIC" not in log, "files: no panic")
+    result("QEMU ended by itself" in err, "files: powered off")
+    result("run: NOTES exited with 0" in log, "notes: closed, exited with 0")
+    r = subprocess.run([sys.executable, str(ROOT / "tools" / "fatcheck.py"),
+                        str(OUT / "stick-files.img"), "--tree", "--show", "/notes.txt"],
+                       capture_output=True, text=True)
+    result(r.returncode == 0, "files: the stick's FAT has no damage" +
+           ("" if r.returncode == 0 else ": " + (r.stdout + r.stderr).strip()[-300:]))
+    result("--- /notes.txt: 18 bytes\nWritten by Notes.\n" in r.stdout,
+           "notes: the file it saved, as typed")
+    result("run: FILES exited with 0" in log, "files: closed, exited with 0")
+    result(re.search(r"<dir>\s+/Made by Files$", r.stdout, re.M) is not None,
+           "files: the folder it made, renamed as typed")
+
+
 def small(opts, logs):
     print("-- one CPU")
     log, err = logs["one"]
@@ -184,6 +223,7 @@ def main():
     opts = ap.parse_args()
     logs = boot_all(OUT, jobs(opts))
     four(logs)
+    files(logs)
     small(opts, logs)
     print(f"{'all passed' if not FAILS else f'{FAILS} FAILED'}")
     return 1 if FAILS else 0

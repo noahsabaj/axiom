@@ -555,6 +555,10 @@ ring_arm:
     je .channel
     cmp rax, OT_SOCKET
     je .socket
+    cmp rax, OT_STREAM
+    je .stream
+    cmp rax, OT_SETTINGS
+    je .settings
     mov esi, OT_EVENT
     mov edx, RT_EV_WAIT
     call handle_get
@@ -584,6 +588,16 @@ ring_arm:
     lea r14, [r13 + CH_READY]
     lea rax, [r13 + CH_WQ]
     jmp .queue
+.settings:                              ; until one changed since they were listed
+    mov esi, OT_SETTINGS
+    mov edx, RT_SET_READ
+    call handle_get
+    cmp rax, E_ANY
+    jae .out
+    mov r13, rax
+    lea r14, [r13 + SG_CHANGED]
+    lea rax, [r13 + SG_WQ]
+    jmp .queue
 .socket:                                ; a0 = 0: something to receive; 1: room to send
     mov rax, E_ARG
     mov rcx, [rbx + RQ_SQE + SQ_A0]
@@ -605,6 +619,18 @@ ring_arm:
     je .queue
     lea r14, [r13 + SK_WREADY]
     lea rax, [r13 + SK_WWQ]
+    jmp .queue
+.stream:                                ; until no more than SN_LOW frames wait
+    mov esi, OT_STREAM
+    mov edx, RT_STREAM_PLAY
+    call handle_get
+    cmp rax, E_ANY
+    jae .out
+    mov r13, rax
+    mov rdi, rax
+    call snd_ready
+    lea r14, [r13 + SS_READY]
+    lea rax, [r13 + SS_WQ]
 .queue:
     mov [rbx + RQ_WQ], rax
     jmp .arm
@@ -983,6 +1009,9 @@ ring_exec:
 .net_listen:
     mov edi, [rbx + SQ_HANDLE]
     mov rsi, [rbx + SQ_A0]
+    mov edx, [rbx + SQ_HANDLE2]
+    mov rcx, [rbx + SQ_A1]
+    mov r8, [rbx + SQ_A2]
     call h_net_listen
     jmp .out
 .net_accept:
@@ -1005,6 +1034,12 @@ ring_exec:
     mov r8, [rbx + SQ_A2]
     call h_net_sub
     jmp .out
+.net_addr:
+    mov edi, [rbx + SQ_HANDLE]
+    mov esi, [rbx + SQ_HANDLE2]
+    mov rdx, [rbx + SQ_A0]
+    call h_net_addr
+    jmp .out
 .win_show:
     mov edi, [rbx + SQ_HANDLE]
     mov rsi, [rbx + SQ_A0]
@@ -1018,6 +1053,100 @@ ring_exec:
     mov rdx, [rbx + SQ_A0]
     mov rcx, [rbx + SQ_A1]
     call h_win_title
+    jmp .out
+.set_list:
+    mov edi, [rbx + SQ_HANDLE]
+    mov esi, [rbx + SQ_HANDLE2]
+    mov rdx, [rbx + SQ_A0]
+    mov rcx, [rbx + SQ_A1]
+    call h_set_list
+    jmp .out
+.set_change:
+    mov edi, [rbx + SQ_HANDLE]
+    mov esi, [rbx + SQ_HANDLE2]
+    mov rdx, [rbx + SQ_A0]
+    mov rcx, [rbx + SQ_A1]
+    mov r8, [rbx + SQ_A2]
+    call h_set_change
+    jmp .out
+.desk_look:
+    mov edi, [rbx + SQ_HANDLE]
+    call h_desk_look
+    jmp .out
+.win_pointer:
+    mov edi, [rbx + SQ_HANDLE]
+    mov rsi, [rbx + SQ_A0]
+    call h_win_pointer
+    jmp .out
+.win_zoom:
+    mov edi, [rbx + SQ_HANDLE]
+    mov rsi, [rbx + SQ_A0]
+    call h_win_zoom
+    jmp .out
+.fs_volumes:
+    mov edi, [rbx + SQ_HANDLE]
+    mov esi, [rbx + SQ_HANDLE2]
+    mov rdx, [rbx + SQ_A0]
+    mov rcx, [rbx + SQ_A1]
+    call h_fs_volumes
+    jmp .out
+.fs_list:
+    mov edi, [rbx + SQ_HANDLE]
+    mov esi, [rbx + SQ_HANDLE2]
+    mov rdx, [rbx + SQ_A0]
+    mov rcx, [rbx + SQ_A1]
+    mov r8, [rbx + SQ_A2]
+    call h_fs_list
+    jmp .out
+.fs_read:
+    mov edi, [rbx + SQ_HANDLE]
+    mov esi, [rbx + SQ_HANDLE2]
+    mov rdx, [rbx + SQ_A0]
+    mov rcx, [rbx + SQ_A1]
+    mov r8, [rbx + SQ_A2]
+    call h_fs_read
+    jmp .out
+.fs_write:
+    mov edi, [rbx + SQ_HANDLE]
+    mov esi, [rbx + SQ_HANDLE2]
+    mov rdx, [rbx + SQ_A0]
+    mov rcx, [rbx + SQ_A1]
+    mov r8, [rbx + SQ_A2]
+    call h_fs_write
+    jmp .out
+.fs_mkdir:
+    mov edi, [rbx + SQ_HANDLE]
+    mov esi, [rbx + SQ_HANDLE2]
+    mov rdx, [rbx + SQ_A0]
+    call h_fs_mkdir
+    jmp .out
+.fs_remove:
+    mov edi, [rbx + SQ_HANDLE]
+    mov esi, [rbx + SQ_HANDLE2]
+    mov rdx, [rbx + SQ_A0]
+    call h_fs_remove
+    jmp .out
+.fs_rename:
+    mov edi, [rbx + SQ_HANDLE]
+    mov esi, [rbx + SQ_HANDLE2]
+    mov rdx, [rbx + SQ_A0]
+    mov rcx, [rbx + SQ_A1]
+    call h_fs_rename
+    jmp .out
+.fs_sub:
+    mov edi, [rbx + SQ_HANDLE]
+    mov esi, [rbx + SQ_HANDLE2]
+    mov rdx, [rbx + SQ_A0]
+    mov rcx, [rbx + SQ_A1]
+    call h_fs_sub
+    jmp .out
+.fs_update:
+    mov edi, [rbx + SQ_HANDLE]
+    mov esi, [rbx + SQ_HANDLE2]
+    mov rdx, [rbx + SQ_A0]
+    mov rcx, [rbx + SQ_A1]
+    mov r8, [rbx + SQ_A2]
+    call h_fs_update
     jmp .out
 .bad:
     mov rax, E_ARG                      ; one it does not know
@@ -1499,7 +1628,12 @@ ro_exec:        dq ring_exec.nop, ring_exec.signal, ring_exec.reset, ring_exec.b
                 dq ring_exec.st_abort, ring_exec.st_sub, ring_exec.st_rollback, ring_exec.st_list
                 dq ring_exec.net_connect, ring_exec.net_listen, ring_exec.net_accept, ring_exec.net_status
                 dq ring_exec.net_shut, ring_exec.net_sub, ring_exec.win_show, ring_exec.win_title
-ro_async:       db 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 ; which wait: RO_WAIT, RO_JOIN, RO_TIMEOUT
+                dq ring_exec.set_list, ring_exec.set_change, ring_exec.desk_look, ring_exec.fs_volumes
+                dq ring_exec.fs_list, ring_exec.fs_read, ring_exec.fs_write, ring_exec.fs_mkdir
+                dq ring_exec.fs_remove, ring_exec.fs_rename, ring_exec.fs_sub, ring_exec.win_pointer
+                dq ring_exec.net_addr, ring_exec.fs_update, ring_exec.win_zoom
+ro_async:      db 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 ; which wait: RO_WAIT, RO_JOIN, RO_TIMEOUT
+                db 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
                 db 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
 
 section .bss

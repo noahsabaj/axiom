@@ -1476,6 +1476,7 @@ str_rt_insecure: db 'insecure', 0
 str_rt_listen:  db 'listen', 0
 str_rt_window:  db 'window', 0
 str_rt_draw:    db 'draw', 0
+str_rt_change:  db 'change', 0
 str_e_ok:       db 'ok', 0
 str_e_badh:     db 'no such handle', 0
 str_e_type:     db 'the wrong type', 0
@@ -1497,6 +1498,9 @@ str_e_noname:   db 'no such name', 0
 str_e_io:       db 'the drive failed', 0
 str_e_nostore:  db 'no store to write to', 0
 str_e_net:      db 'the connection failed', 0
+str_e_nofile:   db 'no such file', 0
+str_e_readonly: db 'the volume is read-only', 0
+str_e_exists:   db 'that name is taken', 0
 str_e_unknown:  db 'an unknown error', 0
 
 align 8
@@ -1504,6 +1508,7 @@ err_names:      dq str_e_ok, str_e_badh, str_e_type, str_e_rights, str_e_expired
                 dq str_e_revoked, str_e_range, str_e_nomem, str_e_full, str_e_timeout, str_e_arg
                 dq str_e_canceled, str_e_killed, str_e_fault, str_e_peer, str_e_empty
                 dq str_e_conflict, str_e_noname, str_e_io, str_e_nostore, str_e_net
+                dq str_e_nofile, str_e_readonly, str_e_exists
 rt_names_none:  dq str_rt_dup, str_rt_give, str_rt_info, 0, 0, 0, 0, 0
                 dq 0, 0, 0, 0, 0, 0, 0, 0
 rt_names_task:  dq str_rt_dup, str_rt_give, str_rt_info, 0, 0, 0, 0, 0
@@ -1530,6 +1535,10 @@ rt_names_desk:  dq str_rt_dup, str_rt_give, str_rt_info, 0, 0, 0, 0, 0
                 dq str_rt_window, 0, 0, 0, 0, 0, 0, 0
 rt_names_window: dq str_rt_dup, str_rt_give, str_rt_info, 0, 0, 0, 0, 0
                 dq str_rt_draw, 0, 0, 0, 0, 0, 0, 0
+rt_names_files: dq str_rt_dup, str_rt_give, str_rt_info, 0, 0, 0, 0, 0
+                dq str_rt_read, str_rt_write, 0, 0, 0, 0, 0, 0
+rt_names_settings: dq str_rt_dup, str_rt_give, str_rt_info, 0, 0, 0, 0, 0
+                dq str_rt_read, str_rt_change, 0, 0, 0, 0, 0, 0
 
 section .data
 align 8
@@ -1548,6 +1557,10 @@ ty_net:         dq str_ot_net, obj_free, 0, 0, 0, 0, rt_names_net, 0
 ty_socket:      dq str_ot_socket, sk_destroy, 0, 0, 0, 0, rt_names_socket, sk_orphan
 ty_desk:        dq str_ot_desk, obj_free, 0, 0, 0, 0, rt_names_desk, 0
 ty_window:      dq str_ot_window, wo_destroy, 0, 0, 0, 0, rt_names_window, wo_orphan
+ty_settings:    dq str_ot_settings, obj_free, 0, 0, 0, 0, rt_names_settings, 0
+ty_files:       dq str_ot_files, obj_free, 0, 0, 0, 0, rt_names_files, 0
+ty_sound:       dq str_ot_sound, obj_free, 0, 0, 0, 0, rt_names_sound, 0
+ty_stream:      dq str_ot_stream, snd_destroy, 0, 0, 0, 0, rt_names_sound, snd_orphan
 
 thread_list     equ ty_thread + TY_LIST
 thread_count    equ ty_thread + TY_LIVE

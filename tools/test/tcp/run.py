@@ -126,6 +126,7 @@ def clients():
     c.sendall(data[sent:])
     t.join()
     said.append(("drained", bytes(back) == data, f"{len(back)} of {len(data)} bytes back"))
+    time.sleep(3)                           # open a while, for a 'tcp' to see the window again
     c.shutdown(socket.SHUT_WR)
     said.append(("fin", c.recv(10) == b"", "their FIN after ours"))
     c.close()
@@ -172,7 +173,7 @@ def main():
                "type tcp" + NL, "wait 0.5",
                "type poweroff" + NL, "ended"]
     fwd = f"user,hostfwd=tcp:127.0.0.1:{ECHO}-:7,hostfwd=tcp:127.0.0.1:{DEAD}-:9"
-    logs = boot_all(OUT, {"tcp": (script, ["--smp", "2", "--nic", "rtl8139", "--netdev", fwd], 180)})
+    logs = boot_all(OUT, {"tcp": (script, ["--smp", "2", "--nic", "rtl8139", "--netdev", fwd], 180, 1)})
     log, err = logs["tcp"]
     result("AXIOM PANIC" not in log, "no panic")
     result("QEMU ended by itself" in err, "powered off")

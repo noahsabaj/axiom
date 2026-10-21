@@ -42,6 +42,8 @@ efi_reset:
     ret
 
 power_reboot:
+    call rtw_leave                      ; off the Wi-Fi network, first
+    call battery_leave                  ; and normal charging again
     mov edi, EFI_RESET_COLD
     call efi_reset
     cli
@@ -72,7 +74,28 @@ power_reboot:
     hlt
     jmp .hang
 
+; power_cycle: a full reset straight from the chipset (CF9's FULL_RST: the
+; platform's power off for a few seconds, then on), not the firmware's
+; ResetSystem, which may keep the power on: devices that hold their state
+; through a warm reset start afresh (watch.asm, a network missing). The
+; usual ways if it did not happen. Never returns.
+power_cycle:
+    call rtw_leave
+    call battery_leave
+    call log_final
+    cli
+    mov dx, 0xCF9
+    mov al, 0x02
+    out dx, al
+    mov al, 0x0E                        ; FULL_RST | RST_CPU | SYS_RST
+    out dx, al
+    mov edi, 50000
+    call delay_us
+    jmp power_reboot
+
 power_off:
+    call rtw_leave
+    call battery_leave
     mov edi, EFI_RESET_SHUTDOWN
     call efi_reset
     cli
@@ -173,9 +196,79 @@ acpi_sleep_s5:
 .done:
     ret
 
+; power_button_init: the ACPI fixed power button, when the firmware left the
+; machine in ACPI mode and the button is not a control-method device: its
+; event enabled (the SCI stays masked; power_button polls the status)
+power_button_init:
+    push rax
+    push rbx
+    push rdx
+    mov rbx, [fadt_ptr]
+    test rbx, rbx
+    jz .out
+    test dword [fadt_flags], 1 << 4     ; PWR_BUTTON: a control-method one
+    jnz .out
+    mov edx, [rbx + 64]                 ; PM1a_CNT_BLK: SCI_EN, ACPI mode
+    test edx, edx
+    jz .out
+    in ax, dx
+    test al, 1
+    jz .out
+    mov edx, [rbx + 56]                 ; PM1a_EVT_BLK: status, then enable
+    test edx, edx
+    jz .out
+    movzx eax, byte [rbx + 88]          ; PM1_EVT_LEN
+    shr eax, 1
+    jz .out
+    mov [pwr_sts_port], dx
+    add edx, eax
+    mov [pwr_en_port], dx
+    in ax, dx
+    or ax, 1 << 8                       ; PWRBTN_EN
+    out dx, ax
+    mov dx, [pwr_sts_port]
+    mov ax, 1 << 8                      ; and no press from before
+    out dx, ax
+.out:
+    pop rdx
+    pop rbx
+    pop rax
+    ret
+
+; power_button -> EAX = 1 if the power button was pressed since last asked
+; (and not before). The main thread, after ACPI's tables are read. Preserves
+; others.
+power_button:
+    push rdx
+    cmp byte [pwr_tried], 0
+    jne .ready
+    mov byte [pwr_tried], 1
+    call power_button_init
+.ready:
+    xor eax, eax
+    movzx edx, word [pwr_sts_port]
+    test edx, edx
+    jz .out
+    in ax, dx
+    and eax, 1 << 8                     ; PWRBTN_STS
+    jz .out
+    out dx, ax                          ; written 1 to clear
+    mov eax, 1
+.out:
+    pop rdx
+    ret
+
 section .data
 align 8
     dw 0, 0, 0
 null_idtr:
     dw 0
     dq 0
+
+section .bss
+alignb 2
+pwr_sts_port:   resw 1                  ; PM1a status (0: no fixed button)
+pwr_en_port:    resw 1
+pwr_tried:      resb 1                  ; power_button_init done
+
+section .text

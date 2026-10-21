@@ -1,5 +1,7 @@
 ; =============================================================================
 ;  serial.asm - COM1 debug log at 115200 8N1. Machines without a UART skip it.
+;  What comes in is typed (serial_poll); its interrupt wakes the main loop,
+;  so it is read at once, in order with the keyboard's keys.
 ; =============================================================================
 
 COM1            equ 0x3F8
@@ -17,7 +19,7 @@ serial_init:
     jne .absent
     mov dx, COM1 + 1
     xor al, al
-    out dx, al                          ; no UART interrupts
+    out dx, al                          ; no UART interrupts (yet)
     mov dx, COM1 + 3
     mov al, 0x80
     out dx, al                          ; divisor latch
@@ -40,6 +42,47 @@ serial_init:
 .absent:
     pop rdx
     pop rax
+    ret
+
+; serial_irq_init: once the I/O APIC is set up, a byte in interrupts (IRQ 4).
+serial_irq_init:
+    cmp byte [serial_present], 0
+    je .out
+    push rax
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    mov edi, VEC_SERIAL
+    lea rsi, [serial_irq]
+    call irq_register
+    mov edi, 4
+    mov esi, VEC_SERIAL
+    lea rax, [percpu]
+    mov edx, [rax + PC_APIC_ID]         ; to the BSP
+    call ioapic_route_isa
+    mov dx, COM1 + 4
+    mov al, 0x0B                        ; DTR, RTS, OUT2 (lets it reach the APIC)
+    out dx, al
+    mov dx, COM1 + 1
+    mov al, 0x01                        ; a byte received
+    out dx, al
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rax
+.out:
+    ret
+
+; IRQ 4: what came in, into the keyboard's ring (the main loop wakes after)
+serial_irq:
+    mov dx, COM1 + 2
+    in al, dx
+    test al, 1                          ; nothing from the UART
+    jnz .out
+    call serial_poll
+.out:
     ret
 
 ; serial_putc(AL). Preserves all.

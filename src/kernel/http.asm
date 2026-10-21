@@ -33,7 +33,7 @@
 ;  RSI, RDI and R8-R11.
 ; =============================================================================
 
-HTTP_MAX        equ 1024 * 1024
+HTTP_MAX        equ 4 * 1024 * 1024         ; of an answer, kept
 HTTP_HEAD       equ 8192                ; the status line and headers, at most
 HTTP_IDLE_S     equ 30                  ; a connection kept, unused, at most
 HTTP_LINES      equ 20                  ; of the body, shown

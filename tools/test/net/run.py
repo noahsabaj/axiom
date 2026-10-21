@@ -166,10 +166,11 @@ ECHO, TLS_ECHO, ANSWER, TLS_ANSWER, RESET, SERVE = (free_port() for _ in range(6
 served = []
 
 
-def serve_clients(log_has):
+def serve_clients(log_count):
     """Three clients for the guest's 'net serve', one after another."""
     deadline = time.time() + 200
-    while not log_has("listens on port 7777") and time.time() < deadline:
+    # 'net test' listens on 7777 first, and says so too: wait for 'net serve'
+    while log_count("listens on port 7777") < 2 and time.time() < deadline:
         time.sleep(0.3)
     for i in range(3):
         data = random.Random(i).randbytes([1000, 100_000, 300_000][i])
@@ -212,12 +213,14 @@ def main():
     log_path = OUT / "net.log"
     started = time.time()
 
-    def log_has(text):
+    def log_count(text):
         try:
-            return text in log_path.read_text(errors="replace") and log_path.stat().st_mtime >= started
+            if log_path.stat().st_mtime < started:
+                return 0
+            return log_path.read_text(errors="replace").count(text)
         except OSError:
-            return False
-    threading.Thread(target=serve_clients, args=(log_has,), daemon=True).start()
+            return 0
+    threading.Thread(target=serve_clients, args=(log_count,), daemon=True).start()
 
     run = lambda args: ["type run net " + args + NL, "until exited with", "wait 0.3"]
     stick = OUT / "stick.img"
@@ -240,7 +243,7 @@ def main():
                "type poweroff" + NL, "ended"]
     fwd = f"user,hostfwd=tcp:127.0.0.1:{SERVE}-:7777"
     logs = boot_all(OUT, {"net": (script, ["--smp", "4", "--nic", "rtl8139", "--netdev", fwd,
-                                            "--stick", stick.relative_to(ROOT).as_posix()], 300)})
+                                            "--stick", stick.relative_to(ROOT).as_posix()], 300, 1)})
     log, err = logs["net"]
     result("AXIOM PANIC" not in log, "no panic")
     result("QEMU ended by itself" in err, "powered off")

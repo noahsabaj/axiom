@@ -18,7 +18,14 @@ the firmware left 5-level paging on.
 3. Read the first sector of the volume the loader came from (`LoadedImage`'s
    device handle, its `BlockIo`) and keep its FAT volume serial number, so the
    kernel can find that stick again for its log. Never fatal.
-4. Calibrate the TSC against the firmware's `Stall` (50 ms).
+   Then `\SETTINGS.TXT` from the same volume, through its
+   `SimpleFileSystem`, read only, into 8 KiB of loader data
+   (`BI_SETTINGS`, `BI_SETTINGS_LEN`); none, and the kernel starts from its
+   defaults.
+4. The TSC's rate: from CPUID leaf 0x15 (crystal × ratio) when the CPU
+   gives all of it and a 5 ms `Stall` agrees within a factor of two; else
+   measured against a 50 ms `Stall`. The loader keeps a TSC mark after each
+   step for `bench boot`.
 5. Copy the embedded `kernel.bin` (an `incbin`) into fresh pages, zero its
    `.bss`, and build page tables:
    - `PML4[0]`: identity map of physical memory in 2 MiB pages, needed for
@@ -36,7 +43,8 @@ the firmware left 5-level paging on.
    identity mapped, so `ResetSystem` keeps working.
 7. Load CR3, jump to `kernel_main` with a boot-information block
    (`src/include/bootinfo.inc`): memory map, framebuffer, ACPI, SMBIOS, TSC
-   frequency, runtime-services table, boot volume serial.
+   frequency, runtime-services table, boot volume serial, the settings
+   file.
 
 Placing the kernel in the top 2 GiB matters for assembly: every label is a
 sign-extended 32-bit value, so `[table + rax*8]` and `push label` encode
@@ -59,9 +67,9 @@ loader reads: magic `AXIOMKRN`, entry point, file size, memory size.
 | 2 | `serial.asm`, `lib.asm`, `log.asm` | COM1 log, TSC time base, `sprintf`, `KLOG`; the clock and the boot volume into the log |
 | 3 | `cpu.asm` | CPUID features and brand, hybrid core types, PAT, NX, SSE/AVX through XSETBV, HWP, telemetry MSRs |
 | 4 | `pmm.asm`, `vmm.asm`, `heap.asm` | Bitmap page allocator from the UEFI memory map; the kernel's own page tables (no identity map, W^X), the vm region, the heap |
-| 5 | `gfx.asm`, `desk.asm`, `term.asm`, `window.asm`, `ui.asm` | Framebuffer, surfaces, alpha-blended glyphs; the desktop and the first shell's window (the others once the machine is up) |
+| 5 | `gfx.asm`, `theme.asm`, `draw.asm`, `icons.asm`, `desk.asm`, `term.asm`, `window.asm`, `ui.asm` | Framebuffer, surfaces, alpha-blended glyphs; the look, round shapes, shadows, blur and the desktop's font; the desktop and the first shell's window (the others once the machine is up) |
 | 6 | TSS, IST | Guarded stacks: the BSP moves onto its own, the loader's goes back; #DF, NMI and #MC each get one too |
-| 7 | `acpi.asm`, `smbios.asm` | MADT (CPUs, I/O APICs, overrides), MCFG, FADT, `_S5_`; board, BIOS and memory strings |
+| 7 | `acpi.asm`, `smbios.asm` | MADT (CPUs, I/O APICs, overrides), MCFG, FADT, `_S5_`; board, BIOS and memory strings; OEM strings (`axiom.demo=off`: no zoom at boot) |
 | 8 | `pmm.asm` | Reclaim boot-services memory |
 | 9 | `apic.asm` | x2APIC through MSRs, else xAPIC MMIO; 8259s masked; I/O APIC entries masked |
 | 10 | `object.asm`, `sched.asm`, `ring.asm` | The task `kernel`, which everything at boot acts for; the scheduler: the code running from here on is the thread `main`; the timer is the scheduler's; `async_boot`: the timers' heap and the thread `async` |
@@ -71,6 +79,7 @@ loader reads: magic `AXIOMKRN`, entry point, file size, memory size.
 | 14 | `kbd.asm`, `usb.asm` | PS/2 keyboard on IRQ 1; xHCI controllers and whatever is plugged in at boot (later devices arrive through hot-plug in the main loop) |
 | 15 | `nvme.asm`, `disk.asm`, `fat.asm` | NVMe controllers, their partitions (and those of USB sticks found in step 14), FAT32 mounted read-only |
 | 16 | `net.asm`, `rtl8168.asm` | Ethernet controllers; DHCP starts once the link is up |
+| 16a | `sound.asm`, `hda.asm` | The sound buffer, the first HD Audio controller with an analog output, and the thread `sound` that mixes into it |
 | 17 | `mandel.asm`, `shell.asm` | Palette, view, shell; interrupts on |
 | 18 | `store.asm` | The object store, from the first drive holding one (below) |
 
@@ -83,7 +92,8 @@ wheel), destroy windows that closed, draw what was printed into each
 terminal, compose the screen where it changed, and otherwise park
 the thread `main` (`thread_park_until`) until the next deadline: the next
 refresh or frame, the next key repeat, the next network timer, or 4 ms while
-a USB controller or a network card needs polling. Any device interrupt
+a USB controller or a network card needs polling (a card, every quarter of a
+millisecond for 50 ms after a frame comes or goes). Any device interrupt
 (vectors `0x20` to `0x2F`: a key, a USB event, a network frame, pointer
 movement) unparks it early. While it is parked, the BSP runs other threads,
 or idles.
@@ -125,7 +135,11 @@ or idles.
   `tlb_shootdown` sends `VEC_TLB` to every other CPU and waits for them all
   (`invlpg` per page, or a full flush past 64), and only then gives the pages
   and page tables back. A CPU waiting for the lock, or for a job to finish,
-  answers other shootdowns as it waits.
+  answers other shootdowns as it waits. A CPU asleep in its idle `hlt`
+  (`PC_TLB_LAZY` = 1) is neither sent the IPI nor waited for: the shootdown
+  marks it (1 → 2, by `cmpxchg`), and it flushes its whole TLB as it wakes,
+  in `isr_common` before any handler runs, so it never touches a page that
+  was taken away. The others then get the IPI one by one.
 - **The heap**: `kmalloc(bytes)` gives zeroed, 16-byte aligned memory; up to
   1 KiB it comes from slabs (a page from pmm each, through the direct map,
   one object size per slab: 16 to 1024 bytes), larger from a vm mapping of
@@ -188,6 +202,11 @@ or idles.
   run on, and comes back at most half a slice ahead of the least-run thread,
   preempting the running one if it is 1 ms or more behind it: so the shell
   answers at once while every CPU is busy.
+- **Idle**: a CPU with nothing to run watches its `PC_RESCHED` and run queue
+  for 50 us before `hlt`. While it watches (`PC_POLLING` = 1), a CPU waking
+  a thread there sets `PC_RESCHED` and sends no IPI. Both sides use a locked
+  XCHG and then read the other's flag, so a wake-up is never lost. In a VM, a
+  wake from `hlt` by an IPI costs an exit on each side: 10 us against 0.4.
 - **Where a thread goes**: where it is pinned (`TH_PIN`), where it is hinted
   once (`TH_HINT`), or the CPU that costs least: 64 for each thread there,
   24 for the wrong kind of core for its class (perf: P-cores; eff: E-cores;
@@ -326,16 +345,19 @@ or idles.
 
 ## Ring 3: `user.asm`, `src/user/`
 
-- **A program is a task with page tables of its own.** `run` reads
-  `/EFI/AXIOM/<NAME>.AXE` from the boot stick (or the volume chosen): a flat
+- **A program is a task with page tables of its own.** Its name typed in
+  the shell (or `run <name>`) reads `/EFI/AXIOM/<NAME>.AXE` from the boot stick (or the volume chosen): a flat
   file assembled at `USER_IMAGE` (0x400000), its header first (`AXE_*`:
-  'AXIOMEX1', the entry, and where code, constants, data and zeroes end,
-  each section on pages of its own). The loader checks the header, makes a
+  'AXIOMEX2', the entry, where code, constants, data and zeroes end, each
+  section on pages of its own, and `AXE_WANTS`: the capabilities it wants,
+  `AW_NET`, `AW_STORE`, `AW_DESK`, said in its source by `WANTS`). The loader checks the header, makes a
   task and an address space, and maps the code read-only and executable,
   the constants read-only, the data and zeroes writable and not executable,
   a 64 KiB stack under `USER_STACK_TOP` with nothing below it, and a
   read-only start block at `USER_START` (`SB_*`: handles to the task's ring,
-  its memory, the console and the network, what the task that started it gave it, where
+  its memory and the console; to the store, the network and the desktop
+  only if it wants them or the shell grants them (`+store`, `+net`,
+  `+desk`), 0 otherwise; what the task that started it gave it, where
   the ring is, the TSC rate, the arguments). The first thread starts at the
   entry with RDI = the start block, every other register 0. A file larger
   than `fat_file` (64 KiB) is read whole into a buffer of its own, up to
@@ -353,7 +375,7 @@ or idles.
   copies entries 256 to 511 of the kernel's, which never change after boot.
   The lower half is the task's: user pages are never global. Blocks of
   memory a task maps (`SYS_MAP`) go from `USER_MAPS` up, a guard page after
-  each, and are the memory object's own pages, so the kernel and the task
+  each, `AS_MAX` (128) of them at once, and are the memory object's own pages, so the kernel and the task
   see the same bytes. **A mapping is its capability's** (`CAP_MAPVA`): it
   goes, and every CPU's TLB forgets it before the memory can, when that
   handle is closed, revoked from the one it was derived from, given to
@@ -367,15 +389,18 @@ or idles.
 - **System calls** (`SYS_*`) come in by `SYSCALL` at `syscall_entry`: SWAPGS,
   onto the thread's kernel stack, a frame laid out as an interrupt's
   (`FR_*`, vector `VEC_SYSCALL`), interrupts back on, and out by `SYSRET`.
-  Arguments in RDI, RSI, RDX and R10; RAX and RDX back; RCX and R11 lost;
+  Arguments in RDI, RSI, RDX and R10 (and R8 for the two that take five);
+  RAX and RDX back; RCX and R11 lost;
   everything else kept. They are only what a ring cannot do: enter it, make
   rings, memory, events, threads and channels, map and unmap memory, start
   a program, yield, exit. The rest is an
   entry on a ring: a program writes to the console with `RO_WRITE` (a
   handle to the console, `OT_CONSOLE`, with `RT_CON_WRITE`, and text in a
   block of memory). The kernel never touches a program's pages at their
-  user addresses, and SMAP would stop it if it did; FSGSBASE is off, since
-  the FS and GS bases are not kept for each thread.
+  user addresses, and SMAP would stop it if it did; FSGSBASE is off: the FS
+  and GS bases are each thread's, and change only through the kernel (a
+  Linux program's arch_prctl), so a native program's are 0. docs/ABI.md
+  says all of this for a program's author.
 - **A fault in ring 3 ends the task, not the machine.** `exception_dispatch`
   sends every exception from ring 3 (but NMI and machine check) to
   `user_fault`, which says what it was and where (for a page fault, what the
@@ -389,8 +414,15 @@ or idles.
   is killed; once a killed task's last thread has gone, its handles are
   closed even while others hold handles to it, and when the last reference
   goes, its pages, page tables and mappings go too.
-- `run` runs in the background (a thread `run` waits for it, and the main
-  loop says how it ended); ctrl+C kills it. `user` counts programs and their
+- **Jobs:** a program run from the shell is a job (`user_jobs`, `JB_*`, 16
+  at most): its task, the terminal it was run from (`JB_CON`; the task's
+  `TK_CON`, inherited by every task it starts, is where its console lines
+  go), and a thread of its own (`user_waiter`) that waits for it. In front,
+  the prompt waits for it; ctrl+C kills it, not those in the background.
+  With `&` the prompt comes back at once. When one ends, the main loop
+  (`user_service`) says how in its terminal and, if it was in front, the
+  prompt comes back; an exit code other than 0 is a failure to `&&` and
+  `||` (`TW_SH_FAILED`). A terminal that closes kills its jobs. `user` counts programs and their
   pages. `user test` runs TEST.AXE (which checks the start block, its ring,
   registers kept across calls, refusals, events, a thread of its own, four
   more on a shared counter, a timeout, 64 KiB copied by the kernel, its own
@@ -490,7 +522,9 @@ into) on screen and serial.
   page in bits the unit ignores (52-61), so two commands sharing a page
   each leave it as they found it. Unmapping a page forgets it in every
   translating unit's IOTLB (page-selective if the unit can, else the whole
-  domain) before it returns. On a unit that does not snoop the caches,
+  domain) before it returns; a buffer of many pages (`iommu_map_va`,
+  `iommu_unmap_va`) is forgotten once for all of them, as a unit in caching
+  mode (QEMU's) is told once of all the pages mapped. On a unit that does not snoop the caches,
   every table and entry written is flushed with `clflush`.
 - **Faults** are recorded by the interrupt (or by `iommu_faults` when
   asked): who (bus, device, function), reading or writing what page, and
@@ -590,12 +624,18 @@ into) on screen and serial.
   the shortest `NAME~n.EXT` alias nothing else in the directory has, and an 8.3
   name in one case is stored as 8.3 with the lowercase flags Windows uses.
   There is one cached FAT sector (written to every FAT copy) and one cached
-  directory sector; file data goes straight to its clusters. Every operation
+  directory sector; file data goes straight to its clusters, a run of
+  clusters one after another read in one request (up to 1 MiB). Every operation
   ends by flushing both caches, updating FSInfo's next-free hint and telling
   the drive to flush. Replacing a file empties its entry before freeing the
   old clusters, so an interrupted write leaves an empty file, not a dangling
-  chain.
-- Shell: `disks`, `vol`, `ls`, `cd`, `cat`, `cp`, `write`, `mkdir`, `rm`.
+  chain. `fat_rename` writes a thing's entries again under its new name, in
+  the same folder or another, its clusters left where they are (a folder
+  moved has its `..` pointed at its new parent); it puts the old entries
+  back if the new ones cannot be made, and refuses to move a folder into
+  itself or to move the shell's current folder or one it is in.
+- Shell: `disks`, `vol`, and the `files` thing (`files show`, `copy`,
+  `move`, `new`, `write`, `remove`, `find`), `go`, `here`.
   File times come from the CMOS clock (`rtc.asm`, also `date`).
 - Tested in QEMU against images from `tools/mkdisk.py` (512-byte and 64 KiB
   clusters, two drives at once, a USB stick direct and behind a hub, pulled
@@ -643,8 +683,8 @@ into) on screen and serial.
   head. Nothing is ever lost, since every commit is still in the log.
 - **Programs reach the store by capability** (`OT_STORE`): an object with a
   prefix and a transaction of its own; rights `RT_ST_READ`, `RT_ST_WRITE`,
-  `RT_ST_COMMIT` and `RT_ST_ROLLBACK`. `run` gives each program one on
-  `<name>/` (`SB_STORE`; read-only when the store is), and its names are
+  `RT_ST_COMMIT` and `RT_ST_ROLLBACK`. A program that wants the store
+  (`AW_STORE`, or run with `+store`) gets one on `<name>/` (`SB_STORE`; read-only when the store is), and its names are
   seen without that prefix. Ring entries `RO_ST_PUT`, `RO_ST_GET`,
   `RO_ST_DEL`, `RO_ST_COMMIT` (why in a block of memory), `RO_ST_ABORT`,
   `RO_ST_SUB` (a capability on a narrower prefix, with fewer rights),
@@ -682,6 +722,56 @@ when the FAT code's state can't be trusted. USB transfers are polled, so the
 save works with interrupts off. A failed automatic save turns automatic saving
 off. `log` shows the state; `log save`, `log on`, `log off`.
 
+## Settings: `settings.asm`
+
+- **The store:** a table of settings (`SETTING`: a name, a kind, flags, a
+  default, a range and step or a list of names, a unit, what applies it, a
+  line about it), a value each in `cfg_vals` and, for words, 64 bytes in
+  `cfg_texts`. Kinds (`SK_*`): a choice, a switch, a number, a colour (with
+  named swatches), a zone (minutes from UTC) and a word, checked by
+  `CW_HOST`, `CW_IPV4` or `CW_WORD`. `cfg_parse` reads a value as a person
+  types it (`500ms`, `on`, `orange` or `#ff9f0a`, `-05:00`); `cfg_show`
+  writes it back the same way; `cfg_takes` says what one takes, for errors.
+- **A change** (`cfg_change`, any thread, under `cfg_lock`): the value, a
+  bit in `cfg_pending` for the main loop, `cfg_dirty` and a save a second
+  later, and every settings object told (`cfg_notify`: `SG_CHANGED` set,
+  its queue woken). `cfg_service`, from the main loop, runs each pending
+  setting's apply (`SD_APPLY`) on the main thread, and saves.
+- **What reads them:** the desktop's theme (`theme.asm`: `cfg_theme` makes
+  `display.theme`, `display.accent`, `display.scale` and `desktop.wallpaper`
+  its `th_mode`, `th_accent_i` (the nearest of its nine accents), `ui_s4`
+  (auto: `th_auto_s4`, the screen's own) and `th_wall`, then
+  `theme_apply`; the shell's `theme` changes the same settings through
+  `cfg_set_look`, so each says what the other did), `cfg_clock` (the menu
+  bar's clock, from the CMOS clock: 24-hour, 12-hour or none), `cfg_font`
+  (`gfx_init`'s font: `display.text-size`), `cfg_repeat_delay` and
+  `cfg_repeat_every` (USB key repeat), `cfg_key` (Dvorak and Colemak, by
+  character, on USB and PS/2), `cfg_pointer` and `cfg_wheel`, `cfg_host`
+  (DHCP's host name option and Linux's `uname`), `cfg_zone` (Linux's
+  UTC), the IPv4 setting (through `ip`/`dhcp`), `ip6_prefer`, the log and
+  Claude's model. The power button is `power.asm`'s.
+- **Kept** in `/SETTINGS.TXT` on the boot stick, the log's volume and the
+  log's way of writing it: `name = value` for each that is not its default,
+  `#` for remarks. The loader's copy is read in `cfg_init`, before
+  `gfx_init`, so the look and the text size hold from the first frame; if
+  the loader had none, the stick's is read once it is mounted. Saved a
+  second after a change, and by `log_final` before a reboot or power-off.
+- **The shell:** `settings [name | category | pattern]` (records: one in
+  full, with what it takes and whether it applies now or at the next
+  start), `settings set <name> <value>` (a row: name, value, was) and
+  `settings reset <name | pattern | all>...`.
+- **Programs** that want them (`AW_SETTINGS`, or `+settings`) get an
+  `OT_SETTINGS` handle of their own (`SB_SETTINGS`, rights `RT_SET_READ`,
+  `RT_SET_CHANGE`). `RO_SET_LIST` copies a record (`SI_*`, 512 bytes:
+  name, kind, flags, value, default, range, its text, unit, choices,
+  swatches, about) for each into the program's memory and clears its
+  `SG_CHANGED`; `RO_SET_CHANGE` sets one by its place, as a value or as
+  text from its memory; `RO_WAIT` on the handle ends once one changed
+  since it last listed them. `src/user/settings.asm` (`run settings`) is
+  the window: it keeps a wait on its window's channel and one on the
+  settings at once (`arm`, `drain`), so a change from the shell repaints
+  it, and its own changes come back the same way.
+
 ## Network: `rtl8168.asm`, `net.asm`, `ip6.asm`, `tcp.asm`, `netapp.asm`, `http.asm`, `httpd.asm`, `socket.asm`
 
 - **Realtek** (`rtl8168.asm`): the RTL8111/8168 family (the Victus's "Gaming
@@ -695,7 +785,8 @@ off. `log` shows the state; `log save`, `log on`, `log off`.
   (With 64, a burst of small segments between two polls overran the ring,
   and each lost one cost TCP a retransmission timeout: over a second.)
   MSI-X or MSI wakes the main loop, which polls the ring; without either
-  (QEMU's 8139) it polls every 4 ms.
+  (QEMU's 8139) it polls every 4 ms, and every 0.25 ms for 50 ms after a
+  frame came in or went out (a round trip took 4 ms, now about 0.3).
 - **Stack** (`net.asm`): drivers register an interface with a table of
   operations (send, poll, link, ack) and hand frames to `net_receive`. The
   first interface carries the one IPv4 address. ARP keeps 16 neighbours for
@@ -793,7 +884,7 @@ off. `log` shows the state; `log save`, `log on`, `log off`.
   meanwhile is forgotten. If it closes just as it is used, before anything
   comes back, the request goes again, once, on a new connection.
   `http_hangup` lets a client close as soon as it has what it wants.
-  `http <host[:port][/path]> [file]` is its own client: a GET. Up to 1 MiB
+  `http <host[:port][/path]> [file]` is its own client: a GET. Up to 4 MiB
   of the answer is kept; then the status line, `Content-Type`, `Location`
   and `Transfer-Encoding`, and the first 20 lines of the body, or the body
   goes to a file on the current volume. `https://` goes over `tls.asm`
@@ -819,7 +910,8 @@ off. `log` shows the state; `log save`, `log on`, `log off`.
   connection is closed. Every request is logged: who, what, the status and
   the body's size.
 - **Sockets** (`socket.asm`): the network for ring 3, by capability. `run`
-  gives each program one on the whole network (`OT_NET`, `SB_NET`);
+  gives a program that wants it (`AW_NET`, or `+net`) one on the whole
+  network (`OT_NET`, `SB_NET`);
   `RO_NET_SUB` makes narrower ones, on a host, every host under a name
   (`*.example.com`) or one port, with fewer of the rights `RT_NET_CONNECT`
   (plain TCP), `RT_NET_TLS` (TLS, the certificate checked),
@@ -835,9 +927,21 @@ off. `log` shows the state; `log save`, `log on`, `log off`.
   (a0 = 0), or for neither ever to come. `RO_NET_STATUS` says the state
   (lookup, connect, handshake, open, ended, failed, listening) and why it
   failed (`NETW_*`: the lookup's reasons, no link, no route, refused,
-  reset, timed out, TLS with its alert, a port in use). `RO_NET_SHUT`
+  reset, timed out, TLS with its alert, a port in use, an identity that
+  will not do). `RO_NET_SHUT`
   sends a FIN once what was sent has gone; `RO_NET_LISTEN` and
-  `RO_NET_ACCEPT` take connections, eight waiting at most. Errors: `E_FULL`
+  `RO_NET_ACCEPT` take connections, eight waiting at most (port 0: one the
+  main loop picks; `RO_WAIT`, a0 = 1, until it listens). With `NETF_TLS`
+  a listener's connections are TLS 1.3's server side, proving the identity
+  it was given (`NI_*`: a P-256 key and its certificates, copied into the
+  kernel and the key wiped when the listener goes; the main loop checks
+  that the key is the leaf's, else `NETW_IDENTITY`); each socket it takes
+  holds the listener, and is sent and received in plaintext once its
+  handshake is done. `RO_NET_CONNECT`
+  with `NETF_LOOKUP` only looks the host up, the socket ending once its
+  address is known; `RO_NET_ADDR` says a socket's addresses and ports (the
+  other side's and ours), and `RO_NET_STATUS` also what `RO_WAIT` would
+  find there now (`NS_RECV`, `NS_SEND`): what std::net needs. Errors: `E_FULL`
   and `E_EMPTY` for now, `E_PEER` at the end, `E_NET` on failure. When a
   socket's last handle goes, what it sent still goes out, then it is
   closed, or reset after 10 s. The program's side runs on any CPU, under
@@ -893,7 +997,7 @@ off. `log` shows the state; `log save`, `log on`, `log off`.
 
 ## TLS: `tls.asm`, `rand.asm`, `sha256.asm`, `aesgcm.asm`, `x25519.asm`, and certificates
 
-A TLS 1.3 client (RFC 8446) and the crypto under it.
+A TLS 1.3 client and server (RFC 8446) and the crypto under it.
 
 - **The client** (`tls.asm`): any number of connections, each a session
   (`TLS_SESSION`, about 100 KiB: keys, transcript, record and handshake
@@ -919,6 +1023,18 @@ A TLS 1.3 client (RFC 8446) and the crypto under it.
   PSS 0x0804-0x0806; PKCS #1 v1.5 is refused there, as RFC 8446 says). With
   `http -k` the chain is not checked, only parsed for the leaf's key, so
   CertificateVerify still proves the server holds the key it sent.
+- **The server** (`tls_accept`): the same sessions, given an identity (a
+  P-256 key and its certificates, as TLS lists them) instead of a host.
+  The ClientHello must offer TLS 1.3, TLS_AES_128_GCM_SHA256, an X25519
+  share and ecdsa_secp256r1_sha256, else the matching alert (no
+  HelloRetryRequest). One flight answers it: ServerHello (with a
+  change_cipher_spec if the client sent a session id), then, sealed,
+  EncryptedExtensions, Certificate, a CertificateVerify signed by
+  `sig_sign`, and Finished; the client's Finished is checked in constant
+  time before its data is taken. No client certificates, resumption or
+  early data. Each side of a session keeps its keys as "what it sends
+  with" and "what it receives with", so the client's record layer and key
+  schedule serve both.
 - **Certificates** (`x509.asm`): X.509 v3 in DER. The leaf must name the
   host in a subjectAltName (DNS, with a wildcard only as the whole first
   label, or an IPv4 address; no Common Name fallback), be in date, and allow
@@ -938,12 +1054,21 @@ A TLS 1.3 client (RFC 8446) and the crypto under it.
   4096-bit keys, PKCS #1 v1.5 and PSS (MGF1, salt as long as the hash);
   ECDSA on P-256 and P-384 in Jacobian coordinates with Shamir's trick;
   each with SHA-256, SHA-384 or SHA-512 (`sha512.asm`). `bignum.asm` is
-  Montgomery arithmetic (CIOS) on 64-bit limbs up to 4096 bits. Only public
-  values pass through it, so it is not constant-time, and need not be.
+  Montgomery arithmetic (CIOS) on 64-bit limbs up to 4096 bits, and not
+  constant-time. Signing, ECDSA P-256 (`sig_sign`, for the server), is
+  the one place a secret meets it, so the secret is blinded there: a
+  Montgomery ladder with a masked swap, on the nonce plus a random
+  multiple of the order (a fixed 320 bits), from the base point in random
+  projective coordinates; the nonce fresh from `rand.asm` each time, its
+  inverse taken blinded; the scratch wiped afterwards. `ec_public` gives a
+  key's public point.
 - `tools/test/pki/run.py` checks all of it on the host: SHA-384/512 against
   hashlib; Montgomery products, powers and inverses against Python's
   integers over 141 moduli; 264 RSA and 442 ECDSA signatures, from OpenSSL
-  and an independent reference, good and damaged; 43 chains made by OpenSSL
+  and an independent reference, good and damaged; P-256 public keys (RFC
+  6979's) and 60 signatures by `sig_sign`, strict DER, taken by the
+  reference, by `sig_verify` and by the openssl tool, a fresh nonce each
+  time; 43 chains made by OpenSSL
   (RSA and EC, intermediates, wildcards, addresses, every refusal) and 400
   damaged at random; the built-in roots compared with certifi; the chains
   of 20 real sites; register preservation. On this CPU an RSA-2048 check
@@ -970,9 +1095,20 @@ A TLS 1.3 client (RFC 8446) and the crypto under it.
   address, twenty years on and a clock in 2024 each refused with the
   right alert; a forged CertificateVerify and three in the wrong scheme
   refused; `--live` fetches from eight real sites, each verified.
+  As the server, to Python's ssl as the client: a chain to the test CA
+  checked by the client, whole, a byte at a time and in pieces; a
+  self-signed certificate pinned by its SHA-256 (as fleet pins a node's);
+  30 more handshakes with up to 30 KB each; every session at once, their
+  bytes interleaved; ClientHellos it must refuse, each with its alert (TLS
+  1.2 only, other suites, RSA signatures only, a P-256 share, a weak or
+  short X25519 share, compression, cut off); no session id, so no
+  change_cipher_spec; a tampered record; a client that does not trust the
+  certificate; a connection that will not take the flight.
 - In QEMU, `http https://example.com/` (verified to its root), and from
   `tools/httpsd.py`, whose test CA Axiom does not trust: refused, then a
-  300 KB file with `http -k` (saved, compared byte for byte).
+  300 KB file with `http -k` (saved, compared byte for byte). The server
+  in `tools/test/rust` (rstd net): a TLS listener from a PKCS #8 key and a
+  self-signed certificate, a TLS 1.3 client from the host pinning it.
 
 - **SHA-256** (`sha256.asm`): one call or init/update/final over a context
   the caller owns (copyable, so a transcript hash can be forked). Blocks go
@@ -1084,57 +1220,314 @@ text rows.
 
 ## The desktop: `desk.asm`
 
+- **The look** (`theme.asm`): light or dark, an accent, and a scale
+  (`ui_s4`, quarters of a pixel a point: 2560×1600 is two pixels a point).
+  `th_c` holds the colours by role (`TC_WINDOW`, `TC_TEXT`, `TC_PANEL`,
+  ...); `theme_color` maps the terminal's palette into them. `theme_apply`
+  loads one and `desk_restyle` remakes what was drawn from it: the
+  wallpaper, the bar, the shadows, the icons, the cursor, every window. The
+  `theme` thing in the shell shows and changes it. Light or dark, the accent,
+  the scale and the wallpaper (wall.asm's mountains, by default, or a
+  gradient and soft lights: aurora, plain, dusk, ocean, graphite, theme.asm's
+  `walls`) are settings, kept on the stick.
+- **Drawing** (`draw.asm`): rounded rectangles walked as spans with an
+  anti-aliased edge (`rr_walk`), soft shadows made once per radius and
+  margin (`shadow_build`, `gfx_shadow`: corners, edges fading inside and
+  out, the inside where the window leaves it showing), box blur for the
+  frosted glass, and the desktop's font (`uf_text`, Noto Sans regular and
+  semibold, from `gen/uifont.*`). Images are premultiplied ARGB.
+- **Icons** (`icons.asm`): each app's icon is a small program of shapes
+  (gradients, round rectangles, circles, polygons, a letter) in thousandths
+  of its size, drawn at the scale and given a shadow; a program's window
+  without one gets a letter on a colour from its name. The cursor is drawn
+  the same way.
 - **Windows** (`WN_*`): where the frame is, the client's size, its surface,
-  flags (`WF_SHOWN`, `WF_CLOSE`, `WF_RESIZE`, `WF_CLOSING`, `WF_PROGRAM`), an
-  id, a title, and an ops table: paint, key, click (press and release, at a
-  point in the client), wheel, close, move. `win_new` makes one, cascaded
-  unless told where; `win_move`, `win_resize` (`win_fit`: at least its
-  minimum, at most the screen, repainted), `win_focus` (raised, with the
-  keys), `win_minimise`, `win_close` (destroyed by the main loop, after its
+  flags (`WF_SHOWN`, `WF_CLOSE`, `WF_RESIZE`, `WF_CLOSING`, `WF_PROGRAM`,
+  `WF_ZOOMED`), an id, a title, the app it belongs to, and an ops table:
+  paint, key, click (press and release, at a point in the client), wheel,
+  close, move. `win_new` makes one, cascaded unless told where; `win_move`,
+  `win_resize` (`win_fit`: at least its minimum, at most the screen,
+  repainted), `win_focus` (raised, with the keys), `win_minimise` (a
+  picture of it kept for the dock), `win_zoom` (to fill the space between
+  the bar and the dock, and back), `win_screen` and `win_unscreen` (full
+  screen, and back), `win_close` (destroyed by the main loop, after its
   own close op).
-- **Stacking:** `desk_z` bottom to top, `desk_wins` by slot (the bar's
-  order), `desk_focus` the window with the keys. A title bar always stays
-  on the screen, under the bar.
+- **Full screen** (`WF_SCREEN`, `desk_screen`): one window that may be
+  resized at a time, its client all of the screen (`win_fit` and
+  `win_place` keep it so: its title bar above the screen's top), with the
+  keys; where it was is kept in `WN_S*`. `desk_compose` then copies only
+  its client, square, with black where its pixels do not reach: no
+  wallpaper, frames, shadows, bar or dock, and their glass waits.
+  `desk_hit` finds its client everywhere, so a press never reaches the
+  bar or the menus. It ends when another window takes the keys
+  (`win_focus`), when it is minimised, put away or closed, or by
+  ctrl+meta+F (`desk_key`), the Window menu's Full Screen or `win screen`.
+  A program's window is told `WE_ZOOM` (`zoom_tell`, only when it differs
+  from what it was last told, `WN_ZTOLD`) before the `WE_RESIZED` its new
+  size brings, however it changed: `RO_WIN_ZOOM`, the zoom button, a
+  double click, the menu, the keys, or dragging a zoomed window.
+- **Stacking:** `desk_z` bottom to top, `desk_wins` by slot,
+  `desk_focus` the window with the keys. A title bar always stays on the
+  screen, under the bar.
 - **Damage:** `win_damage` (any thread) adds a rectangle of the screen to a
   list of 16 under a lock (once it is full, one rectangle around them
   all).
   `desk_update`, on the main thread, composes each one into the back buffer
-  (the background, the windows bottom to top, each frame then its client
-  copied in, the bar last) and copies it to the screen.
-- **The frame:** a border, a title bar with a minimise button (and a close
-  button if the window can close), and a grip in the client's corner if it
-  resizes. **The bar** across the top: AXIOM, `+ shell`, a button per window
-  (a click shows, raises or minimises it), the status at the right end.
+  (the wallpaper, the windows bottom to top, each its shadow, its frame
+  then its client copied in, the bar and the dock last, the dock's glass
+  blurred from what is under it) and copies it to the screen.
+- **The frame:** round corners, a shadow (deeper for the window with the
+  keys), and three buttons at the left of the title bar: close (if the
+  window can close), minimise and zoom, coloured while the window has the
+  keys or the pointer is over them. A window that resizes does so from any
+  edge.
+- **The menu bar** across the top: the mark, the name of the app in front,
+  and at the right the status and the time (`desk_tick` redraws it each
+  minute).
+- **The dock** at the bottom, frosted glass: the apps (Terminal, Files,
+  Notes, Browse, Paint, Settings, System) with a dot under each running
+  one, then programs' windows that are none of them, then past a line the
+  minimised windows' pictures. A click on an app brings its windows forward
+  or starts it; on Terminal, while a shell has the keys, it opens another;
+  on a picture, it shows the window again. Its name shows over it.
 - **The pointer** (`desk_press`, `desk_release`, `desk_motion`,
   `desk_wheel`): a press raises and focuses what is under it; on a title
-  bar it drags, on the grip it resizes, on a button it waits for the release
-  over the same button; in a client it goes to the window's click op, and so
-  does the release. The wheel goes to the client under the pointer.
+  bar it drags (a double click zooms), on an edge it resizes, on a button
+  or the dock it waits for the release over the same one; in a client it
+  goes to the window's click op, and so does the release. The wheel goes
+  to the client under the pointer.
 - `win` lists the windows (a shell's with its lines and how far it is
-  scrolled back); `win move|size|raise|min|close <n>` acts on one.
+  scrolled back, and the one full screen as such);
+  `win move|size|raise|min|zoom|screen|close <n>` acts on one.
 
 ## Program windows: `window.asm`
 
-- A program run from the console gets a handle to the desktop (`OT_DESK`,
+- A program that wants the desktop (`AW_DESK`, or `+desk`) gets a handle to it (`OT_DESK`,
   `SB_DESK`, right `RT_DESK_WINDOW`). `SYS_WINDOW_NEW(desktop, width,
-  height, a channel's end)` opens a window (`OT_WINDOW`, `WO_*`) and returns
-  it and its pixels: a block of memory the program maps, B,G,R,x at width ×
-  4 bytes a row, which the desktop copies from as it composes. Its size is
-  fixed (no grip); its title starts as the program's name.
+  height, a channel's end, WNF_*)` opens a window (`OT_WINDOW`, `WO_*`) and
+  returns it and its pixels: a block of memory the program maps, B,G,R,x at
+  width × 4 bytes a row, which the desktop copies from as it composes. Its
+  title starts as the program's name. With `WNF_RESIZE` the user may resize
+  it: the pixels are as large as the screen, and `WE_RESIZED` says how much
+  of them the window shows now; `WNF_FULL` is that, zoomed to begin with
+  (the screen between the bar and the dock; `win_zoom`), and `WNF_SCREEN`
+  that, full screen to begin with (`win_screen`). `RO_WIN_ZOOM` (`WZ_*`,
+  kept in `WO_ZOOM` until `wo_service` does it with `win_set_zoom`) asks
+  for full screen, zoomed or neither, and `WE_ZOOM` says which it is now.
 - **What happens to it** goes to the program as messages of `WE_SIZE`
   bytes, sent from the end it was given (`ch_post`, the kernel's own send)
   so they arrive at the end the program kept: `WE_KEY` while it has the
   keys, `WE_PRESS` and `WE_RELEASE` (the button, where), `WE_MOVE` while a
-  button is held in it, `WE_WHEEL`, and `WE_CLOSE` from its close button or
-  `win close`, which only ask (`OP_ASK`).
+  button is held in it, `WE_WHEEL`, `WE_CLOSE` from its close button or
+  `win close`, which only ask (`OP_ASK`), `WE_RESIZED`, `WE_FOCUS` (it has
+  the keys, or not), `WE_ZOOM` and `WE_LOOK`. `WE_MOVE`'s code is how far
+  the mouse moved since the desk last heard (`ptr_delta`: its own counts,
+  before `pointer_accel` and the screen's edges), for a game to look
+  around with.
+- **For games**, asked for in `WNF_*`: `WNF_KEYS` sends `WE_KEYDOWN` and
+  `WE_KEYUP` too, each key once each way, by its USB HID usage. Both
+  keyboards feed them through `key_event` (kbd.asm), which keeps a bit for
+  each usage down, so that a key held, repeating, goes down once and one
+  never seen down does not come up, and queues them in a ring of their own
+  (`key_ring`) that the main loop gives the window with the keys
+  (`key_next`, `win_key_event`). USB keyboards (`hid_keys`) find them by
+  comparing each report with the last; the PS/2 one by its scan codes,
+  made usages by `kbd_usage` and `kbd_e0_usage`, after `kbd_cook` has made
+  them text (pause's E1 sequence is passed over). `WNF_HOVER` sends
+  `WE_MOVE` while the pointer is over the window with no button held, and
+  `WE_LEAVE` once it is not (`wo_hover`, `prog_left` from `desk_motion`).
+  `RO_WIN_POINTER` (`PTRM_*`, kept in `WO_PTRM`) asks for no arrow over
+  the window, or for the pointer held: `ptr_mode`, each turn of the main
+  loop, moves it to the middle of the window with the keys that grabs it
+  and keeps it there (`grab_win`: what the mouse reports only adds to
+  `ptr_dx`, `ptr_dy`, and `WE_MOVE` goes to it whatever its `WNF_*`), and
+  draws no cursor while it is held or over a window that hides it
+  (`cursor_off`, `ptr_over`). ctrl+alt down together lets it go
+  (`grab_off`, in `win_key_event`) until a click in a window.
+- **The look** (`look.asm`): one block of memory, made at boot, that
+  programs map read only (`RO_DESK_LOOK`): the theme's colours by role, the
+  accent, the scale, the screen's size, and the desktop's fonts with the
+  tables that find a glyph (Noto Sans, `UFB_*`, and Cascadia Mono,
+  `MFB_*`). When the theme changes, `look_update` writes it again, counts
+  `LK_SERIAL` up and sends every program's window `WE_LOOK`.
 - **On its ring:** `RO_WIN_SHOW` (a rectangle, or all of it) puts what was
   drawn on the screen; `RO_WIN_TITLE` retitles it. Both need `RT_WIN_DRAW`.
 - The program's side runs on any CPU and never touches the desktop's own
   structures: it notes what it wants in the object under `win_lock`
-  (`WOF_OPEN`, `WOF_TITLE`, `WOF_GONE`) and wakes the main loop, whose
-  `wo_service` (from `desk_service`) opens, retitles and closes. Showing only
-  adds damage, which any thread may. The window closes when its last handle
-  goes (`wo_orphan`): the program ended, was killed, or its shell closed.
+  (`WOF_OPEN`, `WOF_TITLE`, `WOF_ZOOM`, `WOF_GONE`) and wakes the main
+  loop, whose `wo_service` (from `desk_service`) opens, retitles, zooms and
+  closes. Showing only adds damage, which any thread may. The window closes
+  when its last handle goes (`wo_orphan`): the program ended, was killed,
+  or its shell closed. The keys then go back to the window that had them
+  before.
+
+## Files for programs: `fscap.asm`
+
+- A program run with `AW_FILES` (or `+files`) gets a handle to every FAT
+  volume (`OT_FILES`, `SB_FILES`). `RO_FS_SUB` makes one that reaches a
+  single folder and what is under it, to hand to another program. A path is
+  `FS_PATH` bytes, NUL-ended: with a handle to every volume
+  `vol<n>:/folder/file`; with one to a folder, from that folder. No `.` or
+  `..`.
+- On the ring: `RO_FS_VOLUMES`, `RO_FS_LIST`, `RO_FS_READ`, `RO_FS_WRITE`
+  (a whole file, made or replaced), `RO_FS_MKDIR`, `RO_FS_REMOVE`,
+  `RO_FS_RENAME` (a file or a folder, renamed or moved to another folder
+  of its volume, in place), `RO_FS_SUB`. What a volume allows still holds: a program
+  never makes one writable, only the user's `vol <n> rw` does, and until
+  then a write is `E_READONLY`.
+- The FAT code is the main thread's alone: the program's thread queues what
+  it asks for (`fs_call`) and waits; `fs_service`, from the main loop, does
+  it, through kernel buffers the program's thread copies to and from.
+- `src/user/fstest.asm` checks it all, on a read-only volume and a
+  writable one, in the user suite.
+
+## Sound: `hda.asm`, `sound.asm`
+
+- **HD Audio** (`hda.asm`): every PCI function of class 04/03 is tried in
+  turn (an NVIDIA card's HDMI audio is one too) until one plays to an
+  output Axiom drives. The controller is reset, its CORB and RIRB set up
+  on a page of their own and polled (RIRBCTL's status flag is on, since
+  QEMU's controller waits to see it cleared, but INTCTL keeps interrupts
+  off). Its DMA goes through a domain of its own, `sound`.
+- Each codec that answered (STATESTS) is walked: its audio function, each
+  widget's capabilities, then each pin that is an output (line out,
+  speakers, headphones; not digital, wired on the board by its
+  configuration default). From each, a depth-first search through
+  connection lists (mixers and selectors, six nodes at most) finds a
+  converter. On the way every node is powered, its output amplifier set
+  to 0 dB, the input taken selected (a pin or a selector) or heard alone (a
+  mixer's others muted); the pin is enabled (headphones with their
+  amplifier, EAPD on where it has one), and the converter put on stream 1
+  at 48 kHz, 16-bit, stereo. Every output found plays the same stream.
+- The first output stream descriptor plays `snd_buf`, 32 KiB (170 ms), in
+  two BDL entries, round and round; no interrupts: where the DMA is comes
+  from `SD_LPIB`.
+- **The mixer** (`sound.asm`), the thread `sound`, wakes every 5 ms and
+  keeps the buffer filled 40 ms ahead of the DMA: it sums every open
+  stream in 32 bits (each by its `SN_GAIN`), then the test tone, then
+  scales all by the volume (its square, from `sound volume`) and saturates
+  to 16 bits; 42 ms of silence follow what it wrote, should it be late.
+  If the DMA passed it, it starts again where the DMA is (`caught up` in
+  `sound`). With no controller it runs the same, its position from the
+  TSC: programs play to nothing at the same pace.
+- **Streams for programs**: a program run with `AW_SOUND` (or `+sound`)
+  gets a handle to the speakers (`OT_SOUND`, `SB_SOUND`). `SYS_SOUND_NEW`
+  makes a stream (`OT_STREAM`) and its memory: a header (`SN_*`) and a ring
+  of frames the program writes. The kernel's count of what it took
+  (`SS_READ`) is its own; the program's `SN_WRITE` is trusted only as far
+  as the ring holds, and every index is masked. `RO_WAIT` on a stream
+  waits until no more than `SN_LOW` frames are queued: `ring_arm` works out
+  `SS_READY` then, and the mixer sets it and wakes the stream's queue when
+  it gets there. Closing the last handle takes it off the mixer's list and
+  completes its waits.
+- `sound` in the shell: the device, its outputs, the volume, the streams
+  playing, time played, catch-ups; `sound volume <0..100>`, `sound tone [hz
+  [ms]]` (a sine by the magic circle, in integers, faded in and out),
+  `sound test` (frames played in 200 ms: 9600 at 48 kHz).
+- `src/user/tone.asm` and `sdk/rust/tone` (`rtone`) play a sine through a
+  stream; `tools/test/sound` judges what QEMU's codec wrote to a WAV file.
+
+## Programs' controls: `src/user/kit.inc`
+
+- What a program's window is made of, in the desktop's look: `kit_open`
+  (the window, the look mapped, the fonts found), `kit_next` (the next
+  event, or a deadline), drawing into the pixels at the user's scale
+  (`kit_pt`: points to pixels) inside a clip (fills, round rectangles,
+  frames, soft shadows, anti-aliased strokes), text in Noto Sans at the
+  nearest size (`kit_font`, `kit_text`, `kit_text_w`) and in Cascadia Mono
+  (`kit_mono`, `kit_mtext`), and the controls drawn the desktop's way:
+  buttons (`KB_*`: the default one in the accent, held, off), one-line fields with a caret,
+  choosing by keys and the mouse and the clipboard (`kit_edraw`,
+  `kit_ekey`, `kit_eclick`; `KE_INDENT` leaves room for an icon before
+  the text), and scrollers. Memory comes from `kit_alloc` (a mapped block,
+  by handle); `kit_close` lets the window go before the program ends.
+
+## Notes: `src/user/notes.asm`, `src/user/notes/`
+
+- A text editor in a window of the desktop's look, the keys a Mac's
+  editors have with ctrl for cmd. Each tab is a document (`D_*`,
+  `doc.inc`): its text in one block of memory with the path before it (so a
+  read or a write is one call on the files handle), a table of where each
+  line starts, and an undo log of inserts and deletes (`U_*`) in groups, so
+  a run of typing undoes at once, and so does replacing all.
+- **Colours** (`lex.inc`): a lexer per language (assembly, C and its kin,
+  Python, shell and settings, JSON, Markdown) classes each byte of a line
+  (`T_*`), carrying a state from line to line (block comments, triple
+  quotes, fences) that is cached for the lines above what is drawn.
+- **Drawing** (`view.inc`): the tabs, the bar, the lines (the current one
+  marked, what is chosen, what was found), the line numbers, the caret
+  (blinking, only the changed rows redrawn) and the status line, in the
+  theme's colours with a palette like Xcode's.
+- **Finding** (`find.inc`): find, replace (one, or all as one undo) and
+  go to a line, in a bar over the text, live as the field changes.
+- **Sheets** (`panel.inc`): Open and Save As browse the volumes (folders
+  first, sorted, type to select), make folders and ask before replacing;
+  closing what was not saved asks Save, Don't Save or Cancel.
+
+## Files: `src/user/files.asm`, `src/user/files/`
+
+- A file browser in the desktop's look, laid out as Finder's: the sidebar,
+  the toolbar, what the folder holds, the path bar. Each part is drawn
+  again only when it changed (`N_*`), and only it is shown.
+- **The model** (`model.inc`): a folder is listed whole (`RO_FS_LIST`) into
+  one block; what is shown at all (not hidden, not a system file, no name
+  starting with `.`) is kept by index, then what the search leaves, sorted
+  folders first by name (as people read them: "file 2" before "file 10"),
+  date, size or kind, either way. Back and forward are stacks of paths; the
+  folder left is chosen in the one gone back or up to.
+- **Icons** (`icons.inc`): a kind for each ending (`KD_*`: its name, whether
+  it is text, a badge's colour), drawn at any size from round rectangles and
+  anti-aliased strokes: folders, pages with a folded corner and lines or a
+  badge, program tiles, drives, a lock, chevrons, a lens.
+- **The view** (`view.inc`): icons in a grid with names in up to two lines,
+  or a list with headings that sort it; a menu, an alert or Quick Look over
+  the window (a file's text in Cascadia Mono, scrolled, or what it is).
+  Presses find what they hit in tables made as each part is drawn.
+- **Doing** (`ops.inc`): a folder opens in place; text (by its ending, or no
+  NUL in its first page) opens in Notes, spawned with two handles: one to
+  that folder alone (`RO_FS_SUB`) and one to the desktop (`RO_DUP`), so it
+  reaches nothing else. Files keeps each Notes' thread and, closing, lets
+  its window go and waits for them (a program's children end with it).
+  Renames and moves are `RO_FS_RENAME`; a copy is read and written whole;
+  a folder is deleted with what it holds, deepest first. Every write is
+  checked against the volume first: a read-only one is said, with the
+  `vol <n> rw` that would allow it.
+- The user suite makes a folder with Files, names it, and checks the stick
+  from the host.
+
+## Programs in Rust: `sdk/rust/`
+
+- **The target** (`x86_64-axiom.json`): x86-64, static, linked by rust-lld
+  with `axiom.ld`, which lays the program out as the kernel loads an .AXE
+  (the header at 0x400000, made by the linker from its symbols; the code,
+  the constants, the data, each from a page; the zeroes) and asserts the
+  header is whole. `tools/mkaxe.py` checks it as the loader will and writes
+  the flat file. Its `os` is `zkvm`: std has no layer for an operating
+  system it does not know, but its zkvm layer calls the platform for what
+  it needs (`sys_write`, `sys_alloc_aligned`, `sys_argv`, `sys_rand`,
+  `sys_panic`, ...), which the crate defines (`zkvm.rs`). std and core are
+  built from rust-src (`-Zbuild-std`), from its vendored crates, offline.
+- **The crate** (`axiom/`), `no_std`: system calls by `SYSCALL`, requests
+  on the task's ring (submitted at its tail, reaped at its head, under a
+  lock, one or a linked pair at a time) with a block of memory to hand
+  the kernel bytes in; `entry!` (a naked `_start` that aligns the stack and
+  calls in; an 8 MiB stack mapped and moved to; main's result as the exit
+  code; `AXE_WANTS` in a section the linker script puts in the header).
+  Windows: `SYS_CHANNEL_NEW`, `SYS_WINDOW_NEW`, the pixels mapped, the
+  look mapped for the screen's size (the stride of a window that can be
+  resized), `RO_WIN_SHOW`, `RO_WIN_TITLE`, events by `RO_RECV`, or
+  `RO_WAIT` linked to it with a deadline; keys down and up, and the
+  pointer over it, for games (`Window::KEYS`, `Window::HOVER`, USB HID
+  usages in `window::usage`). Files: the `RO_FS_*` requests,
+  paths in the io block. Time: the TSC and the start block's rate.
+- **The heap**: few mappings (a task has 128): arenas from 1 MiB doubling
+  to 64 MiB, their pages kept as runs, by address, joined when freed;
+  64 KiB spans of slots of 40 sizes for up to 32 KiB (powers of two
+  aligned to themselves, for alignment); pages beyond, grown in place into
+  the run after them.
+- `tools/test/rust` builds both programs, runs them from the shell, and
+  checks the log and the screen; a second boot, with a USB keyboard, the
+  keys down and up from it.
 
 ## The browser: `src/user/browse.asm`, `src/user/web/`
 
@@ -1172,6 +1565,56 @@ text rows.
 - `tools/test/browse/render.py` assembles the same `web/*.inc` into a DLL
   for the host, so a page can be laid out and drawn there; the QEMU suite,
   `tools/test/browse/run.py`, compares browse's window with that.
+
+## Compose: `src/user/compose.asm`, `src/user/compose/`
+
+- One ring-3 program for documents, slides and spreadsheets, in a
+  resizable kit window (1040×600 points to start with), with the desktop
+  and the store capabilities. The whole
+  of it is described in `docs/COMPOSE.md`; this is how it is put together.
+- **One model, three views.** A document is a list of blocks (text,
+  headings, list items, grids, images, slide frames; `compose/doc.inc`).
+  Pages, Slides and Grid are only layouts of that list (`layout.inc`,
+  `view.inc`): a table on a page is a grid block, a slide is a frame and
+  the blocks it holds (or a Heading 1 and what follows it), so a grid can
+  sit in a page or on a slide, and a page's text on a slide.
+- **Cells** (`calc.inc`): what was typed is kept, and the value worked out
+  from it. A change marks the cell and everything that depends on it, and
+  only those are worked out again, depth first, on a stack of their own; a
+  cycle is caught as it is found.
+- **Events in, pixels out.** `compose.asm` is only the platform: the
+  memory (one object for each part, as one is 64 MiB at most), the kit's
+  window (`kit_open`, `kit_next`) and the presenter's own window (polled
+  while `kit_next` waits with a deadline), their events, and the store. The rest is plain code
+  behind six hooks (`plat_log`, `plat_title`, `plat_save`, `plat_load`,
+  `plat_present`, `plat_mem`), so `tools/test/compose/shim.asm` links the
+  same files into a DLL and `host.py` drives it on Windows.
+- **Files**: `.axd`, a tag, a length and a payload for each record, so a
+  reader skips what it does not know; saved with `RO_ST_PUT` and committed
+  with `RO_ST_COMMIT`. The store gives the program only the names under
+  `compose/`. Undo and the clipboard keep pieces of documents in the same
+  format.
+- **Points, at the desktop's scale** (`compose/draw.inc`): everything is
+  laid out and hit-tested in points; drawing turns them into pixels at the
+  scale (`scale_set`, quarters of a pixel a point), and events come in as
+  points. The document's text is `web/draw.inc`'s DejaVu with point
+  advances, its glyphs from the nearest of twelve sizes (browse's and
+  twice them, `gen/docfont.pak`, PackBits, unpacked as it starts: a
+  program is 16 MiB at most). The window's own text is the kit's Noto.
+  The Slides view draws its slide at the largest whole scale that fits;
+  thumbnails are the slide drawn at the window's scale and box-filtered;
+  the presenter draws it at up to 2× and scales it to its window,
+  bilinear.
+- **Light and dark**: the window's colours (`pal`, `ui.inc`) come from the
+  desktop's look (`kit_c`, the accent) and the controls are the kit's
+  (`kit_button`, `kit_field`), so a WE_LOOK is a paint. The paper's (`dpal`:
+  pages, slides, the presenter, the grid's cells) is light or dark as the
+  theme is, or light whatever it is: F7, kept in the store as
+  `compose/theme`. The layout is made again at each paint, and the
+  thumbnails again when the paper or the scale changes.
+- Each open, save, view and slide is logged (`compose: saved report.axd,
+  ...`), and F12 logs the document block by block and cell by cell, which
+  `tools/test/compose/run.py` reads.
 
 ## Linux programs: `linux.asm`, `lxmm.asm`, `lxfs.asm`, `lxsig.asm`, `lxtty.asm`, `lxproc.asm`, `lxpipe.asm`
 
@@ -1347,7 +1790,7 @@ text rows.
   (a glyph, its attributes, a foreground and a background colour of 24
   bits each), the cursor, the scroll-back, its own input line and history
   (`TW_SH_*`, `shell.asm`), and whether a command is still running in it.
-  `+ shell` or `shell` opens one; its close button closes it. `screen`
+  Terminal in the dock or `shell` opens one; its close button closes it. `screen`
   writes what the window shows to the serial log, as text (for tests).
 - **xterm** (`vt.asm`): what a Linux program writes is read as xterm
   would: UTF-8 (wide characters take two cells, combining ones none, a
@@ -1375,6 +1818,102 @@ text rows.
   (`mandel_set_view`) and only while it is shown; its title carries the
   live statistics.
 
+## The shell: `shell.asm`, `records.asm`
+
+Axiom's own command language: what a command gives is records, not text;
+a command names a thing, then what to do with it; a program gets only the
+capabilities it says it needs.
+
+- **A line** is commands joined by `;` (then), `&&` (then, if that worked)
+  and `||` (then, if it failed). A command is a pipeline: a head, stages
+  after `|`, and at the end at most one `> file` (written) or `>> file`
+  (added to). The line is split at `;`, `&&` and `||` first, outside quotes;
+  each command's words are made only as it runs, so `set n 5; files $n`
+  sees the 5.
+- **Words** are split at spaces. `"…"` keeps spaces and expands variables;
+  `'…'` keeps everything as it is. A `\` before a character the shell
+  would read (a space, a quote, `\`, `$`, `|`, `>`, `;`, `&`) takes it as
+  it is; before any other it stays, so `\n` reaches a program as typed.
+  `$name` and `${name}` are a variable's value (one word, never split
+  again); a word that was only an unset variable, unquoted, is dropped.
+  `set name value…` sets one, `set name` removes it, `set` lists them; the
+  variables are the machine's, shared by its shells. Wildcards (`*`, `?`)
+  are not expanded by the shell: the actions that take paths match them,
+  without regard to case, as FAT names are.
+- **Thing, then action.** A command's first word names a thing (`files`,
+  `cpus`, `tasks`, …) or a verb (`go`, `here`, `set`, `help`); case does
+  not matter. Alone, a thing shows itself. If the next word is one of its
+  actions, that action runs on the rest; otherwise the rest goes to its
+  default action (`files old/` lists `old/`). `help` lists every command,
+  `help <thing>` its actions, each with what it takes. A command that
+  fails (unknown, a bad argument, a stage that cannot apply, a file that is
+  not there) sets the status `&&` and `||` look at.
+- **Records** (`records.asm`): what a command gives is a table (`TB_*`): up
+  to 16 columns, each with a name and a type, and up to 8192 rows of
+  8-byte cells, their text in a heap after the rows. The types (`FT_*`):
+  text; a number, with decimals and a unit (`2400 MHz`); a size in bytes
+  (shown as `1.5 KiB`); a duration (`12 ms`); a time
+  (`2026-10-17 14:05`); hex; yes or no. A cell may hold no value (`--`).
+  The table is built in place by the head and changed in place by each
+  stage; the text it ends as is made only at the end.
+- **Stages:** `where <field> <op> <value>` keeps the rows that pass (`=`
+  `!=` `<` `>` `<=` `>=`, and `~` / `!~`: contains, or matches a pattern if
+  the value has `*` or `?`; the value is read as the field's type: `4K`,
+  `2M`, `10ms`, `2s`, `2026-10-17`, `yes`); `sort <field> [down]` (stable);
+  `pick <field>…` (those columns, in that order); `first <n>`, `last <n>`;
+  `count`; `to text` and `to json`, last, for what a file gets. Fields are
+  named as their columns are, one word each (`heap-size`, `other-time`), so
+  they never need quotes; a wrong one is named, with the ones there are.
+  In `where <field> > <value>` the `>` is the comparison, not a file: it
+  is one only there, as the third word of a `where`.
+- **At the end** the table is shown: the columns as wide as what they hold,
+  numbers to the right, the header in the accent colour, `(none)` when no
+  row passed. A thing with one record to say (`mem`) shows it as
+  `field  value` lines. A table of lines (`files show`, `here`) is shown as
+  the lines. `> file` writes it as text, or as JSON after `to json` (sizes
+  in bytes, durations in milliseconds, times as `2026-10-17T14:05`, no
+  value as `null`).
+- **Commands that print** (not yet records) still print; piped or sent to a
+  file, what they print on the main thread becomes a table of lines, one
+  column called `text` (`kprint` hands the lines to `rec_capture` while
+  `rec_capturing` is set, instead of to the terminal). A command that
+  answers later (`ping`, `http`, `ask`) cannot be piped: its answer goes to
+  the terminal. What follows it on the line runs once it is done
+  (`TW_SH_REST`, run from the main loop by `shell_service`).
+- **Files** are a thing: `files [folder | pattern]` (name, kind, size,
+  changed), `files show <file>` (its lines), `files copy <from>…  <to>`,
+  `files move <from>… <to>` (a copy, then the original removed; into a
+  folder if `<to>` is one), `files new <name>` (an empty file, or a folder
+  if the name ends in `/`), `files write <file> <text>…`, `files remove
+  <path or pattern>…`, `files find [pattern]` (everything below here, with
+  its path, folders breadth-first). `go [folder]` moves (to `/` alone);
+  `here` says where. The old short commands are gone.
+- **The first things:** `cpus` (cpu, kind, apic, core, thread, clock,
+  heat, jobs, mcycles), `mem` (one record: usable, free, kernel, code,
+  constants, data, tables, fw-tables, vm-maps, vm-size, shootdowns,
+  heap-objects, heap-size, slabs, large, large-size; `mem kinds` (kind,
+  size) by firmware type, `mem at <hex>` (address, what, mapped, physical,
+  access, runs, caching, page), `mem test`), `threads` (id, name, state,
+  cpu, class, pinned, p-time, e-time, other-time, switches, moves;
+  `threads cpus` (cpu, kind, waiting, busy, switches, stolen, handed),
+  `threads test`, `threads spin`), `tasks` (id, name, parent, threads,
+  handles, ops, denied, program; `tasks stop <id or program>…`: a task by
+  its number, or every program running by that name; the kernel's own
+  tasks are not for stopping).
+- **Programs** run by name: a word that is not a command and names a file
+  `/EFI/AXIOM/<NAME>.AXE` (or a path to one) runs it, with the rest as its
+  arguments; `run <name>` does the same for a name a command hides (`run
+  net`). Several run at once: `&` at the end of a command runs it in the
+  background, the job's task number said, and `tasks` lists them. A
+  program gets only the capabilities it declares in its header (paint: the
+  desktop; browse: the desktop and the network; compose: the desktop and
+  the store; net: the network; stash:
+  the store; the rest nothing); `+net`, `+store` and `+desk` before its name
+  grant more, for that run (`+net hello`). Commands take neither grants nor
+  `&`, and a program in the background takes no `|` or `>`.
+- **Completion (S3):** Tab completes a command, an action, a field after a
+  stage, or a path, and says what could come next.
+
 ## Telemetry: `cpu.asm`
 
 - **Clock:** the APERF/MPERF ratio over each 500 ms interval, times the TSC
@@ -1399,6 +1938,13 @@ restarts before double precision runs out.
 Reboot and power-off use UEFI `ResetSystem` first, on the firmware tables. Fallbacks: the ACPI reset
 register, port CF9, the 8042 and a triple fault for reboot; ACPI S5 (SLP_TYP
 from `_S5_`) for power-off, then QEMU's port 0x604.
+
+The power button: when the firmware left the machine in ACPI mode (`SCI_EN`)
+and the FADT's button is the fixed one, `power_button_init` sets
+`PWRBTN_EN` in PM1a; the SCI stays masked, and the main loop polls
+`PWRBTN_STS` (`power_button`), then does what `power.button` says: off,
+restart or nothing. A control-method button (one the DSDT drives) is not
+seen yet.
 
 ## Conventions
 

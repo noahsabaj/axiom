@@ -70,7 +70,7 @@ def jobs(opts):
     out = {
         "nvme": (NVME, ["--smp", "4", "--extra", drive("nvme")], 90),
         "stick": (["until log: kept in", "type run hello one two\\n", "until run: HELLO exited",
-                   "type ls /EFI/AXIOM\\n", "wait 0.5",
+                   "type files /EFI/AXIOM\\n", "wait 0.5",
                    "type iommu\\n", "until unmaps", "wait 0.5",
                    "type poweroff\\n", "ended"],
                   ["--smp", "2", "--stick", stick.relative_to(ROOT).as_posix()], 90),

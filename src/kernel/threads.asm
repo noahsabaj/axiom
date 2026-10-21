@@ -43,47 +43,40 @@ TR_SIZE         equ 112
 section .text
 
 ; -----------------------------------------------------------------------------
-;  threads [test | spin <count> [perf|eff|any] [seconds]]
+;  threads, threads cpus: records (records.asm), from the words after them
+;  (EDI = how many, RSI = them); CF if it failed. threads test and threads
+;  spin print.
 ; -----------------------------------------------------------------------------
-cmd_threads:
-    mov rsi, [sh_args]
-    cmp byte [rsi], 0
-    je threads_list
-    call arg_split
-    push rdi
-    lea rdi, [str_tt_test]
-    call streq
-    pop rdi
-    test eax, eax
-    jnz threads_test
-    push rdi
-    lea rdi, [str_tt_spin]
-    call streq
-    pop rdi
-    test eax, eax
-    jnz threads_spin
-    KLOG "usage: threads [test | spin <count> [perf|eff|any] [seconds]]"
-    ret
 
-; -----------------------------------------------------------------------------
-;  threads: each CPU, then each thread
-; -----------------------------------------------------------------------------
-threads_list:
+; threads spin <count> [perf|eff|any] [seconds], from the shell's words
+threads_spin_words:
+    mov rdi, [sh_args]
+    jmp threads_spin
+
+; threads cpus: what each CPU has done
+threads_cpus:
     push rbx
     push r12
     push r13
-    push r14
     push r15
-    KLOG "  CPU  kind  waiting  busy  switches  stolen  handed"
+    test edi, edi
+    jnz .usage
+    COLUMN 'cpu', FT_INT
+    COLUMN 'kind', FT_TEXT
+    COLUMN 'waiting', FT_INT
+    COLUMN 'busy', FT_INT, 0, '%'
+    COLUMN 'switches', FT_INT
+    COLUMN 'stolen', FT_INT
+    COLUMN 'handed', FT_INT
     RDTSC64
     mov r15, rax
     xor r12d, r12d
 .cpu:
     cmp r12d, [cpu_count]
-    jae .threads
+    jae .done
     PERCPU rbx, r12
     cmp byte [rbx + PC_SCHED_ON], 0
-    je .cpu_next
+    je .next
     mov rax, r15                        ; the time not yet counted, counted
     sub rax, [rbx + PC_LAST_TSC]
     mov rcx, [rbx + PC_BUSY_CYC]
@@ -106,21 +99,72 @@ threads_list:
     add rsp, 8
 .percent:
     mov r13, rax
+    call rec_row
+    xor edi, edi
+    mov esi, r12d
+    call rec_set
     mov rdi, [rbx + PC_SKIND]
-    call tt_kind_name
-    mov ecx, [rbx + PC_RQ_LEN]
-    KLOG "  %3u  %-4s  %7u  %3u%%  %8u  %6u  %6u", r12, rax, rcx, r13, qword [rbx + PC_SWITCHES], qword [rbx + PC_STEALS], qword [rbx + PC_PUSHES]
-.cpu_next:
+    call sh_kind_name
+    mov edi, 1
+    mov rsi, rax
+    call rec_set
+    mov edi, 2
+    mov esi, [rbx + PC_RQ_LEN]
+    call rec_set
+    mov edi, 3
+    mov rsi, r13
+    call rec_set
+    mov edi, 4
+    mov rsi, [rbx + PC_SWITCHES]
+    call rec_set
+    mov edi, 5
+    mov rsi, [rbx + PC_STEALS]
+    call rec_set
+    mov edi, 6
+    mov rsi, [rbx + PC_PUSHES]
+    call rec_set
+.next:
     inc r12d
     jmp .cpu
+.done:
+    clc
+    jmp .out
+.usage:
+    KLOG "usage: threads cpus"
+    stc
+.out:
+    pop r15
+    pop r13
+    pop r12
+    pop rbx
+    ret
 
-.threads:                               ; a copy, taken under the lock
-    mov rdi, [thread_count]
+; threads: every thread there is
+threads_list:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    test edi, edi
+    jnz .usage
+    COLUMN 'id', FT_INT
+    COLUMN 'name', FT_TEXT
+    COLUMN 'state', FT_TEXT
+    COLUMN 'cpu', FT_INT
+    COLUMN 'class', FT_TEXT
+    COLUMN 'pinned', FT_BOOL
+    COLUMN 'p-time', FT_DUR
+    COLUMN 'e-time', FT_DUR
+    COLUMN 'other-time', FT_DUR
+    COLUMN 'switches', FT_INT
+    COLUMN 'moves', FT_INT
+    mov rdi, [thread_count]             ; a copy, taken under the lock
     add rdi, 16
     imul rdi, rdi, TR_SIZE
     call kmalloc
     test rax, rax
-    jz .out
+    jz .no_memory
     mov r14, rax
     mov r13, [thread_count]
     add r13, 16                         ; room
@@ -168,40 +212,74 @@ threads_list:
     lea rdi, [threads_lock]
     call spin_unlock
     popfq
-    KLOG "  %u threads; %u ended since boot", r12, qword [threads_ended]
-    KLOG "    id  name          state     on  class  pinned   P-cores   E-cores     other  switches  moves"
     xor r13d, r13d
 .line:
     cmp r13, r12
     jae .free
     imul rbx, r13, TR_SIZE
     add rbx, r14
+    call rec_row
+    xor edi, edi
+    mov rsi, [rbx + TR_ID]
+    call rec_set
+    mov edi, 1
+    lea rsi, [rbx + TR_NAME]
+    call rec_str
     mov rax, [rbx + TR_STATE]
     lea rcx, [tt_state_names]
-    mov r8, [rcx + rax * 8]
+    mov rsi, [rcx + rax * 8]
+    mov edi, 2
+    call rec_set
+    mov edi, 3
+    mov rsi, [rbx + TR_CPU]
+    call rec_set
     mov rax, [rbx + TR_CLASS]
     lea rcx, [tt_class_names]
-    mov r9, [rcx + rax * 8]
-    lea r10, [str_tt_no]
+    mov rsi, [rcx + rax * 8]
+    mov edi, 4
+    call rec_set
+    xor esi, esi
     cmp qword [rbx + TR_PIN], -1
-    je .pin_said
-    lea r10, [str_tt_yes]
-.pin_said:
+    je .pin
+    mov esi, 1
+.pin:
+    mov edi, 5
+    call rec_set
     mov rax, [rbx + TR_P]
-    call tt_ms
-    mov rcx, rax
+    call tt_us
+    mov rsi, rax
+    mov edi, 6
+    call rec_set
     mov rax, [rbx + TR_E]
-    call tt_ms
-    mov rdx, rax
+    call tt_us
+    mov rsi, rax
+    mov edi, 7
+    call rec_set
     mov rax, [rbx + TR_O]
-    call tt_ms
-    lea rsi, [rbx + TR_NAME]
-    KLOG "  %4u  %-12s  %-8s %3u  %-5s  %-6s %6u ms %6u ms %6u ms  %8u  %5u", qword [rbx + TR_ID], rsi, r8, qword [rbx + TR_CPU], r9, r10, rcx, rdx, rax, qword [rbx + TR_SWITCHES], qword [rbx + TR_MOVES]
+    call tt_us
+    mov rsi, rax
+    mov edi, 8
+    call rec_set
+    mov edi, 9
+    mov rsi, [rbx + TR_SWITCHES]
+    call rec_set
+    mov edi, 10
+    mov rsi, [rbx + TR_MOVES]
+    call rec_set
     inc r13
     jmp .line
 .free:
     mov rdi, r14
     call kfree
+    clc
+    jmp .out
+.no_memory:
+    KLOG "threads: no memory to list them"
+    stc
+    jmp .out
+.usage:
+    KLOG "usage: threads [cpus | test | spin <n> [perf|eff|any] [seconds]]"
+    stc
 .out:
     pop r15
     pop r14

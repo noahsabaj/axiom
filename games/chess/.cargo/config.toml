@@ -1,0 +1,7 @@
+# Link with LLVM's linker, which ships with Rust, instead of MSVC's link.exe: it links a game
+# about a third faster, and linking is most of the time an incremental rebuild takes.
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld.exe"
+
+[target.aarch64-pc-windows-msvc]
+linker = "rust-lld.exe"

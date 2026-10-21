@@ -70,14 +70,22 @@ def result(ok, text):
 
 
 def typed(text):
-    """text as a 'type' step has it: a ';' would end the step."""
-    return text.replace(";", "\\x3b")
+    """text as a 'type' step has it: a ';' would end the step, and run.py
+    reads a backslash as the start of an escape."""
+    return text.replace("\\", "\\\\").replace(";", "\\x3b")
+
+
+def marked(text):
+    """text for the shell's echo to say as it is: a backslash before each
+    character the shell would read (a space, a quote, a backslash, $, |, >,
+    ;, &)."""
+    return "".join("\\" + c if c in " '\"\\$|>;&" else c for c in text)
 
 
 def run(cmd, name, until=None):
     """'linux cmd', marked in the log first (the shell does not echo what
     is typed), then its end said."""
-    return [f"type echo -- {typed(cmd)}\\n", "wait 0.2",
+    return [f"type echo -- {typed(marked(cmd))}\\n", "wait 0.2",
             f"type linux {typed(cmd)}\\n", f"until linux: {until or name}", "wait 0.3"]
 
 
@@ -320,7 +328,7 @@ def main():
     subprocess.run([sys.executable, str(ROOT / "tools" / "mkstick.py"), str(stick),
                     "--linux", str(LINUX)], cwd=ROOT, check=True, capture_output=True)
     logs = boot_all(OUT, {"linux": (script(), ["--smp", "4", "--stick",
-                                                stick.relative_to(ROOT).as_posix()], 420)})
+                                                stick.relative_to(ROOT).as_posix()], 420, 1)})
     print("-- linux")
     check(*logs["linux"])
     print(f"{'all passed' if FAILS == 0 else f'{FAILS} failed'}")

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Host tests for src/kernel/tls.asm, the TLS 1.3 client, against OpenSSL.
+"""Host tests for src/kernel/tls.asm, the TLS 1.3 client and server, against
+OpenSSL.
 
     python tools/test/tlsclient/run.py [--seed N] [--cc PATH] [--live]
 
@@ -16,11 +17,18 @@ exchange, and a connection that will not take the bytes. Certificates are
 checked throughout, the test CA trusted as an extra root; then a chain to
 no trusted root, the wrong name, a stopped clock, and, from a hand-made
 server with a real certificate, a good CertificateVerify, a forged one and
-one in a scheme that does not suit the key. --live also fetches pages from
+one in a scheme that does not suit the key. Then the server (tls_accept),
+with Python's ssl module as the client: handshakes with a chain and with a
+self-signed certificate pinned by its hash (as fleet does), data both ways,
+four at once, close_notify both ways; and hand-made ClientHellos that offer
+what will not do (TLS 1.2, another cipher, another signature, another
+group, a weak key share, a broken message), a tampered record, and a
+connection that will not take the bytes. --live also fetches pages from
 real servers over sockets, checked against the built-in roots. Outputs go
 to build/test/tlsclient/. Exit status 0 only if every test passed.
 """
 import argparse
+import base64
 import ctypes
 import hashlib
 import importlib.util
@@ -30,6 +38,7 @@ import random
 import shutil
 import socket
 import ssl
+import struct
 import subprocess
 import sys
 import time
@@ -48,7 +57,8 @@ import mkroots  # noqa: E402
 EV_READY, EV_CLOSED, EV_FAIL = 1, 2, 4
 TLE = {1: "RNG", 2: "PROTO", 3: "VERSION", 4: "CIPHER", 5: "HRR", 6: "MAC", 7: "FINISHED",
        8: "ALERT", 9: "TOOBIG", 10: "CLIENTCERT", 11: "SEND", 12: "KEYSHARE", 13: "OVERFLOW",
-       14: "CERT", 15: "VERIFY", 16: "SIGALG"}
+       14: "CERT", 15: "VERIFY", 16: "SIGALG", 17: "C_VERSION", 18: "C_CIPHER", 19: "C_SIGALG",
+       20: "C_SHARE"}
 
 passes = fails = 0
 
@@ -84,7 +94,7 @@ def find_openssl():
 def make_certs(d):
     ossl = find_openssl()
     d.mkdir(parents=True, exist_ok=True)
-    if (d / "done2").exists():
+    if (d / "done2").exists() and (d / "node.pem").exists():
         return
     o = lambda *a: run([ossl, *a], "openssl " + a[0])
     o("ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", d / "ca.key")
@@ -108,6 +118,10 @@ def make_certs(d):
           "-days", "3650", "-out", d / f"filler{i}.pem")
         extra += (d / f"filler{i}.pem").read_text()
     (d / "big-chain.pem").write_text((d / "rsa.pem").read_text() + extra)
+    # a node's own: P-256, self-signed, as fleet makes them
+    o("ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", d / "node.key")
+    o("req", "-x509", "-new", "-key", d / "node.key", "-subj", "/CN=fleet node test", "-days", "3650",
+      "-out", d / "node.pem")
     (d / "done2").write_text("ok\n")
 
 
@@ -255,6 +269,297 @@ def server_ctx(cert, key, tls12=False):
         ctx.minimum_version = ssl.TLSVersion.TLSv1_3
     ctx.load_cert_chain(cert, key)
     return ctx
+
+
+# ---- the server, through the DLL --------------------------------------------------
+
+
+def pem_blocks(text, kind):
+    out, cur = [], None
+    for line in text.splitlines():
+        if line.startswith(f"-----BEGIN {kind}"):
+            cur = []
+        elif line.startswith(f"-----END {kind}"):
+            out.append(base64.b64decode("".join(cur)))
+            cur = None
+        elif cur is not None:
+            cur.append(line.strip())
+    return out
+
+
+def identity(chain_pem, key_pem):
+    """TID_*: the P-256 key (from SEC 1's ECPrivateKey), then the chain as
+    TLS's Certificate lists it."""
+    der = pem_blocks(key_pem.read_text(), "EC PRIVATE KEY")[0]
+    assert der[2:7] == b"\x02\x01\x01\x04\x20", der[:8].hex()
+    key = der[7:39]
+    certs = pem_blocks(chain_pem.read_text(), "CERTIFICATE")
+    chain = b"".join(len(c).to_bytes(3, "big") + c + b"\0\0" for c in certs)
+    return ctypes.create_string_buffer(key + struct.pack("<II", len(chain), 0) + chain), certs
+
+
+class Peer:
+    """Python's ssl as the client of a server session in the DLL."""
+
+    def __init__(self, ctx, host="axiom.test"):
+        self.inc, self.outg = ssl.MemoryBIO(), ssl.MemoryBIO()
+        self.obj = ctx.wrap_bio(self.inc, self.outg, server_hostname=host)
+        self.done = False
+        self.error = None
+
+    def step(self):
+        if not self.done and not self.error:
+            try:
+                self.obj.do_handshake()
+                self.done = True
+            except ssl.SSLWantReadError:
+                pass
+            except (ssl.SSLError, OSError) as e:
+                self.error = e
+
+    read_all = Server.read_all
+
+
+def spump(sv, pe, rng, chunks, c2s=None, s2c=None, rounds=20):
+    """Bytes between the DLL's server (sv) and the Python client (pe)."""
+    for _ in range(rounds):
+        moved = False
+        pe.step()
+        b = pe.outg.read()
+        if b:
+            if c2s:
+                b = c2s(b)
+            feed(sv, b, rng, chunks)
+            moved = True
+        b = sv.out()
+        if b:
+            if s2c:
+                b = s2c(b)
+            pe.inc.write(b)
+            moved = True
+        if not moved:
+            break
+    pe.step()
+
+
+def client_ctx(ca=None, pinned=False, tls12=False):
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    if pinned:                          # fleet's way: nothing checked but the hash
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    else:
+        ctx.load_verify_locations(ca)
+    if tls12:
+        ctx.maximum_version = ssl.TLSVersion.TLSv1_2
+    return ctx
+
+
+def served(sv, rng, ident, ctx, chunks, label, pin=None, nbig=200000, host="axiom.test"):
+    pe = Peer(ctx, host)
+    if sv.d.h_accept(ident, int(time.time())):
+        result(False, f"{label}: tls_accept failed")
+        return
+    spump(sv, pe, rng, chunks)
+    ev = sv.d.h_events()
+    if not (ev & EV_READY) or not pe.done:
+        why = sv.fail_text() if ev & EV_FAIL else f"events {ev}"
+        result(False, f"{label}: no handshake ({why}; client: {pe.error})")
+        return
+    problems = []
+    if pe.obj.version() != "TLSv1.3" or pe.obj.cipher()[0] != "TLS_AES_128_GCM_SHA256":
+        problems.append(f"negotiated {pe.obj.version()} {pe.obj.cipher()}")
+    if pin is not None and hashlib.sha256(pe.obj.getpeercert(binary_form=True)).hexdigest() != pin:
+        problems.append("the certificate's hash is not the pinned one")
+    up = rng.randbytes(nbig)
+    for i in range(0, len(up), 30000):
+        pe.obj.write(up[i:i + 30000])
+        spump(sv, pe, rng, chunks)
+    got = sv.app()
+    if got != up:
+        problems.append(f"server read {len(got)} bytes, want {len(up)}")
+    down = rng.randbytes(nbig)
+    for i in range(0, len(down), 30000):
+        if sv.d.h_write(down[i:i + 30000], len(down[i:i + 30000])):
+            problems.append("tls_write refused")
+            break
+        spump(sv, pe, rng, chunks)
+    got = pe.read_all()
+    if got != down:
+        problems.append(f"client read {len(got)} bytes, want {len(down)}")
+    try:
+        pe.obj.unwrap()                 # the client's close_notify
+    except ssl.SSLWantReadError:
+        pass
+    spump(sv, pe, rng, chunks)
+    if not (sv.d.h_events() & EV_CLOSED):
+        problems.append("no CLOSED after the client's close_notify")
+    sv.d.h_close()
+    pe.inc.write(sv.out())
+    try:
+        pe.obj.unwrap()
+    except ssl.SSLError as e:
+        problems.append(f"the client did not take our close_notify: {e}")
+    if sv.d.h_state() != 0:
+        problems.append(f"state {sv.d.h_state()} after tls_close")
+    result(not problems, f"{label}: TLS 1.3, AES-128-GCM, {len(up)} bytes each way, pieces '{chunks}'"
+           + ("" if not problems else ": " + "; ".join(problems)))
+
+
+def hello(suites=(0x1301,), versions=(0x0304,), groups=((0x001d, None),), sigalgs=(0x0403,),
+          sid=32, comp=b"\x01\x00", extra=b"", cut=0):
+    """A hand-made ClientHello record, with what it offers chosen."""
+    ext = b""
+    if versions is not None:
+        v = b"".join(x.to_bytes(2, "big") for x in versions)
+        ext += b"\x00\x2b" + (len(v) + 1).to_bytes(2, "big") + bytes([len(v)]) + v
+    if groups is not None:
+        sh = b""
+        for g, key in groups:
+            key = os.urandom(32) if key is None else key
+            sh += g.to_bytes(2, "big") + len(key).to_bytes(2, "big") + key
+        ext += b"\x00\x33" + (len(sh) + 2).to_bytes(2, "big") + len(sh).to_bytes(2, "big") + sh
+        gl = b"".join(g.to_bytes(2, "big") for g, _ in groups)
+        ext += b"\x00\x0a" + (len(gl) + 2).to_bytes(2, "big") + len(gl).to_bytes(2, "big") + gl
+    if sigalgs is not None:
+        s = b"".join(x.to_bytes(2, "big") for x in sigalgs)
+        ext += b"\x00\x0d" + (len(s) + 2).to_bytes(2, "big") + len(s).to_bytes(2, "big") + s
+    ext += extra
+    cs = b"".join(x.to_bytes(2, "big") for x in suites)
+    body = (b"\x03\x03" + os.urandom(32) + bytes([sid]) + os.urandom(sid) +
+            len(cs).to_bytes(2, "big") + cs + comp + len(ext).to_bytes(2, "big") + ext)
+    msg = b"\x01" + len(body).to_bytes(3, "big") + body
+    if cut:
+        msg = msg[:-cut]
+    return b"\x16\x03\x01" + len(msg).to_bytes(2, "big") + msg
+
+
+def records(b):
+    out, i = [], 0
+    while i + 5 <= len(b):
+        n = int.from_bytes(b[i + 3:i + 5], "big")
+        out.append((b[i], b[i + 5:i + 5 + n]))
+        i += 5 + n
+    return out
+
+
+def server_tests(dll, rng, certs):
+    sv = Client(dll, 0)
+    dll.h_accept.argtypes = [ctypes.c_char_p, ctypes.c_uint64]
+    ident, chain = identity(certs / "ec-chain.pem", certs / "ec.key")
+    served(sv, rng, ident, client_ctx(certs / "ca.pem"), "whole", "a chain to the test CA, checked")
+    served(sv, rng, ident, client_ctx(certs / "ca.pem"), "bytes", "a byte at a time", nbig=20000)
+    served(sv, rng, ident, client_ctx(certs / "ca.pem"), "random", "pieces of every size")
+    nid, ncerts = identity(certs / "node.pem", certs / "node.key")
+    pin = hashlib.sha256(ncerts[0]).hexdigest()
+    served(sv, rng, nid, client_ctx(pinned=True), "random", "a self-signed certificate, pinned",
+           pin=pin)
+
+    bad = 0                             # many, short
+    for i in range(30):
+        pe = Peer(client_ctx(pinned=True))
+        sv.d.h_accept(nid, int(time.time()))
+        spump(sv, pe, rng, "random")
+        msg = rng.randbytes(rng.randrange(1, 30000))
+        pe.obj.write(msg)
+        spump(sv, pe, rng, "random")
+        if not (sv.d.h_events() & EV_READY) or sv.app() != msg:
+            bad += 1
+            print(f"      run {i}: events {sv.d.h_events()}, {sv.fail_text()}, client {pe.error}")
+        sv.d.h_abort()
+    result(bad == 0, f"30 more handshakes, each followed by up to 30 KB: {bad} failed")
+
+    n = dll.h_sessions()                # several at once, their bytes crossing
+    ss = [Client(dll, i) for i in range(n)]
+    pes = [Peer(client_ctx(pinned=True)) for _ in range(n)]
+    for s in ss:
+        s.d.h_accept(nid, int(time.time()))
+    for _ in range(400):
+        i = rng.randrange(n)
+        pes[i].step()
+        b = pes[i].outg.read()
+        if b:
+            feed(ss[i], b, rng, "random")
+        b = ss[i].out()
+        if b:
+            pes[i].inc.write(b)
+    for s, pe in zip(ss, pes):
+        spump(s, pe, rng, "random")
+    msgs = [rng.randbytes(5000 + i) for i in range(n)]
+    for s, pe, m in zip(ss, pes, msgs):
+        pe.obj.write(m)
+        s.d.h_write(m[::-1], len(m))
+    for s, pe in zip(ss, pes):
+        spump(s, pe, rng, "random")
+    ok = all(s.d.h_events() & EV_READY and s.app() == m and pe.read_all() == m[::-1]
+             for s, pe, m in zip(ss, pes, msgs))
+    for s in ss:
+        s.d.h_abort()
+    result(ok, f"{n} server sessions at once, their bytes interleaved, data each way")
+
+    def refused(label, ch, want, alert=None):
+        sv.d.h_accept(nid, int(time.time()))
+        feed(sv, ch, rng, "random")
+        ev, code = sv.d.h_events(), sv.d.h_fail_code()
+        out = records(sv.out())
+        said = [r for r in out if r[0] == 21]
+        ok = bool(ev & EV_FAIL) and TLE.get(code) == want and sv.d.h_state() == 0
+        if alert is not None:
+            ok = ok and said == [(21, bytes([2, alert]))]
+        text = sv.d.h_error_text(code).decode()
+        result(ok, f"{label}: {TLE.get(code, code)}, '{text}'" +
+               (f", alert {said[0][1][1]}" if said else ", no alert"))
+
+    refused("a ClientHello for TLS 1.2 only", hello(versions=(0x0303,)), "C_VERSION", 70)
+    refused("no supported_versions at all", hello(versions=None), "C_VERSION", 70)
+    refused("AES-256-GCM and ChaCha20 only", hello(suites=(0x1302, 0x1303)), "C_CIPHER", 40)
+    refused("RSA-PSS signatures only", hello(sigalgs=(0x0804, 0x0805)), "C_SIGALG", 40)
+    refused("a P-256 key share, not X25519", hello(groups=((0x0017, os.urandom(65)),)), "C_SHARE", 40)
+    refused("an X25519 share of zeroes (a weak point)", hello(groups=((0x001d, bytes(32)),)),
+            "KEYSHARE", 47)
+    refused("an X25519 share 31 bytes long", hello(groups=((0x001d, os.urandom(31)),)), "PROTO", 10)
+    refused("compression offered", hello(comp=b"\x02\x01\x00"), "PROTO", 10)
+    refused("a cut-off extension list", hello(extra=b"\x00\x00\x00\x09ab"), "PROTO", 10)
+    refused("not a ClientHello", b"\x16\x03\x01\x00\x06\x02\x00\x00\x02\x03\x03", "PROTO", 10)
+
+    sv.d.h_accept(nid, int(time.time()))   # no session id: no change_cipher_spec
+    feed(sv, hello(sid=0, extra=b"\x00\x00\x00\x00", groups=((0x11ec, os.urandom(1216)), (0x001d, None))),
+         rng, "random")
+    out = records(sv.out())
+    kinds = [r[0] for r in out]
+    result(kinds[:1] == [22] and 20 not in kinds and 23 in kinds and not sv.d.h_events() & EV_FAIL,
+           f"a ClientHello with no session id, a post-quantum share first: answered {kinds}, "
+           "no change_cipher_spec")
+    sv.d.h_abort()
+
+    sv.d.h_accept(nid, int(time.time()))   # a tampered record from the client
+    pe = Peer(client_ctx(pinned=True))
+    spump(sv, pe, rng, "random")
+    pe.obj.write(b"some data")
+    pe.step()
+    b = bytearray(pe.outg.read())
+    b[-3] ^= 1
+    feed(sv, bytes(b), rng, "random")
+    result(sv.d.h_events() & EV_FAIL and TLE.get(sv.d.h_fail_code()) == "MAC",
+           f"a tampered record from the client: {sv.fail_text()}")
+
+    sv.d.h_accept(nid, int(time.time()))   # a client that refuses our certificate
+    pe = Peer(client_ctx(certs / "ca.pem"))
+    spump(sv, pe, rng, "random")
+    result(pe.error is not None and sv.d.h_events() & EV_FAIL and TLE.get(sv.d.h_fail_code()) == "ALERT",
+           f"a client that does not trust the certificate: alert {sv.d.h_alert()}, "
+           f"'{sv.d.h_error_text(sv.d.h_fail_code()).decode()}'")
+
+    sv.d.h_accept(nid, int(time.time()))   # a connection that will not take the flight
+    sv.d.h_refuse_send(1)
+    feed(sv, hello(), rng, "whole")
+    result(sv.d.h_events() & EV_FAIL and TLE.get(sv.d.h_fail_code()) == "SEND" and sv.d.h_state() == 0,
+           f"a connection that will not take the flight: {sv.fail_text()}")
+    sv.d.h_refuse_send(0)
+
+    big = ctypes.create_string_buffer(32 + 8 + 16001)
+    struct.pack_into("<I", big, 32, 16001)
+    rc = sv.d.h_accept(big, int(time.time()))
+    result(rc < 0 and TLE.get(-rc) == "TOOBIG", f"an identity over TLS_CHAIN_MAX refused: {rc}")
 
 
 # ---- the cases -----------------------------------------------------------------
@@ -795,6 +1100,8 @@ def main():
     sys.path.insert(0, str(HERE))
     mini_tests(cl, rng)
     cv_tests(cl, rng, certs)
+    print("-- the server")
+    server_tests(cl.d._dll, rng, certs)
     if opts.live:
         print("-- real servers")
         live_tests(cl)

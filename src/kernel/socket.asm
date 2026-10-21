@@ -26,7 +26,17 @@
 ;      the other side is gone; E_NET if it failed
 ;    RO_NET_SHUT: once what was sent has gone, a FIN (plain TCP only)
 ;    RO_NET_LISTEN, then RO_NET_ACCEPT: a socket for each connection taken,
-;      SK_ACCEPT_MAX waiting at most; RO_WAIT (a0 = 0) for the next
+;      SK_ACCEPT_MAX waiting at most; RO_WAIT (a0 = 0) for the next. Port
+;      0 is one the main loop picks; RO_WAIT (a0 = 1) until it listens.
+;      With NETF_TLS, each connection is TLS 1.3's server side, proving the
+;      identity given (NI_*: a P-256 key and its certificates; the main loop
+;      checks that they go together, else NETW_IDENTITY); the program sends
+;      and receives plaintext once the handshake is done, as a client does
+;    RO_NET_CONNECT with NETF_LOOKUP: the host looked up, and no more; the
+;      socket ends once its address is known (RO_WAIT, a0 = 0)
+;    RO_NET_ADDR: a socket's addresses and ports, the other side's and ours
+;    RO_NET_STATUS: its state, why it failed, and what RO_WAIT would wait
+;      for that is there now (NS_RECV, NS_SEND)
 ;  When a socket's last handle goes, what it had sent still goes out; then
 ;  it is closed, or reset if that takes more than SK_LINGER_S seconds.
 ;
@@ -56,6 +66,12 @@ SKF_GONE        equ 64                  ; no handle to it is left
 SKF_NOSEND      equ 128                 ; nothing more can be sent
 SKF_LISTENER    equ 256
 SKF_CLOSING     equ 512                 ; gone, closed: TCP finishing
+SKF_LOOKUP      equ 1024                ; its host looked up, not connected to
+SKF_SERVER      equ 2048                ; TLS, the server's side: a TLS listener took it
+
+%if NI_KEY != TID_KEY || NI_LEN != TID_LEN || NI_CERTS != TID_CHAIN || NI_MAX != TLS_CHAIN_MAX
+%error "RO_NET_LISTEN's identity (NI_*) is not tls.asm's (TID_*)"
+%endif
 
 %macro SK_LOCK 0
     pushfq
@@ -109,7 +125,8 @@ sk_program:
     ret
 
 ; h_net_connect(EDI = the network, ESI = memory, RDX = where the host is in
-; it, RCX = port, R8 = NETF_*) -> RAX = a handle to a socket
+; it, RCX = port, R8 = NETF_*) -> RAX = a handle to a socket. A lookup
+; (NETF_LOOKUP, alone) needs RT_NET_CONNECT and the host, not the port.
 h_net_connect:
     push rbx
     push r12
@@ -122,9 +139,13 @@ h_net_connect:
     mov r14, rcx
     mov r15, r8
     mov rax, E_ARG
-    test r15, ~(NETF_TLS | NETF_INSECURE)
+    test r15, ~(NETF_TLS | NETF_INSECURE | NETF_LOOKUP)
     jnz .out
     mov edx, RT_NET_CONNECT
+    cmp r15, NETF_LOOKUP
+    je .get
+    test r15d, NETF_LOOKUP
+    jnz .out                            ; a lookup, with nothing else
     test r15d, NETF_TLS
     jz .get
     mov edx, RT_NET_TLS
@@ -142,8 +163,11 @@ h_net_connect:
     cmp rax, E_ANY
     jae .out
     mov rbx, rax                        ; RBX = the network, a reference
+    test r15d, NETF_LOOKUP
+    jnz .host
     call nt_port
     jc .put
+.host:
     mov edi, r12d
     mov rsi, r13
     mov rdx, rsp
@@ -161,6 +185,11 @@ h_net_connect:
     mov rax, E_RIGHTS
     jc .put
     xor edi, edi
+    test r15d, NETF_LOOKUP
+    jz .tls
+    mov edi, SKF_LOOKUP
+    jmp .made
+.tls:
     test r15d, NETF_TLS
     jz .made
     mov edi, SKF_TLS
@@ -239,28 +268,68 @@ sk_field:
     stc
     ret
 
-; h_net_listen(EDI = the network, RSI = a port) -> RAX = a handle to a socket
-; listening there (whether the port was free, it says once it has tried)
+; h_net_listen(EDI = the network, RSI = a port, or 0 for one of ours the
+; main loop picks, if this capability reaches any; R8 = NETF_TLS, or 0; for
+; TLS, EDX = memory, RCX = where in it the identity is, NI_*) -> RAX = a
+; handle to a socket listening there (whether the port was free, it says
+; once it has tried: RO_WAIT with a0 = 1 until then)
 h_net_listen:
     push rbx
+    push r12
+    push r13
     push r14
+    push r15
     mov r14, rsi
+    mov r12d, edx
+    mov r13, rcx
+    mov r15, r8
+    mov rax, E_ARG
+    test r15, ~NETF_TLS
+    jnz .out
     mov esi, OT_NET
     mov edx, RT_NET_LISTEN
     call handle_get
     cmp rax, E_ANY
     jae .out
     mov rbx, rax
+    test r14, r14
+    jnz .port
+    mov rax, E_RIGHTS
+    cmp dword [rbx + NT_PORT], 0
+    jne .put                            ; it reaches one port: that one
+    jmp .make
+.port:
     call nt_port
     jc .put
+.make:
     mov edi, SKF_LISTENER
-    call sk_new_socket
+    test r15d, NETF_TLS
+    jz .plain
+    mov edi, r12d                       ; the identity, a copy of our own
+    mov rsi, r13
+    call sk_read_identity
     cmp rax, E_ANY
     jae .put
+    mov r15, rax                        ; R15 = it
+    mov edi, SKF_LISTENER | SKF_TLS
+    jmp .new
+.plain:
+    xor r15d, r15d
+.new:
+    call sk_new_socket
+    cmp rax, E_ANY
+    jae .unread
     mov rdi, rax
+    mov [rdi + SK_IDENT], r15           ; (freed with it from here on)
     mov [rdi + SK_PORT], r14d
     mov dword [rdi + SK_STATE], SKS_LISTEN
     call sk_hand_out
+    jmp .put
+.unread:
+    push rax
+    mov rdi, r15
+    call sk_drop_identity
+    pop rax
 .put:
     push rax
     mov rdi, rbx
@@ -268,8 +337,88 @@ h_net_listen:
     pop rax
 .out:
     call op_done
+    pop r15
     pop r14
+    pop r13
+    pop r12
     pop rbx
+    ret
+
+; sk_read_identity(EDI = memory, RSI = where in it) -> RAX = a copy of the
+; identity there (TID_*, from the heap), or E_*. What it read of the key on
+; the stack is wiped.
+sk_read_identity:
+    push rbx
+    push r12
+    push r13
+    push r14
+    sub rsp, TID_CHAIN
+    mov r12d, edi
+    mov r13, rsi
+    xor ebx, ebx                        ; RBX = the copy, once there is one
+    mov rdx, rsp
+    mov ecx, TID_CHAIN
+    call h_mem_read
+    cmp rax, E_ANY
+    jae .wipe
+    mov r14d, [rsp + TID_LEN]
+    mov rax, E_ARG
+    test r14d, r14d
+    jz .wipe
+    cmp r14d, TLS_CHAIN_MAX
+    ja .wipe
+    lea edi, [r14 + TID_CHAIN]
+    call kmalloc
+    test rax, rax
+    jz .nomem
+    mov rbx, rax
+    mov edi, r12d
+    mov rsi, r13
+    mov rdx, rbx
+    lea ecx, [r14 + TID_CHAIN]
+    call h_mem_read
+    cmp rax, E_ANY
+    jae .free
+    mov rax, E_ARG
+    cmp [rbx + TID_LEN], r14d           ; as it was the first time
+    jne .free
+    mov rax, rbx
+    jmp .wipe
+.nomem:
+    mov rax, E_NOMEM
+    jmp .wipe
+.free:
+    push rax
+    mov rdi, rbx
+    call sk_drop_identity
+    pop rax
+.wipe:
+    push rax
+    lea rdi, [rsp + 8]
+    xor eax, eax
+    mov ecx, TID_CHAIN
+    rep stosb
+    pop rax
+    add rsp, TID_CHAIN
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+; sk_drop_identity(RDI = an identity, or 0): its key wiped, then freed
+sk_drop_identity:
+    test rdi, rdi
+    jz .none
+    push rcx
+    push rdi
+    xor eax, eax
+    mov ecx, 32
+    rep stosb
+    pop rdi
+    pop rcx
+    jmp kfree
+.none:
     ret
 
 ; h_net_accept(EDI = a socket listening) -> RAX = a handle to the oldest
@@ -325,7 +474,7 @@ h_net_accept:
     ret
 
 ; h_net_status(EDI = a socket) -> RAX = SKS_* | why << 8 (NETW_*, once
-; failed) | TLS's error << 16 (for NETW_TLS)
+; failed) | TLS's error << 16 (for NETW_TLS) | NS_RECV, NS_SEND as they are
 h_net_status:
     xor esi, esi
     xor edx, edx
@@ -342,10 +491,69 @@ h_net_status:
     mov al, [rdi + SK_WHY]
     shl eax, 8
     mov al, [rdi + SK_STATE]
+    cmp dword [rdi + SK_RREADY], 0
+    je .recv
+    or eax, NS_RECV
+.recv:
+    cmp dword [rdi + SK_WREADY], 0
+    je .put
+    or eax, NS_SEND
 .put:
     call obj_put
 .out:
     jmp op_done
+
+; h_net_addr(EDI = a socket, ESI = memory, RDX = where in it) -> RAX = 0,
+; its addresses there (NA_*); E_EMPTY while its host is being looked up
+h_net_addr:
+    push rbx
+    push r12
+    push r13
+    sub rsp, NA_SIZE
+    mov r12d, esi
+    mov r13, rdx
+    mov esi, OT_SOCKET
+    xor edx, edx
+    call handle_get
+    cmp rax, E_ANY
+    jae .out
+    mov rbx, rax
+    mov rax, E_EMPTY
+    cmp dword [rbx + SK_STATE], SKS_LOOKUP
+    je .put                             ; (what follows is written before it changes)
+    lea rsi, [rbx + SK_ADDR]
+    lea rdi, [rsp + NA_PEER]
+    call addr_copy
+    lea rsi, [rbx + SK_LADDR]
+    lea rdi, [rsp + NA_LOCAL]
+    call addr_copy
+    mov eax, [rbx + SK_PORT]            ; the other side's, but a listener's
+    xor ecx, ecx
+    test dword [rbx + SK_FLAGS], SKF_LISTENER
+    cmovnz eax, ecx
+    mov [rsp + NA_PEER_PORT], eax
+    mov eax, [rbx + SK_LPORT]
+    mov [rsp + NA_PORT], eax
+    mov edi, r12d
+    mov rsi, r13
+    mov rdx, rsp
+    mov ecx, NA_SIZE
+    call h_mem_write
+    cmp rax, E_ANY
+    jae .put
+    xor eax, eax
+.put:
+    push rax
+    mov rdi, rbx
+    call obj_put
+    pop rax
+.out:
+    call op_done
+    add rsp, NA_SIZE
+    pop r13
+    pop r12
+    pop rbx
+    ret
 
 ; h_net_shut(EDI = a socket) -> RAX = 0: once what was sent has gone, a FIN
 h_net_shut:
@@ -911,6 +1119,12 @@ sk_settle:
     test dword [rbx + SK_FLAGS], SKF_SHUT | SKF_NOSEND | SKF_GONE
     jnz .written
     xor eax, eax
+    cmp ecx, SKS_LISTEN                 ; a listener: once it listens
+    jne .open
+    cmp qword [rbx + SK_LISTENER], 0
+    setne al
+    jmp .written
+.open:
     cmp ecx, SKS_OPEN
     jne .written
     cmp dword [rbx + SK_TX_LEN], SK_BUF
@@ -943,6 +1157,7 @@ sk_orphan:
 ; sk_destroy(RDI): its last reference went; the main loop is done with it
 sk_destroy:
     push rbx
+    push r12
     mov rbx, rdi
     mov rdi, [rbx + SK_RX]
     call kfree
@@ -952,9 +1167,23 @@ sk_destroy:
     call kfree
     mov rdi, [rbx + SK_TLS]
     call kfree
+    mov r12, [rbx + SK_PARENT]          ; a TLS listener's: the listener let go
+    test r12, r12
+    jnz .freed
+    test dword [rbx + SK_FLAGS], SKF_LISTENER
+    jz .freed
+    mov rdi, [rbx + SK_IDENT]           ; a listener's own identity
+    call sk_drop_identity
+.freed:
     lock dec dword [sk_live]
     mov rdi, rbx
     call obj_free
+    test r12, r12
+    jz .out
+    mov rdi, r12
+    call obj_put
+.out:
+    pop r12
     pop rbx
     ret
 
@@ -1047,7 +1276,7 @@ sk_begin:
     lea rsi, [rbx + SK_HOST]
     lea rdi, [rbx + SK_ADDR]
     call addr_parse
-    jnc sk_connect
+    jnc sk_known
 .name:
     lea rsi, [rbx + SK_HOST]
     mov edx, DQ_SOCKET
@@ -1058,21 +1287,129 @@ sk_begin:
     xor edx, edx
     jmp sk_fail
 .listen:
-    mov edi, [rbx + SK_PORT]
-    lea rsi, [sk_tcp_ops]
-    lea rdx, [sk_accept]
-    mov rcx, rbx
-    call tcp_listen
+    test dword [rbx + SK_FLAGS], SKF_TLS
+    jz .ports
+    call sk_identity_ok
+    jc .identity
+.ports:
+    cmp dword [rbx + SK_PORT], 0
+    je .any
+    call .take
     jc .in_use
+    jmp .listening
+.any:
+    push r12
+    mov r12d, 16                        ; ports of ours tried, at most
+.pick:
+    call tcp_port                       ; one no connection uses
+    mov [rbx + SK_PORT], eax
+    call .take
+    jnc .picked
+    dec r12d
+    jnz .pick
+    pop r12
+    jmp .in_use
+.picked:
+    pop r12
+.listening:
     mov [rbx + SK_LISTENER], rax
     mov eax, [rbx + SK_PORT]
+    mov [rbx + SK_LPORT], eax
     KLOG "net: a program listens on port %u", rax
+    mov esi, SKS_LISTEN                 ; and who waits for it to, hears
+    jmp sk_state
 .out:
     ret
 .in_use:
     mov esi, NETW_INUSE
     xor edx, edx
     jmp sk_fail
+.identity:
+    mov esi, NETW_IDENTITY
+    xor edx, edx
+    jmp sk_fail
+.take:                                  ; -> RAX = tcp_listen's, CF if refused
+    mov edi, [rbx + SK_PORT]
+    lea rsi, [sk_tcp_ops]
+    lea rdx, [sk_accept]
+    mov rcx, rbx
+    jmp tcp_listen
+
+; sk_identity_ok(RBX = a TLS listener) -> CF unless its identity's
+; certificates are as TLS lists them, and its key is the leaf's (P-256)
+sk_identity_ok:
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r12
+    push r13
+    mov r12, [rbx + SK_IDENT]
+    mov ecx, [r12 + TID_LEN]
+    lea rsi, [r12 + TID_CHAIN]
+    lea r13, [rsi + rcx]                ; R13 = the end
+.entry:                                 ; each: 24-bit length, DER, 00 00
+    lea rax, [rsi + 3]
+    cmp rax, r13
+    ja .bad
+    call .length
+    test eax, eax
+    jz .bad
+    lea rdx, [rsi + rax + 5]
+    cmp rdx, r13
+    ja .bad
+    cmp word [rdx - 2], 0
+    jne .bad
+    mov rsi, rdx
+    cmp rsi, r13
+    jb .entry
+    lea rsi, [r12 + TID_CHAIN]          ; the leaf's key
+    call .length
+    mov ecx, eax
+    add rsi, 3
+    call x509_leaf
+    jc .bad
+    cmp dword [x509_key + K_TYPE], KT_P256
+    jne .bad
+    cmp dword [x509_key + K_LEN], 65
+    jne .bad
+    lea rdi, [sk_pub]
+    lea rsi, [r12 + TID_KEY]
+    call ec_public
+    jc .bad
+    mov rsi, [x509_key + K_PTR]
+    lea rdi, [sk_pub]
+    mov ecx, 65
+    repe cmpsb
+    jne .bad
+    clc
+    jmp .out
+.bad:
+    stc
+.out:
+    pop r13
+    pop r12
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    ret
+.length:                                ; RSI -> EAX = the 24-bit length there
+    movzx eax, byte [rsi]
+    shl eax, 16
+    movzx ecx, word [rsi + 1]
+    xchg cl, ch
+    or eax, ecx
+    ret
+
+; sk_known(RBX = a socket, SK_ADDR known): connected to, or, for a lookup,
+; ended
+sk_known:
+    test dword [rbx + SK_FLAGS], SKF_LOOKUP
+    jz sk_connect
+    lock or dword [rbx + SK_FLAGS], SKF_RXEND | SKF_NOSEND
+    mov esi, SKS_ENDED
+    jmp sk_state
 
 ; sock_dns_done(RDI = a socket, RAX = its host's address): from dns_done
 sock_dns_done:
@@ -1081,7 +1418,7 @@ sock_dns_done:
     mov rsi, rax
     lea rdi, [rbx + SK_ADDR]
     call addr_copy
-    call sk_connect
+    call sk_known
     pop rbx
     ret
 
@@ -1104,6 +1441,7 @@ sk_connect:
     mov [rbx + SK_TCP], rax
     mov [rax + TC_USER], rbx
     mov rdi, rax
+    call sk_local
     mov esi, 65535                      ; as much as SK_RX holds
     test dword [rbx + SK_FLAGS], SKF_TLS
     jz .flow
@@ -1116,6 +1454,35 @@ sk_connect:
     mov esi, NETW_NOROUTE
     xor edx, edx
     jmp sk_fail
+
+; sk_local(RBX = a socket, RDI = its connection): our address and port on
+; it, for RO_NET_ADDR. Preserves all.
+sk_local:
+    push rax
+    push rdi
+    push rsi
+    push r9
+    mov eax, [rdi + TC_LPORT]
+    mov [rbx + SK_LPORT], eax
+    cmp dword [rdi + TC_V6], 0
+    jne .v6
+    mov eax, [net_ip]
+    lea rdi, [rbx + SK_LADDR]
+    call addr_set4
+    jmp .out
+.v6:
+    lea rdi, [rdi + TC_RA]
+    call ip6_source                     ; R9 = ours, for there
+    jc .out
+    mov rsi, r9
+    lea rdi, [rbx + SK_LADDR]
+    call addr_copy
+.out:
+    pop r9
+    pop rsi
+    pop rdi
+    pop rax
+    ret
 
 ; sk_state(RBX, ESI = SKS_*): its state now, and who waits hears. Preserves
 ; all.
@@ -1444,10 +1811,22 @@ sk_accept:
     cmp dword [rbx + SK_ACN], SK_ACCEPT_MAX
     jae .refuse
     xor edi, edi
+    test dword [rbx + SK_FLAGS], SKF_TLS
+    jz .plain
+    mov edi, SKF_TLS | SKF_SERVER
+.plain:
     call sk_new_socket
     cmp rax, E_ANY
     jae .refuse
     mov r13, rax                        ; R13 = the new one, the main loop's
+    test dword [rbx + SK_FLAGS], SKF_TLS
+    jz .linked
+    mov rax, [rbx + SK_IDENT]           ; it serves with the listener's
+    mov [r13 + SK_IDENT], rax           ; identity, and keeps the listener
+    mov [r13 + SK_PARENT], rbx
+    mov rdi, rbx
+    call obj_get
+.linked:
     mov [r13 + SK_TCP], r12
     mov [r12 + TC_USER], r13
     lea rsi, [r12 + TC_RA]
@@ -1455,11 +1834,19 @@ sk_accept:
     call addr_copy
     mov ecx, [r12 + TC_RPORT]
     mov [r13 + SK_PORT], ecx
+    xchg rbx, r13
+    mov rdi, r12
+    call sk_local
+    xchg rbx, r13
     mov dword [r13 + SK_STATE], SKS_CONNECT
     lea rax, [r12 + TC_RA]
     SPRINTF r13 + SK_HOST, "%A", rax
     mov rdi, r12
-    mov esi, 65535
+    mov esi, 65535                      ; as much as SK_RX holds
+    test dword [r13 + SK_FLAGS], SKF_TLS
+    jz .flow
+    mov esi, SK_CIN_BUF                 ; TLS: as much as SK_CIN does
+.flow:
     call tcp_flow
     xchg rbx, r13
     call sk_link
@@ -1515,11 +1902,19 @@ sk_t_open:
     test dword [rbx + SK_FLAGS], SKF_INSECURE
     setnz r8b
     mov rdi, [rbx + SK_TLS]
-    lea rsi, [rbx + SK_HOST]
     lea rdx, [sk_tls_send]
     lea rcx, [sk_tls_ops]
+    test dword [rbx + SK_FLAGS], SKF_SERVER
+    jnz .serve
+    lea rsi, [rbx + SK_HOST]
     call tls_start
     jnc .out
+    jmp .tls_failed
+.serve:
+    mov rsi, [rbx + SK_IDENT]
+    call tls_accept
+    jnc .out
+.tls_failed:
     mov edx, [rdi + TLS_ERROR]
     mov esi, NETW_TLS
     call sk_fail
@@ -1694,7 +2089,7 @@ sk_tls_data:
     pop rbx
     ret
 
-sk_tls_closed:                          ; the server's close_notify: nothing more
+sk_tls_closed:                          ; the other side's close_notify: nothing more
     push rbx
     mov rbx, [rdi + TLS_USER]
     lock or dword [rbx + SK_FLAGS], SKF_RXEND | SKF_NOSEND
@@ -1775,6 +2170,7 @@ section .bss
 alignb 8
 sk_new:         resq 1                  ; made by programs, for the main loop to take on
 sk_list:        resq 1                  ; the main loop's
+sk_pub:         resb 65                 ; sk_identity_ok's
 sk_made:        resq 1
 sk_live:        resd 1
 sk_lock:        resd 1

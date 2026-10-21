@@ -14,84 +14,184 @@ MT_VM_TIMED     equ 1000                ; vm_alloc(16 KiB) + vm_free pairs
 section .text
 
 ; -----------------------------------------------------------------------------
-;  mem [test | <hex address>]
+;  mem [<hex address>], mem kinds, mem at <hex address>: records (records.asm)
+;  from the words after them (EDI = how many, RSI = them); CF if it failed.
+;  mem test prints.
 ; -----------------------------------------------------------------------------
-cmd_mem:
-    mov rsi, [sh_args]
-    cmp byte [rsi], 0
-    je mem_report
-    lea rdi, [str_mt_test]
-    call streq
-    test eax, eax
-    jnz mem_test
-    call arg_hex
-    jc .usage
-    jmp mem_where
-.usage:
-    KLOG "usage: mem [test | <hex address>]"
+
+; mem: what uses memory, one record
+mem_show:
+    test edi, edi
+    jnz mem_at
+    COLUMN 'usable', FT_SIZE
+    COLUMN 'free', FT_SIZE
+    COLUMN 'kernel', FT_HEX, 1
+    COLUMN 'code', FT_SIZE
+    COLUMN 'constants', FT_SIZE
+    COLUMN 'data', FT_SIZE
+    COLUMN 'tables', FT_HEX, 1
+    COLUMN 'fw-tables', FT_HEX, 1
+    COLUMN 'vm-maps', FT_INT
+    COLUMN 'vm-size', FT_SIZE
+    COLUMN 'shootdowns', FT_INT
+    COLUMN 'heap-objects', FT_INT
+    COLUMN 'heap-size', FT_SIZE
+    COLUMN 'slabs', FT_INT
+    COLUMN 'large', FT_INT
+    COLUMN 'large-size', FT_SIZE
+    mov edi, TBF_RECORD
+    call rec_flag
+    call rec_row
+    xor edi, edi
+    mov rsi, [pmm_usable_bytes]
+    call rec_set
+    inc edi
+    mov rsi, [pmm_free_pages]
+    shl rsi, 12
+    call rec_set
+    inc edi
+    mov rsi, [kernel_phys]
+    call rec_set
+    inc edi
+    lea rsi, [kernel_rodata]            ; code: read-only
+    mov rax, KERNEL_BASE
+    sub rsi, rax
+    call rec_set
+    inc edi
+    lea rsi, [kernel_data]              ; constants and data: not executable
+    lea rax, [kernel_rodata]
+    sub rsi, rax
+    call rec_set
+    inc edi
+    lea rsi, [kernel_end]
+    lea rax, [kernel_data]
+    sub rsi, rax
+    call rec_set
+    inc edi
+    mov rsi, [vmm_cr3]                  ; ours, and the firmware's: the only
+    call rec_set                        ; ones with an identity map
+    inc edi
+    mov rsi, [fw_cr3]
+    call rec_set
+    inc edi
+    mov rsi, [vm_count]
+    call rec_set
+    inc edi
+    mov rsi, [vm_pages]
+    shl rsi, 12
+    call rec_set
+    inc edi
+    mov rsi, [tlb_count]
+    call rec_set
+    inc edi
+    mov rsi, [heap_objects]
+    call rec_set
+    inc edi
+    mov rsi, [heap_bytes]
+    call rec_set
+    inc edi
+    mov rsi, [heap_slabs]
+    call rec_set
+    inc edi
+    mov rsi, [heap_big]
+    call rec_set
+    inc edi
+    mov rsi, [heap_big_bytes]
+    call rec_set
+    clc
     ret
 
-mem_report:
+; mem kinds: memory by the type the firmware gave it
+mem_kinds:
     push rbx
+    test edi, edi
+    jnz .usage
+    COLUMN 'kind', FT_TEXT
+    COLUMN 'size', FT_SIZE
     xor ebx, ebx
 .next:
     lea rax, [mem_by_type]
-    mov rcx, [rax + rbx * 8]
-    test rcx, rcx
+    mov rsi, [rax + rbx * 8]
+    test rsi, rsi
     jz .skip
+    call rec_row
+    mov edi, 1
+    call rec_set
     lea rax, [mem_type_names]
-    mov rax, [rax + rbx * 8]
-    KLOG "  %-14s %b", rax, rcx
+    mov rsi, [rax + rbx * 8]
+    xor edi, edi
+    call rec_set
 .skip:
     inc ebx
     cmp ebx, 16
     jb .next
-    mov rax, [pmm_free_pages]
-    shl rax, 12
-    KLOG "  usable %b, free %b, bitmap at %p", qword [pmm_usable_bytes], rax, qword [pmm_bitmap_phys]
-    KLOG "  page tables at %p; the firmware's at %p, the only ones with an identity map", qword [vmm_cr3], qword [fw_cr3]
-    lea rax, [kernel_rodata]
-    mov rcx, KERNEL_BASE
-    sub rax, rcx
-    lea rdx, [kernel_data]
-    lea rcx, [kernel_rodata]
-    sub rdx, rcx
-    lea r8, [kernel_end]
-    lea rcx, [kernel_data]
-    sub r8, rcx
-    KLOG "  kernel at %p: code %b, read-only; constants %b and data %b, not executable", qword [kernel_phys], rax, rdx, r8
-    mov rax, [vm_pages]
-    shl rax, 12
-    KLOG "  vm: %u mappings, %b, in %u of %u slots; %u TLB shootdowns", qword [vm_count], rax, qword [vm_slots_used], VM_SLOTS, qword [tlb_count]
-    KLOG "  heap: %u objects, %b, in %u slabs; %u large, %b", qword [heap_objects], qword [heap_bytes], qword [heap_slabs], qword [heap_big], qword [heap_big_bytes]
+    clc
+    jmp .out
+.usage:
+    KLOG "usage: mem kinds"
+    stc
+.out:
     pop rbx
     ret
 
-; mem_where(RAX = address): what is there and how it is mapped
-mem_where:
+; mem at <hex address>: what is there and how it is mapped
+mem_at:
     push rbx
     push r12
+    cmp edi, 1
+    jne .usage
+    mov rsi, [rsi]
+    call arg_hex
+    jc .usage
     mov rbx, rax
+    COLUMN 'address', FT_HEX, 1
+    COLUMN 'what', FT_TEXT
+    COLUMN 'mapped', FT_BOOL
+    COLUMN 'physical', FT_HEX, 1
+    COLUMN 'access', FT_TEXT
+    COLUMN 'runs', FT_TEXT
+    COLUMN 'caching', FT_TEXT
+    COLUMN 'page', FT_SIZE
+    mov edi, TBF_RECORD
+    call rec_flag
+    call rec_row
+    xor edi, edi
+    mov rsi, rbx
+    call rec_set
     lea rdi, [mt_text]
     mov rsi, rbx
     call vmm_where
+    mov edi, 1
+    lea rsi, [mt_text]
+    call rec_str
     mov rdi, rbx
     call vmm_lookup
     jc .unmapped
     mov r12, rax                        ; the entry
     mov rdi, rbx
     call vmm_translate
-    mov r8, rax
-    lea r9, [str_mt_ro]
+    push rdx                            ; the page's size
+    mov edi, 2
+    mov esi, 1
+    call rec_set
+    mov edi, 3
+    mov rsi, rax
+    call rec_set
+    mov edi, 4
+    lea rsi, [str_mt_ro]
     test r12d, PTE_W
     jz .w
-    lea r9, [str_mt_rw]
+    lea rsi, [str_mt_rw]
 .w:
-    lea r10, [str_mt_x]
+    call rec_set
+    mov edi, 5
+    lea rsi, [str_mt_x]
     bt r12, 63
     jnc .x
-    lea r10, [str_mt_nx]
+    lea rsi, [str_mt_nx]
 .x:
+    call rec_set
+    pop rdx
     mov eax, r12d                       ; memory type: PAT, PCD, PWT
     shr eax, 3
     and eax, 3
@@ -105,14 +205,24 @@ mem_where:
     or eax, 4
 .type:
     lea rcx, [mt_types]
-    mov r11, [rcx + rax * 8]
-    lea rax, [mt_text]
-    KLOG "  %p: %s", rbx, rax
-    KLOG "    physical %p, %s, %s, %s, in a %b page", r8, r9, r10, r11, rdx
+    mov rsi, [rcx + rax * 8]
+    mov edi, 6
+    call rec_set
+    mov edi, 7
+    mov rsi, rdx
+    call rec_set
+    clc
     jmp .out
-.unmapped:
-    lea rax, [mt_text]
-    KLOG "  %p: %s; nothing is mapped there", rbx, rax
+.unmapped:                              ; (mapped: no; access, runs, caching: empty)
+    mov edi, 3
+    call rec_none
+    mov edi, 7
+    call rec_none
+    clc
+    jmp .out
+.usage:
+    KLOG "usage: mem at <hex address>"
+    stc
 .out:
     pop r12
     pop rbx

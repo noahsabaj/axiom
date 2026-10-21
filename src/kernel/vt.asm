@@ -2453,6 +2453,11 @@ vt_osc_end:
 .cursor:
     mov ecx, COL_ACCENT
 .asked:
+    push rax                            ; as this theme draws them
+    mov eax, ecx
+    call theme_color
+    mov ecx, eax
+    pop rax
     cmp byte [rsi], '?'
     jne .out
     mov r8d, -1

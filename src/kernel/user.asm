@@ -44,23 +44,46 @@
 ;  number in SB_GIFT): the main thread loads it (the boot stick is read
 ;  there alone), a child of the task that asked, which gets handles to it
 ;  and its first thread. Killing a task kills its children, and theirs; a
-;  killed task with no thread left closes its handles at once.
+;  killed task with no thread left closes its handles at once. It may also
+;  name a channel's end for the child's console: what the child, and what
+;  it starts, write goes there as messages (TK_OUT), waiting while the
+;  other end has CH_QUEUE_MAX unread, and that end hears E_PEER once they
+;  have all ended (a fleet node's job's log, say).
 ;
 ;  Neither a system call nor an interrupt saves SIMD state: nothing they run
-;  uses SIMD (macros.inc), and the scheduler keeps each thread's. The FS and
-;  GS bases are not kept for each thread, so ring 3 cannot set them
+;  uses SIMD (macros.inc), and the scheduler keeps each thread's. It keeps
+;  each thread's FS and GS bases too, but only a Linux program can set them
+;  (arch_prctl): a native program's are 0, with no thread-local storage
 ;  (FSGSBASE is off).
 ;
-;    run <program> [arguments]: in the background; ctrl+C kills it
+;    <program> [arguments], or run <program> [arguments]: the prompt
+;      waits for it, ctrl+C stops it; with '&' after it, it runs on in the
+;      background (user_start: a job; as many as USER_JOBS at once)
 ;    user_load(RDI = path, RSI = arguments, RDX = name, RCX = the task
-;      starting it or 0 for the current one, R8D = a handle of that task's
-;      to give it or 0) -> RAX = a task (a reference), RDX = its first
-;      thread, started (a reference, for user_wait); RAX = 0 if it could not
-;      be loaded (said why), RDX = E_*
+;      starting it or 0 for the shell, R8D = a handle of that task's to give
+;      it or 0, R9 = what the shell grants it beyond what its header WANTS,
+;      AW_*) -> RAX = a task (a reference), RDX = its first thread, started
+;      (a reference, for user_wait); RAX = 0 if it could not be loaded
+;      (said why), RDX = E_*. One the shell runs gets the network, its
+;      names in the store, the desktop and the settings only as it wants
+;      or is granted them, and writes to the shell's terminal; one a task starts gets
+;      none of them, only what it is given, and writes where its parent does
 ;    user_wait(RDI = task, RSI = its first thread) -> RAX = what that thread
 ;      returned, once it and every other thread of the task have ended
 ;    task_kill(RDI = task)
 ; =============================================================================
+
+; a program run from the shell: a job
+JB_TASK         equ 0                   ; a reference; 0: the slot is free
+JB_FIRST        equ 8                   ; its first thread, until user_wait
+JB_CON          equ 16                  ; the terminal it was run from (0: gone)
+JB_EXIT         equ 24                  ; what its first thread returned
+JB_FLAGS        equ 32                  ; dword: JF_*
+JB_SIZE         equ 40
+JF_BACK         equ 1                   ; in the background: no prompt waits for it
+JF_ENDED        equ 2                   ; it ended: user_service says so
+USER_JOBS       equ 16
+USER_RUNNING    equ 256
 
 ; an address space
 AS_PML4         equ 0                   ; its PML4, where the direct map has it
@@ -69,7 +92,7 @@ AS_LOCK         equ 16                  ; dword
 AS_NMAPS        equ 20                  ; dword
 AS_NEXT         equ 24                  ; where the next mapping goes
 AS_MAPS         equ 32                  ; AS_MAX of AM_SIZE
-AS_MAX          equ 32
+AS_MAX          equ 128                 ; blocks mapped at once (a heap, a window, files)
 AS_LX           equ AS_MAPS + AS_MAX * AM_SIZE ; a Linux program's memory (lxmm.asm):
 AS_VMAS         equ AS_LX + 0           ; its areas (VA_SIZE each, by address), or 0
 AS_NVMA         equ AS_LX + 8           ; dword: how many
@@ -107,7 +130,9 @@ SR_DONE         equ 28                  ; dword: 1 once done
 SR_THREAD       equ 32                  ; the thread asking
 SR_RAX          equ 40                  ; what it gets back
 SR_RDX          equ 48
-SR_SIZE         equ 64
+SR_GIFT2        equ 56                  ; dword: a second, or 0
+SR_OUT          equ 64                  ; a channel's end for its console (held), or 0
+SR_SIZE         equ 72
 SPAWN_TEXT_MAX  equ 255
 SPAWN_DEPTH     equ 8                   ; programs started by programs, this deep
 SPAWN_TASK_RIGHTS equ RT_DUP | RT_GIVE | RT_INFO | RT_TASK_HANDLES | RT_TASK_KILL
@@ -273,6 +298,13 @@ user_leave:
     test qword [rax + TH_FLAGS], TF_LINUX
     jnz lx_killed                       ; its process is told (linux.asm)
     mov rdi, E_KILLED
+    test byte [rax + TH_FLAGS], TF_FIRST
+    jz .end
+    mov rax, [rax + TH_TASK]
+    test byte [rax + TK_KILL], 4        ; ended by EXIT_TASK: with its code
+    jz .end
+    mov rdi, [rax + TK_CODE]
+.end:
     jmp thread_exit
 
 ; user_killed -> EAX = 1 if the running thread is a user thread whose task
@@ -463,15 +495,35 @@ task_kill:
 ;  The calls (RDI, RSI, RDX, RCX = the arguments) -> RAX, RDX
 ; -----------------------------------------------------------------------------
 
+; sys_exit(RDI = code, ESI = EXIT_TASK or 0): this thread ends. The task
+; ends too if it is the first, or with EXIT_TASK: its first thread returns
+; the code the first EXIT_TASK said.
 sys_exit:
     mov rax, [gs:PC_CURRENT]
+    mov rcx, [rax + TH_TASK]
     test byte [rax + TH_FLAGS], TF_FIRST
-    jz .exit
-    push rdi                            ; the first: its task ends with it
-    mov rdi, [rax + TH_TASK]
+    jnz .first
+    cmp esi, EXIT_TASK
+    jne .exit
+    lock bts dword [rcx + TK_KILL], 3   ; one code is said: the first's
+    jc .kill
+    mov [rcx + TK_CODE], rdi
+    lock bts dword [rcx + TK_KILL], 2
+.kill:
+    push rdi
+    mov rdi, rcx
     call task_kill
     pop rdi
 .exit:
+    jmp thread_exit
+.first:
+    push rdi                            ; the first: its task ends with it
+    mov rdi, rcx
+    call task_kill
+    pop rdi
+    test byte [rcx + TK_KILL], 4        ; with a code said before
+    jz .exit
+    mov rdi, [rcx + TK_CODE]
     jmp thread_exit
 
 sys_ring_enter:
@@ -560,6 +612,135 @@ sys_thread_new:
 sys_channel_new:
     jmp h_channel_new
 
+; sys_tls(RDI = an FS base, in the lower half): this thread's from now on,
+; kept as a Linux thread's is (TH_FSBASE, loaded by sched_switch)
+sys_tls:
+    mov rax, E_ARG
+    mov rcx, USER_TOP
+    cmp rdi, rcx
+    jae .out
+    pushfq
+    cli
+    mov rax, [gs:PC_CURRENT]
+    mov [rax + TH_FSBASE], rdi
+    mov [gs:PC_FSBASE], rdi
+    mov eax, edi
+    mov rdx, rdi
+    shr rdx, 32
+    mov ecx, MSR_FS_BASE
+    wrmsr
+    popfq
+    xor eax, eax
+.out:
+    xor edx, edx
+    ret
+
+; sys_futex_wait(RDI = an address, ESI = the value, RDX = TSC deadline or
+; 0) -> RAX = 0 once a SYS_FUTEX_WAKE woke it, E_CONFLICT if the dword held
+; another value, E_TIMEOUT, E_KILLED, E_RANGE (not the program's), E_ARG
+; (not 4-aligned). Linux's futexes (lxsig.asm), keyed by where the word is
+; (so tasks sharing memory share them too).
+sys_futex_wait:
+    mov ecx, -1                         ; woken by any wake
+    call lx_futex_wait
+    jmp futex_result
+
+; sys_futex_wake(RDI = an address, ESI = at most) -> RAX = threads woken
+sys_futex_wake:
+    mov edx, -1
+    call lx_futex_wake
+; futex_result(RAX = Linux's result) -> RAX = ours, RDX = 0
+futex_result:
+    xor edx, edx
+    test rax, rax
+    jns .out
+    cmp rax, -EAGAIN
+    je .conflict
+    cmp rax, -ETIMEDOUT
+    je .timeout
+    cmp rax, -EFAULT
+    je .range
+    cmp rax, -EINVAL
+    je .arg
+    mov rax, E_KILLED                   ; (-EINTR, -ERESTARTSYS: being killed)
+    ret
+.conflict:
+    mov rax, E_CONFLICT
+    ret
+.timeout:
+    mov rax, E_TIMEOUT
+    ret
+.range:
+    mov rax, E_RANGE
+    ret
+.arg:
+    mov rax, E_ARG
+.out:
+    ret
+
+; sys_info(EDI = SI_*) -> RAX: SI_CLOCK, microseconds since 1970 (the RTC
+; read at boot, taken as UTC, kept since by the TSC); SI_CPUS, CPUs running;
+; SI_RAM and SI_RAM_FREE, bytes of memory and of it free; SI_UPTIME,
+; milliseconds since power-on; SI_BATTERY, the battery as last read
+; (bat_info); SI_TEMP, the CPU's temperature now (cpu_heat); SI_LOAD, the
+; load average over the last minute, in hundredths (load_info)
+sys_info:
+    cmp edi, SI_CLOCK
+    je .clock
+    cmp edi, SI_CPUS
+    je .cpus
+    cmp edi, SI_RAM
+    je .ram
+    cmp edi, SI_RAM_FREE
+    je .ram_free
+    cmp edi, SI_UPTIME
+    je .uptime
+    cmp edi, SI_BATTERY
+    je .battery
+    cmp edi, SI_TEMP
+    je .temp
+    cmp edi, SI_LOAD
+    je .load
+    mov rax, E_ARG
+    xor edx, edx
+    ret
+.battery:
+    call bat_info
+    xor edx, edx
+    ret
+.temp:
+    call cpu_heat
+    xor edx, edx
+    ret
+.load:
+    call load_info
+    xor edx, edx
+    ret
+.ram:
+    mov rax, [pmm_usable_bytes]
+    xor edx, edx
+    ret
+.ram_free:
+    mov rax, [pmm_free_pages]
+    shl rax, 12
+    xor edx, edx
+    ret
+.uptime:
+    call uptime_ms
+    xor edx, edx
+    ret
+.clock:
+    RDTSC64
+    xor edx, edx
+    div qword [tsc_per_us]
+    add rax, [rtc_epoch_us]
+    xor edx, edx
+    ret
+.cpus:
+    mov eax, [cpus_online]
+    xor edx, edx
+    ret
+
 ; h_task_kill(EDI = a task with an address space) -> RAX = 0 (needs
 ; RT_TASK_KILL): it, and the tasks it started
 h_task_kill:
@@ -579,11 +760,12 @@ h_task_kill:
 .out:
     ret
 
-; sys_spawn(EDI = memory, RSI = offset, RDX = bytes there of "program
-; arguments", RCX = a handle to give it, or 0) -> RAX = a handle to the task
-; it started, RDX = to its first thread (RO_JOIN for what it returns). The
-; main thread reads the file, so it does the loading; this thread waits for
-; it, and is not cut short meanwhile.
+; sys_spawn(EDI = memory, RSI = offset, EDX = bytes there of "program
+; arguments", RDX's high dword = a channel's end for what its console writes
+; (needs RT_CH_SEND), or 0; RCX = a handle to give it, or 0, R8 = a second,
+; or 0) -> RAX = a handle to the task it started, RDX = to its first thread
+; (RO_JOIN for what it returns). The main thread reads the file, so it does
+; the loading; this thread waits for it, and is not cut short meanwhile.
 sys_spawn:
     push rbx
     push r12
@@ -591,9 +773,26 @@ sys_spawn:
     sub rsp, SR_SIZE
     mov rbx, rsp                        ; RBX = the request
     mov [rbx + SR_GIFT], ecx
+    mov [rbx + SR_GIFT2], r8d
     mov qword [rbx + SR_TEXT], 0
+    mov qword [rbx + SR_OUT], 0
     mov r12d, edi
     mov r13, rsi
+    mov rdi, rdx                        ; where its console goes
+    shr rdi, 32
+    jz .its_text
+    push rdx
+    mov esi, OT_CHANNEL
+    mov edx, RT_CH_SEND
+    call handle_get
+    pop rdx
+    cmp rax, E_ANY
+    jae .out
+    mov rdi, rax
+    call out_hold
+    mov [rbx + SR_OUT], rdi             ; held, until the child takes it
+.its_text:
+    mov edx, edx
     mov rax, E_ARG
     test rdx, rdx
     jz .out
@@ -677,14 +876,37 @@ sys_spawn:
 .out:
     xor edx, edx
 .back:
+    mov rdi, [rbx + SR_OUT]             ; unless the child took it
+    call out_drop
     add rsp, SR_SIZE
     pop r13
     pop r12
     pop rbx
     ret
 
+; out_hold(RDI = a channel's end, a reference the caller gives): kept as a
+; task's console (TK_OUT), counted as a capability so that the end stays
+; open while a task writes to it. Preserves all.
+out_hold:
+    lock inc dword [rdi + OB_CAPS]
+    ret
+
+; out_drop(RDI = such an end, or 0): let go; with its last capability gone,
+; its peer hears so. Preserves all.
+out_drop:
+    test rdi, rdi
+    jz .none
+    lock dec dword [rdi + OB_CAPS]
+    jnz .put
+    call obj_orphaned
+.put:
+    jmp obj_put
+.none:
+    ret
+
 ; spawn_service: on the main thread, each program a program asked for, loaded
 spawn_service:
+    call fs_service                     ; and their files (fscap.asm)
     push rbx
     push r12
 .next:
@@ -741,8 +963,20 @@ spawn_one:
     lea rdi, [user_path_buf]
     mov rsi, r12
     lea rdx, [user_name_buf]
-    mov r8d, [rbx + SR_GIFT]
+    mov r8d, [rbx + SR_GIFT2]           ; what it is given: both
+    shl r8, 32
+    mov eax, [rbx + SR_GIFT]
+    or r8, rax
+    xor r9d, r9d                        ; (a task's child: nothing granted)
+    mov rax, [rbx + SR_OUT]             ; where its console goes, for user_load
+    mov [user_out], rax
+    mov qword [rbx + SR_OUT], 0
     call user_load
+    push rdi
+    mov rdi, [user_out]                 ; not taken: it failed before its task
+    mov qword [user_out], 0
+    call out_drop
+    pop rdi
     test rax, rax
     jz .failed
     mov r12, rax                        ; the task, R13 its first thread
@@ -788,6 +1022,41 @@ spawn_one:
 .out:
     pop r13
     pop r12
+    ret
+
+; gift_slot(EAX = a handle the new task was given, RBP = its start block;
+; that task the current one): where a handle of its kind goes as well
+; (SB_DESK, SB_FILES, SB_NET, SB_STORE, SB_SETTINGS, SB_SOUND), if that is empty.
+; Preserves RAX.
+gift_slot:
+    push rax
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    mov edi, eax
+    call handle_info                    ; EAX = its type
+    lea rsi, [gift_slots]
+.each:
+    mov ecx, [rsi]
+    test ecx, ecx
+    jz .out
+    cmp eax, ecx
+    je .found
+    add rsi, 8
+    jmp .each
+.found:
+    mov ecx, [rsi + 4]
+    cmp dword [rbp + rcx], 0
+    jne .out
+    mov eax, [rsp + 32]
+    mov [rbp + rcx], eax
+.out:
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rax
     ret
 
 ; user_thread(RDI = entry, RSI = RSP, RDX = RDI, RCX = task) -> RAX = a
@@ -1424,7 +1693,8 @@ unmap_flush:
 ; h_con_write(EDI = the console, ESI = memory, RDX = offset, RCX = bytes) ->
 ; RAX = bytes: the text, as lines on the console and the serial log (needs
 ; RT_CON_WRITE, and RT_MEM_READ on the memory). Bytes below a space but
-; newlines show as dots.
+; newlines show as dots. A task with a channel for its console (TK_OUT)
+; sends it there instead, as it is, one message.
 h_con_write:
     push rbx
     push r12
@@ -1460,7 +1730,11 @@ h_con_write:
     jae .free
     mov rdi, rbx
     mov rsi, rax
-    mov r11, [user_con]                 ; where the program was run
+    call cur_task                       ; where the program was run
+    mov rdx, [rax + TK_OUT]
+    test rdx, rdx
+    jnz .to_channel
+    mov r11, [rax + TK_CON]
     lea rax, [con_lines]
     call con_call
     mov rax, r14
@@ -1474,6 +1748,42 @@ h_con_write:
     mov rax, E_NOMEM
 .out:
     pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+.to_channel:
+    mov rdi, rdx                        ; RDI = the end, RSI = the bytes
+    mov rdx, rsi
+    mov rsi, rbx
+    call con_out
+    mov rax, r14
+    jmp .free
+
+; con_out(RDI = a task's console's channel end, RSI = text, RDX = bytes): one
+; message from it, waiting while its peer has CH_QUEUE_MAX unread; dropped
+; once the peer is gone, or the task is killed
+con_out:
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov r13, rdx
+.again:
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    call ch_post
+    cmp rax, E_FULL
+    jne .out
+    call cur_task
+    test byte [rax + TK_KILL], 1
+    jnz .out
+    mov edi, 2000
+    call thread_sleep_us
+    jmp .again
+.out:
     pop r13
     pop r12
     pop rbx
@@ -1542,7 +1852,8 @@ user_load:
     mov r13, rsi                        ; buffer's size, [rsp + 24] = what to
     mov r15, rdx                        ; say if it fails, [rsp + 32] = the
     mov [rsp + 32], rcx                 ; task starting it, [rsp + 40] = the
-    mov [rsp + 40], r8                  ; gift
+    mov [rsp + 40], r8                  ; gifts (dwords), [rsp + 48] = what it is given
+    mov [rsp + 48], r9                  ; (AW_*: granted, and then wanted)
     mov qword [rsp + 24], E_ARG
     xor r14d, r14d                      ; no task yet
     xor ebp, ebp                        ; no start block yet
@@ -1586,7 +1897,7 @@ user_load:
     sub rcx, rax
     xor eax, eax
     rep stosb
-    mov rax, 'AXIOMEX1'
+    mov rax, 'AXIOMEX2'
     cmp [rbx + AXE_MAGIC], rax
     jne .not_axe
     mov rax, [rbx + AXE_TEXT_END]
@@ -1619,6 +1930,10 @@ user_load:
     jb .not_axe
     cmp r11, rax
     jae .not_axe
+    mov rax, [rbx + AXE_WANTS]          ; what it wants, and nothing else
+    test rax, ~AW_ALL
+    jnz .not_axe
+    or [rsp + 48], rax
 
     mov rsi, [rsp + 32]                 ; the task
     test rsi, rsi
@@ -1631,6 +1946,18 @@ user_load:
     test rax, rax
     jz .nomem
     mov r14, rax
+    mov rdi, [user_out]                 ; spawn_one's: where its console goes,
+    test rdi, rdi                       ; instead of where its parent's does
+    jz .out_kept
+    mov qword [user_out], 0
+    xchg rdi, [r14 + TK_OUT]
+    call out_drop
+.out_kept:
+    cmp qword [rsp + 32], 0             ; run from the shell: it writes there
+    jne .written
+    call con_target
+    mov [r14 + TK_CON], rax
+.written:
     call as_new
     test rax, rax
     jz .nomem
@@ -1727,16 +2054,44 @@ user_load:
     cmp rax, E_ANY
     jae .as_us
     mov [rbp + SB_CONSOLE], eax
-    cmp qword [rsp + 8 + 32], 0         ; run from the console: its own names in the store
-    jne .no_store
-    mov rdi, r15
+    cmp qword [rsp + 8 + 32], 0         ; run from the shell: what it wants,
+    jne .given                          ; or was granted, and no more
+    test qword [rsp + 8 + 48], AW_STORE
+    jz .no_store
+    mov rdi, r15                        ; its own names in the store
     call st_program
     mov [rbp + SB_STORE], eax
-    call sk_program                     ; and the network
-    mov [rbp + SB_NET], eax
-    call desk_program                   ; and the desktop
-    mov [rbp + SB_DESK], eax
 .no_store:
+    test qword [rsp + 8 + 48], AW_NET
+    jz .no_net
+    call sk_program                     ; the network
+    mov [rbp + SB_NET], eax
+.no_net:
+    test qword [rsp + 8 + 48], AW_DESK
+    jz .no_desk
+    call desk_program                   ; the desktop
+    mov [rbp + SB_DESK], eax
+.no_desk:
+    test qword [rsp + 8 + 48], AW_SETTINGS
+    jz .no_settings
+    call cfg_program                    ; the settings
+    mov [rbp + SB_SETTINGS], eax
+.no_settings:
+    test qword [rsp + 8 + 48], AW_FILES
+    jz .no_files
+    xor esi, esi
+    test qword [rsp + 8 + 48], AW_UPDATE
+    jz .files
+    mov esi, RT_FS_KERNEL               ; and a new kernel
+.files:
+    call files_program                  ; the files, on every volume
+    mov [rbp + SB_FILES], eax
+.no_files:
+    test qword [rsp + 8 + 48], AW_SOUND
+    jz .given
+    call snd_program                    ; the speakers
+    mov [rbp + SB_SOUND], eax
+.given:
     xor eax, eax
     mov esi, [rsp + 8 + 40]             ; and what it is given
     test esi, esi
@@ -1747,6 +2102,18 @@ user_load:
     cmp rax, E_ANY
     jae .as_us
     mov [rbp + SB_GIFT], eax
+    call gift_slot
+    mov esi, [rsp + 8 + 44]             ; a second
+    test esi, esi
+    jz .gifts
+    mov rdi, [rsp + 8 + 32]
+    mov rdx, r14
+    call task_give
+    cmp rax, E_ANY
+    jae .as_us
+    mov [rbp + SB_GIFT2], eax
+    call gift_slot
+.gifts:
     xor eax, eax
 .as_us:
     mov rcx, [gs:PC_CURRENT]
@@ -1905,36 +2272,109 @@ user_said:
     ret
 
 ; -----------------------------------------------------------------------------
-;  The shell: run, and its end
+;  The shell: programs by name, several at once, and their ends
 ; -----------------------------------------------------------------------------
 
-; run <program> [arguments]
+; run <program> [arguments]: as typing its name (+net and '&' too)
 cmd_run:
-    push rbx
     push r12
-    mov rax, [user_task]
-    test rax, rax
-    jnz .busy
     mov rsi, [sh_args]
     call arg_split
     cmp byte [rsi], 0
     je .usage
     mov r12, rdi                        ; the arguments
+    mov rdi, rsi
+    mov rsi, r12
+    mov edx, [sh_grants]
+    movzx ecx, byte [sh_bg]
+    call user_start
+    jmp .out
+.usage:
+    KLOG "usage: run <program> [arguments]: /EFI/AXIOM/<PROGRAM>.AXE on the boot stick"
+.out:
+    pop r12
+    ret
+
+; user_found(RDI = a program's name, or a path) -> CF if there is no such
+; program (said nothing). Preserves all but RAX.
+user_found:
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r14
+    mov rsi, rdi
+    call user_path
+    call log_volume                     ; where user_load looks
+    jnc .volume
+    call fat_vol
+    jc .out
+.volume:
+    lea rsi, [user_path_buf]
+    mov byte [fat_hush], 1
+    call fat_resolve
+    mov byte [fat_hush], 0
+    jc .out
+    test byte [fat_ent + 11], 0x10      ; a file, not a folder
+    jz .out
+    stc
+.out:
+    pop r14
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    ret
+
+; user_start(RDI = a program's name or path, RSI = its arguments, EDX = what
+; it is granted beyond what it wants (AW_*), ECX = 1 for the background):
+; the program runs in a job of this terminal's. In front, the prompt waits
+; for it; ctrl+C stops it. -> CF if it did not start (said why)
+user_start:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    mov r12, rsi
+    mov r13d, edx
+    mov r15d, ecx
+    mov r14, rdi
+    lea rbx, [user_jobs]                ; a slot
+    xor eax, eax
+.slot:
+    cmp eax, USER_JOBS
+    jae .full
+    cmp qword [rbx + JB_TASK], 0
+    je .free
+    add rbx, JB_SIZE
+    inc eax
+    jmp .slot
+.free:
+    mov rsi, r14
     call user_path
     lea rdi, [user_path_buf]
     mov rsi, r12
     lea rdx, [user_name_buf]
     xor ecx, ecx
     xor r8d, r8d
+    mov r9d, r13d
     call user_load
     test rax, rax
-    jz .out
-    mov [user_task], rax
-    mov [user_first], rdx
-    call con_owner                      ; its lines are shown there
-    mov [user_con], rax
+    jz .fail
+    mov [rbx + JB_TASK], rax
+    mov [rbx + JB_FIRST], rdx
+    mov r14, rax
+    call con_target                     ; said there when it ends
+    mov [rbx + JB_CON], rax
+    xor eax, eax
+    test r15d, r15d
+    jz .flags
+    mov eax, JF_BACK
+.flags:
+    mov [rbx + JB_FLAGS], eax
     lea rdi, [user_waiter]
-    xor esi, esi
+    mov rsi, rbx
     lea rdx, [str_user_wait]
     xor ecx, ecx
     call thread_spawn
@@ -1942,21 +2382,32 @@ cmd_run:
     jz .no_waiter
     mov rdi, rax
     call thread_detach
+    test r15d, r15d
+    jnz .back
     call shell_wait
+    clc
+    jmp .out
+.back:
+    lea rax, [r14 + OB_NAME]
+    KLOG "run: %s in the background, task %u ('tasks stop %u' stops it)", rax, qword [r14 + OB_ID], qword [r14 + OB_ID]
+    clc
     jmp .out
 .no_waiter:                             ; then here, at once
-    mov rdi, [user_task]
+    mov rdi, r14
     call task_kill
+    mov rdi, rbx
     call user_waiter
     call user_service
+    stc
     jmp .out
-.busy:
-    lea rax, [rax + OB_NAME]
-    KLOG "run: %s is still running (ctrl+C stops it)", rax
-    jmp .out
-.usage:
-    KLOG "usage: run <program> [arguments]: /EFI/AXIOM/<PROGRAM>.AXE on the boot stick"
+.full:
+    KLOG "run: %u programs run from here already ('tasks' lists them)", USER_JOBS
+.fail:
+    stc
 .out:
+    pop r15
+    pop r14
+    pop r13
     pop r12
     pop rbx
     ret
@@ -2058,53 +2509,130 @@ user_path:
     pop rbx
     ret
 
-; user_waiter: a thread of its own, until the program running has ended
+; user_waiter(RDI = a job): a thread of its own, until its program has ended
 user_waiter:
-    mov rdi, [user_task]
-    mov rsi, [user_first]
+    push rbx
+    mov rbx, rdi
+    mov rdi, [rbx + JB_TASK]
+    mov rsi, [rbx + JB_FIRST]
     call user_wait
-    mov [user_exit], rax
+    mov [rbx + JB_EXIT], rax
+    lock or dword [rbx + JB_FLAGS], JF_ENDED
     mov byte [user_pending], 1
     mov rdi, [main_thread]
     call thread_unpark
     xor eax, eax
+    pop rbx
     ret
 
-; user_service: from the main loop. A program that ended is said, and goes.
+; user_service: from the main loop. A program that ended is said where it
+; was run, and goes; a prompt that waited for it comes back.
 user_service:
     call lx_service                     ; and Linux's (linux.asm)
     call spawn_service
     cmp byte [user_pending], 0
     je .out
     mov byte [user_pending], 0
-    mov rdi, [user_task]
-    mov rsi, [user_exit]
-    mov r11, [user_con]                 ; said where it was run
+    push rbx
+    push r12
+    lea rbx, [user_jobs]
+    xor r12d, r12d
+.job:
+    cmp r12d, USER_JOBS
+    jae .done
+    test dword [rbx + JB_FLAGS], JF_ENDED
+    jz .next
+    mov rdi, [rbx + JB_TASK]
+    mov rsi, [rbx + JB_EXIT]
+    mov r11, [rbx + JB_CON]
     lea rax, [user_said]
     call con_call
-    xor edi, edi
-    xchg rdi, [user_task]
+    mov rdi, [rbx + JB_TASK]
+    push qword [rbx + JB_CON]
+    push qword [rbx + JB_FLAGS]
+    push qword [rbx + JB_EXIT]
+    mov qword [rbx + JB_TASK], 0        ; the slot is free
+    mov dword [rbx + JB_FLAGS], 0
     call obj_put
-    mov r11, [user_con]
+    pop rdx
+    pop rax
+    pop r11
+    test eax, JF_BACK
+    jnz .next
+    test r11, r11
+    jz .next
+    test rdx, rdx                       ; for && and || after it
+    setnz byte [r11 + TW_SH_FAILED]
     lea rax, [shell_resume]
     call con_call
+.next:
+    add rbx, JB_SIZE
+    inc r12d
+    jmp .job
+.done:
+    pop r12
+    pop rbx
 .out:
     ret
 
-; user_forget(RDI = a terminal): the program run there is killed (ctrl+C
-; there, or it closed)
+; user_forget(RDI = a terminal): ctrl+C there; the program in front there
+; is stopped (not those in the background)
 user_forget:
-    cmp rdi, [user_con]
-    je user_cancel
-    ret
+    push rax
+    xor eax, eax
+    jmp user_stop
 
-; user_cancel: the program running is killed.
-user_cancel:
-    mov rdi, [user_task]
-    test rdi, rdi
-    jz .out
+; user_close(RDI = a terminal): it closed; every program run there is
+; stopped, and said in the first terminal
+user_close:
+    push rax
+    mov eax, 1
+
+; user_stop(RDI = a terminal, EAX = 1 for every job there, 0 for the one in
+; front; pushed RAX): the end of user_forget and user_close
+user_stop:
+    push rbx
+    push rcx
+    push rdi
+    push rsi
+    mov rsi, rdi
+    mov ecx, eax
+    lea rbx, [user_jobs]
+    xor eax, eax
+.job:
+    cmp eax, USER_JOBS
+    jae .done
+    cmp qword [rbx + JB_TASK], 0
+    je .next
+    cmp [rbx + JB_CON], rsi
+    jne .next
+    test ecx, ecx
+    jnz .stop
+    test dword [rbx + JB_FLAGS], JF_BACK
+    jnz .next
+.stop:
+    mov rdi, [rbx + JB_TASK]
+    push rax
+    push rcx
+    push rsi
     call task_kill
-.out:
+    pop rsi
+    pop rcx
+    pop rax
+    test ecx, ecx
+    jz .next
+    mov qword [rbx + JB_CON], 0         ; its terminal is gone: nothing waits
+    lock or dword [rbx + JB_FLAGS], JF_BACK
+.next:
+    add rbx, JB_SIZE
+    inc eax
+    jmp .job
+.done:
+    pop rsi
+    pop rdi
+    pop rcx
+    pop rbx
+    pop rax
     ret
 
 ; user [test]
@@ -2121,14 +2649,48 @@ cmd_user:
     ret
 
 user_list:
+    push rbx
+    push rcx
+    lea rdi, [user_running]             ; the programs running, by name
+    lea rbx, [user_jobs]
+    xor ecx, ecx
+.job:
+    cmp ecx, USER_JOBS
+    jae .listed
+    mov rax, [rbx + JB_TASK]
+    test rax, rax
+    jz .next
+    lea rdx, [user_running + USER_RUNNING - OB_NAME_LEN - 3]
+    cmp rdi, rdx
+    jae .listed
+    lea rdx, [user_running]
+    cmp rdi, rdx
+    je .name
+    mov word [rdi], ', '
+    add rdi, 2
+.name:
+    lea rsi, [rax + OB_NAME]
+.char:
+    lodsb
+    test al, al
+    jz .next
+    stosb
+    jmp .char
+.next:
+    add rbx, JB_SIZE
+    inc ecx
+    jmp .job
+.listed:
+    mov byte [rdi], 0
+    lea rax, [user_running]
+    cmp byte [rax], 0
+    jne .say
     lea rax, [str_user_none]
-    mov rcx, [user_task]
-    test rcx, rcx
-    jz .say
-    lea rax, [rcx + OB_NAME]
 .say:
     KLOG "  programs: %u started, %u ended by a fault, %u stopped; running: %s", qword [user_started], qword [user_faults], qword [user_kills], rax
     KLOG "  their pages: %u, and %u page tables", qword [user_pages], qword [user_tables]
+    pop rcx
+    pop rbx
     ret
 
 ; -----------------------------------------------------------------------------
@@ -2279,6 +2841,7 @@ ut_run:
     lea rdx, [user_name_buf]
     xor ecx, ecx
     xor r8d, r8d
+    xor r9d, r9d                        ; what it wants
     call user_load
     test rax, rax
     jz .none
@@ -2366,6 +2929,10 @@ UT_COUNTS       equ 9
 
 section .rodata
 str_ot_console: db 'console', 0
+align 4
+gift_slots:     dd OT_DESK, SB_DESK, OT_FILES, SB_FILES, OT_NET, SB_NET, OT_STORE, SB_STORE
+                dd OT_SETTINGS, SB_SETTINGS, OT_SOUND, SB_SOUND
+                dd 0, 0
 str_user_oom:   db 'Out of memory for the console', 0
 str_user_ring:  db 'ring', 0
 str_user_mem:   db 'memory', 0
@@ -2407,19 +2974,18 @@ ut_kill_list:   dq str_uts_4, E_KILLED, 0, 20000         ; spinning in ring 3
                 dq 0
 sys_table:      dq sys_exit, sys_ring_enter, sys_ring_new, sys_mem_new, sys_map
                 dq sys_event_new, sys_thread_new, sys_yield, sys_unmap
-                dq sys_spawn, sys_channel_new, sys_window_new
+                dq sys_spawn, sys_channel_new, sys_window_new, sys_sound_new
+                dq sys_tls, sys_futex_wait, sys_futex_wake, sys_info
 
 section .bss
 alignb 8
 console_obj:    resq 1
-user_con:       resq 1                  ; the terminal the program was run in
 spawn_list:     resq 1                  ; requests for the main thread, oldest first
+user_out:       resq 1                  ; spawn_one's channel for user_load's task
 spawn_tail:     resq 1
 spawn_lock:     resd 1
 alignb 8
-user_task:      resq 1                  ; the program 'run' started, a reference
-user_first:     resq 1                  ; its first thread, until user_wait
-user_exit:      resq 1
+user_jobs:      resb USER_JOBS * JB_SIZE ; the programs run from the shell
 user_started:   resq 1
 user_faults:    resq 1
 user_kills:     resq 1
@@ -2431,3 +2997,4 @@ ut_now:         resq UT_COUNTS
 user_pending:   resb 1                  ; the program ended: user_service says so
 user_path_buf:  resb USER_NAME_MAX * 2
 user_name_buf:  resb USER_NAME_MAX
+user_running:   resb USER_RUNNING         ; 'user': their names

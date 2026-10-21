@@ -95,12 +95,12 @@ def jobs(opts):
                    cwd=ROOT, check=True, capture_output=True)
     rodata, data = symbol("kernel_rodata"), symbol("kernel_data")
     script = [
-        "press mem\\n", "until heap:",                 # on the keyboard, the rest serial
+        "press mem\\n", "until large-size",            # on the keyboard, the rest serial
         "type mem ffffffff80000000\\n", "until physical",
         f"type mem {rodata + 64:x}\\n", "until physical",
         f"type mem {data + 64:x}\\n", "until physical",
         "type mem ffff800000100000\\n", "until physical",
-        "type mem 10\\n", "until nothing",
+        "type mem 10\\n", "until mapped",
         "type mem test\\n", "until mem test: kmalloc", "wait 0.5",
         "type disks\\n", "until vol2",
         "type dhcp\\n", "until lease", "wait 1",
@@ -125,6 +125,21 @@ def jobs(opts):
     return jobs
 
 
+def record(log, addr):
+    """The record 'mem at' shows for an address: {field: value}."""
+    lines = log.splitlines()
+    for i, line in enumerate(lines):
+        if re.match(r"^ +address +" + re.escape(addr) + "$", line):
+            got = {}
+            for l in lines[i + 1:]:
+                m = re.match(r"^ +(\S+) {2,}(.*)$", l)
+                if not m or m.group(1) == "address":
+                    break
+                got[m.group(1)] = m.group(2)
+            return got
+    return {}
+
+
 def full(logs):
     rodata, data = symbol("kernel_rodata"), symbol("kernel_data")
     log, err = logs["full"]
@@ -132,17 +147,22 @@ def full(logs):
     result("memory: our own page tables; code" in log and "no identity map" in log,
            "booted on its own page tables")
     result("smp: 8 of 8 threads online" in log, "8 CPUs came up through the firmware tables")
-    result("the only ones with an identity map" in log, "'mem' names both sets of tables")
+    result(re.search(r"^ +tables +0x[0-9a-f]{16}$", log, re.M) is not None
+           and re.search(r"^ +fw-tables +0x[0-9a-f]{16}$", log, re.M) is not None,
+           "'mem' names both sets of tables")
     for addr, what, how in [
             ("0xffffffff80000000", "kernel code", "read-only, executable"),
             (f"0x{rodata + 64:016x}", "kernel constants", "read-only, not executable"),
             (f"0x{data + 64:016x}", "kernel data", "writable, not executable"),
             ("0xffff800000100000", "the direct map of physical memory",
              "writable, not executable, write-back, in a 2.0 MiB page")]:
-        m = re.search(re.escape(addr) + r": (.*)\n    physical \S+, (.*)", log)
-        result(m and m.group(1) == what and m.group(2).startswith(how),
-               f"mem {addr}: {m.group(1) + '; ' + m.group(2) if m else 'no answer'}")
-    result("0x0000000000000010: a null pointer; nothing is mapped there" in log,
+        r = record(log, addr)
+        said = (f"{r.get('access')}, {r.get('runs')}, {r.get('caching')}, "
+                f"in a {r.get('page')} page")
+        result(r.get("what") == what and r.get("mapped") == "yes" and said.startswith(how),
+               f"mem {addr}: {r.get('what')}; {said}" if r else f"mem {addr}: no answer")
+    r = record(log, "0x0000000000000010")
+    result(r.get("what") == "a null pointer" and r.get("mapped") == "no",
            "mem 10: a null pointer, nothing mapped")
     check_mem_test(log, 8, "8 CPUs")
     result("disk1: NVMe" in log and "vol2" in log, "the NVMe disk and its volumes")

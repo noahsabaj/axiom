@@ -74,6 +74,73 @@ rtc_read:
     pop rax
     ret
 
+; rtc_epoch: rtc_epoch_us, from the clock as rtc_read left it (taken as UTC)
+; less the TSC's microseconds now, so that the time is it plus the TSC's
+; (SI_CLOCK). Days from the date by Hinnant's days_from_civil. Preserves all.
+rtc_epoch:
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    mov eax, [rtc_year]
+    mov ecx, [rtc_mon]
+    cmp ecx, 2                          ; the year from March
+    ja .march
+    dec eax
+.march:
+    xor edx, edx
+    mov ebx, 400
+    div ebx
+    mov esi, eax                        ; ESI = the era, EDI = the year in it
+    mov edi, edx
+    lea eax, [rcx - 3]                  ; the month from March
+    cmp ecx, 2
+    ja .mp
+    lea eax, [rcx + 9]
+.mp:
+    imul eax, eax, 153                  ; the day of the year
+    add eax, 2
+    xor edx, edx
+    mov ebx, 5
+    div ebx
+    add eax, [rtc_day]
+    dec eax
+    mov ebx, eax
+    imul eax, edi, 365                  ; the day of the era
+    add ebx, eax
+    mov eax, edi
+    shr eax, 2
+    add ebx, eax
+    mov eax, edi
+    xor edx, edx
+    mov ecx, 100
+    div ecx
+    sub ebx, eax
+    imul rax, rsi, 146097               ; days since 1970
+    add rax, rbx
+    sub rax, 719468
+    imul rax, rax, 86400
+    imul rcx, [rtc_hour], 3600
+    add rax, rcx
+    imul rcx, [rtc_min], 60
+    add rax, rcx
+    add rax, [rtc_sec]
+    imul rbx, rax, 1000000
+    RDTSC64
+    xor edx, edx
+    div qword [tsc_per_us]
+    sub rbx, rax
+    mov [rtc_epoch_us], rbx
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+    ret
+
 ; rtc_get(AL = register, BL = status B) -> EAX
 rtc_get:
     out 0x70, al
@@ -127,3 +194,4 @@ rtc_day:        resq 1
 rtc_hour:       resq 1
 rtc_min:        resq 1
 rtc_sec:        resq 1
+rtc_epoch_us:   resq 1                  ; 1970's microsecond less the TSC's (rtc_epoch)
