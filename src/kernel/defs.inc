@@ -27,6 +27,9 @@ PC_CORE         equ 112                 ; core number within its kind
 PC_THREAD       equ 120                 ; SMT thread within the core
 PC_TSS          equ 128                 ; 104-byte TSS
 PC_TLB_GEN      equ 232                 ; last TLB shootdown this CPU answered
+PC_TLB_LAZY     equ 240                 ; dword: 1 asleep in the idle HLT, 2 and it
+                                        ; owes a whole TLB flush when it wakes
+PC_TLB_WAKES    equ 248                 ; whole flushes it owed as it woke
 ; the scheduler's part (sched.asm)
 PC_CURRENT      equ 256                 ; the thread running here
 PC_IDLE_TH      equ 264                 ; this CPU's idle thread
@@ -37,6 +40,7 @@ PC_RQ_LEN       equ 292                 ; dword: threads on the run queue
 PC_BUSY         equ 296                 ; dword: 1 while a thread other than idle runs
 PC_RESCHED      equ 300                 ; byte: switch on the way out of the interrupt
 PC_SCHED_ON     equ 301                 ; byte: this CPU takes threads
+PC_POLLING      equ 302                 ; byte: idle, watching PC_RESCHED: no IPI needed
 PC_SKIND        equ 304                 ; the kind the scheduler goes by (CPU_KIND_*)
 PC_SIBLING      equ 312                 ; its SMT sibling's index, or -1
 PC_MIN_VR       equ 320                 ; the least virtual runtime here, never falls

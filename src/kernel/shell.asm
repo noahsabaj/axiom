@@ -2080,7 +2080,7 @@ commands:
     COMMAND 'crypto',   cmd_crypto,   'check the TLS crypto against its test vectors, and time it'
     COMMAND 'log',      cmd_log,      'log [save|on|off]: AXIOM.LOG on the boot stick'
     COMMAND 'demo',     cmd_demo,     'pause or resume the Mandelbrot zoom'
-    COMMAND 'bench',    cmd_bench,    'one core against all of them'
+    THING   'bench',    bench_actions, 'what things cost, measured: boot, scheduler, memory, capabilities, drawing, files'
     COMMAND 'uptime',   cmd_uptime,   'time since power-on'
     COMMAND 'echo',     cmd_echo,     'echo <words>: them, as a line'
     COMMAND 'clear',    cmd_clear,    'clear the console (also ctrl+L)'

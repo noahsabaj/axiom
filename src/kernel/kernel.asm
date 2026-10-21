@@ -152,6 +152,7 @@ section .text
 %include "lxtty.asm"
 %include "lxproc.asm"
 %include "lxpipe.asm"
+%include "bench.asm"
 %include "boot.asm"
 
 section .data

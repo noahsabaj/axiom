@@ -45,6 +45,7 @@ SCHED_SLICE_US  equ 4000
 SCHED_GRAN_US   equ 1000                ; how far behind a woken thread must be to preempt
 SCHED_BAL_US    equ 10000               ; how often a thread on the wrong kind of core looks
 SCHED_HOUSE_US  equ 50000               ; a busy CPU counts its time at least this often
+SCHED_POLL_US   equ 50                  ; an idle CPU watches for work this long before HLT
 
 LAPIC_TIMER_INIT equ 0x380
 LAPIC_TIMER_CUR  equ 0x390
@@ -70,6 +71,8 @@ sched_init:
     mov [sched_bal], rcx
     imul rcx, rax, SCHED_HOUSE_US
     mov [sched_house], rcx
+    imul rcx, rax, SCHED_POLL_US
+    mov [sched_poll], rcx
 
     mov dword [sched_area], 512         ; FXSAVE's
     test dword [cpu_f1_ecx], 1 << 26    ; XSAVE: cpu_setup_local turned it on
@@ -1002,6 +1005,7 @@ schedule_locked:
     mov r12, [gs:PC_SELF]
     mov rbx, [r12 + PC_CURRENT]
     mov byte [r12 + PC_RESCHED], 0
+    mov byte [r12 + PC_POLLING], 0      ; idle watches again next time
     RDTSC64
     mov r13, rax                        ; now
     call sched_account
@@ -1290,10 +1294,25 @@ sched_arm:
 .keep:
     ret
 
-; sched_timer_set(R12, RAX = TSC deadline or 0, R13 = now): this CPU's timer
+; sched_timer_set(R12, RAX = TSC deadline or 0, R13 = now): this CPU's timer.
+; One already set for sooner stays: the tick it brings finds nothing due and
+; sets the right one, once, where setting it at each switch would cost a
+; WRMSR (in a VM, an exit) every time.
 sched_timer_set:
     cmp rax, [r12 + PC_TIMER_AT]
     je .out
+    push rcx
+    mov rcx, [r12 + PC_TIMER_AT]
+    test rcx, rcx
+    jz .set                             ; none set (or it has fired)
+    cmp rcx, r13
+    jb .set                             ; past due, and no tick yet: again
+    test rax, rax
+    jz .keep                            ; none wanted: one tick, then none
+    cmp rcx, rax
+    jbe .keep
+.set:
+    pop rcx
     mov [r12 + PC_TIMER_AT], rax
     push rcx
     push rdx
@@ -1328,6 +1347,9 @@ sched_timer_set:
     pop rdx
     pop rcx
 .out:
+    ret
+.keep:
+    pop rcx
     ret
 
 ; -----------------------------------------------------------------------------
@@ -1725,6 +1747,8 @@ sched_kick:
     jnz .out                            ; already asked
     cmp rdi, [gs:PC_SELF]
     je .out                             ; ours: the interrupt's end, or the caller
+    cmp byte [rdi + PC_POLLING], 1      ; it is watching for that (after the
+    je .out                             ; XCHG: see sched_idle_loop)
     mov edi, [rdi + PC_APIC_ID]
     mov esi, ICR_FIXED | VEC_RESCHED
     call lapic_send_ipi
@@ -1748,6 +1772,8 @@ sched_kick:
     test al, al
     jnz .out                            ; already woken
     cmp rdi, [gs:PC_SELF]
+    je .out
+    cmp byte [rdi + PC_POLLING], 1
     je .out
     mov edi, [rdi + PC_APIC_ID]
     mov esi, ICR_FIXED | VEC_RESCHED
@@ -1890,8 +1916,38 @@ sched_idle_loop:
     jnz .run
     cmp qword [zombies], 0
     jne .reap
+    cmp byte [r12 + PC_POLLING], 2      ; watched already: sleep
+    je .halt
+    ; Watch for work a while before HLT: in a VM, waking from HLT by an IPI
+    ; costs the waker and this CPU an exit each. While PC_POLLING is 1, a
+    ; waker sets PC_RESCHED and sends nothing; both sides use a locked XCHG
+    ; and then read the other's flag, so either the waker sees this CPU not
+    ; polling (and sends the IPI) or this CPU sees PC_RESCHED. A switch
+    ; away (schedule_locked) sets it back to 0.
+    mov byte [r12 + PC_POLLING], 1
+    sti
+    RDTSC64
+    mov rcx, rax
+    add rcx, [sched_poll]
+.poll:
+    pause
+    cmp byte [r12 + PC_RESCHED], 0
+    jne .polled
+    cmp dword [r12 + PC_RQ_LEN], 0
+    jne .polled
+    RDTSC64
+    cmp rax, rcx
+    jb .poll
+.polled:
+    mov al, 2
+    xchg al, [r12 + PC_POLLING]         ; a full barrier, then look again
+    jmp sched_idle_loop
+.halt:
+    mov byte [r12 + PC_POLLING], 0
+    mov dword [r12 + PC_TLB_LAZY], 1    ; asleep: a shootdown need not wake it
     sti                                 ; STI's shadow makes STI; HLT atomic
     hlt
+    call tlb_wake                       ; (isr_common did, unless an NMI woke it)
     jmp sched_idle_loop
 .run:
     lea rdi, [r12 + PC_RQ_LOCK]
@@ -2009,6 +2065,7 @@ sched_gran:     resq 1
 sched_credit:   resq 1
 sched_bal:      resq 1
 sched_house:    resq 1
+sched_poll:     resq 1
 sched_tsize:    resq 1                  ; bytes above a thread's stack
 stack_cache:    resq 1                  ; ended threads' mappings, linked by their first qword
 stack_cached:   resq 1

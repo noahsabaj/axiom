@@ -59,11 +59,14 @@ BI_SLOT_TRY     equ 506                 ; byte: the slot AxiomTry named for a tr
 BI_SLOT_ERR     equ 507                 ; byte: why a slot was passed over (SLOT_*): bits 3:0
                                         ; AxiomTry's, bits 7:4 AxiomSlot's
 BI_TRIAL_S      equ 508                 ; word: the seconds AxiomTry gives the trial (0: unsaid)
-BI_EXT          equ 510                 ; word: 1 if the loader filled what follows (a loader
-                                        ; from before BI_SETTINGS left the block at 512 bytes)
+BI_EXT          equ 510                 ; word: the block's bytes as the loader filled it (its
+                                        ; BI_SIZE); 0 from a loader whose block was 512 bytes
 BI_SETTINGS     equ 512                 ; SETTINGS.TXT from that volume (physical), 0 if none
 BI_SETTINGS_LEN equ 520                 ; its bytes (at most 8 KiB)
-BI_SIZE         equ 528
+BI_TSC_DISPLAY  equ 528                 ; TSC: the display's mode set
+BI_TSC_CALIB    equ 536                 ; TSC: the config tables, the boot volume, the TSC
+BI_TSC_TABLES   equ 544                 ; TSC: the kernel copied, its page tables built
+BI_SIZE         equ 552
 
 ; A/B updates (src/kernel/update.asm): kernels in /EFI/AXIOM/KERNEL.A and
 ; KERNEL.B on the boot volume. The UEFI variables AxiomTry (a trial, once)

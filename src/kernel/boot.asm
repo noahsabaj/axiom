@@ -10,6 +10,7 @@ section .text
 kernel_main:
     cli
     cld
+    BOOTMARK BM_ENTRY
     mov [boot_info], rdi
     mov [boot_rsp], rsp
     mov rax, 'AXIOMBI1'
@@ -43,6 +44,7 @@ kernel_main:
     call harness_init                   ; a test run the loader found (hp-1)
     call update_init                    ; a new kernel on trial: its watchdog
     call cfg_init                       ; the settings: SETTINGS.TXT, or the defaults
+    BOOTMARK BM_CPU
     lea rax, [cpu_brand]
     KLOG "cpu: %s, TSC %u MHz", rax, qword [tsc_mhz]
 
@@ -53,6 +55,7 @@ kernel_main:
     call vmm_init
     call heap_init
     call tlb_init
+    BOOTMARK BM_MEMORY
     lea rax, [kernel_rodata]
     mov rcx, KERNEL_BASE
     sub rax, rcx
@@ -65,6 +68,7 @@ kernel_main:
     KLOG "memory: our own page tables; code %b read-only, constants %b, data %b not executable; no identity map", rax, rdx, r8
     call gfx_init
     call ui_init
+    BOOTMARK BM_DISPLAY
     mov byte [log_to_screen], 1
     KLOG "Axiom 0.1 - first light. Written in assembly, nothing else underneath."
     mov rax, [boot_info]
@@ -82,15 +86,19 @@ kernel_main:
     call pmm_free
     call tss_install
     call idt_use_ist
+    BOOTMARK BM_STACKS
 
     call acpi_init
+    BOOTMARK BM_ACPI
     mov eax, [cpu_count]
     mov ecx, [acpi_table_count]
     mov edx, [ioapic_count]
     KLOG "acpi: %u tables, %u processors in the MADT, %u I/O APIC(s)", rcx, rax, rdx
     call smbios_init
     call battery_init                   ; the EC, and a board whose battery Axiom holds
+    BOOTMARK BM_SMBIOS
     call pmm_release_boot_services
+    BOOTMARK BM_FIRMWARE
     mov rax, [pmm_free_pages]
     shl rax, 12
     KLOG "memory: boot services reclaimed, %b free", rax
@@ -105,23 +113,31 @@ kernel_main:
     call look_make                      ; and the desktop's look (look.asm)
     call sched_init                     ; from here on, this is the thread 'main'
     call async_boot                     ; the thread 'async': timers, rings
+    BOOTMARK BM_SCHED
     call smp_start
     call sched_topology
+    BOOTMARK BM_SMP
     mov eax, [cpus_online]
     mov ecx, [cpu_count]
     KLOG "smp: %u of %u threads online in %u us", rax, rcx, qword [smp_us]
     call pci_init
     call vmd_init                       ; and what a VMD hides (hp-1's drive)
+    BOOTMARK BM_PCI
     call iommu_init                     ; before any driver lets a device do DMA
+    BOOTMARK BM_IOMMU
     mov eax, [pci_count]
     KLOG "pci: %u functions", rax
     call kbd_init
     call serial_irq_init                ; what COM1 types, as it comes
     call usb_init
+    BOOTMARK BM_USB
     call disk_init
+    BOOTMARK BM_DISKS
     call crypto_boot
+    BOOTMARK BM_CRYPTO
     call net_init
     call snd_boot                       ; the sound controller, and the mixer
+    BOOTMARK BM_NET
     call mandel_init
     mov al, [mandel_ok]
     cmp byte [sm_no_demo], 0            ; the firmware says not to (tests)
@@ -131,11 +147,13 @@ kernel_main:
     mov [demo_on], al
     call ui_ready
     call shell_init
+    BOOTMARK BM_SHELL
     sti
     mov byte [ints_on], 1
     call store_init                     ; interrupts on: the drive completes by them
     call rtw_start                      ; the Wi-Fi card's firmware, from the boot volume
     call update_start                   ; what kernel this is; a trial's outcome
+    BOOTMARK BM_STORE
 
     RDTSC64
     mov [next_refresh], rax

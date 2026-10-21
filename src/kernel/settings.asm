@@ -211,8 +211,8 @@ cfg_init:
     jmp .next
 .done:
     mov rax, [boot_info]                ; SETTINGS.TXT, as the loader read it
-    cmp word [rax + BI_EXT], 0          ; (a loader from before it: none)
-    je .looked
+    cmp word [rax + BI_EXT], BI_SETTINGS_LEN + 8 ; (a loader from before it: none)
+    jb .looked
     mov rcx, [rax + BI_SETTINGS_LEN]
     mov rsi, [rax + BI_SETTINGS]
     test rcx, rcx

@@ -303,6 +303,8 @@ def main():
     ap.add_argument("--internal", action="store_true", help="--stick's image as the "
                     "machine's own NVMe drive, not a USB stick (as hp-1 starts Axiom from "
                     "its own disk's EFI partition)")
+    ap.add_argument("--esp", help="boot this folder instead of build/esp (a "
+                    "build kept aside, to compare with)")
     ap.add_argument("--trace", action="store_true", help="say how long each step of "
                     "--script took")
     ap.add_argument("--script", help="monitor commands after the keys, separated "
@@ -328,7 +330,7 @@ def main():
                 "-drive", f"file={opts.stick},if=none,id=bootstick,format=raw",
                 "-device", "usb-storage,bus=bootx.0,drive=bootstick,bootindex=0"]
     else:
-        boot = ["-drive", f"format=raw,file=fat:{BUILD / 'esp'},snapshot=on"]
+        boot = ["-drive", f"format=raw,file=fat:{opts.esp or BUILD / 'esp'},snapshot=on"]
     qemu = find_qemu()
     serial = BUILD / opts.serial
     accel = pick_accel(qemu, opts.accel)

@@ -22,7 +22,10 @@ the firmware left 5-level paging on.
    `SimpleFileSystem`, read only, into 8 KiB of loader data
    (`BI_SETTINGS`, `BI_SETTINGS_LEN`); none, and the kernel starts from its
    defaults.
-4. Calibrate the TSC against the firmware's `Stall` (50 ms).
+4. The TSC's rate: from CPUID leaf 0x15 (crystal × ratio) when the CPU
+   gives all of it and a 5 ms `Stall` agrees within a factor of two; else
+   measured against a 50 ms `Stall`. The loader keeps a TSC mark after each
+   step for `bench boot`.
 5. Copy the embedded `kernel.bin` (an `incbin`) into fresh pages, zero its
    `.bss`, and build page tables:
    - `PML4[0]`: identity map of physical memory in 2 MiB pages, needed for
@@ -89,7 +92,8 @@ wheel), destroy windows that closed, draw what was printed into each
 terminal, compose the screen where it changed, and otherwise park
 the thread `main` (`thread_park_until`) until the next deadline: the next
 refresh or frame, the next key repeat, the next network timer, or 4 ms while
-a USB controller or a network card needs polling. Any device interrupt
+a USB controller or a network card needs polling (a card, every quarter of a
+millisecond for 50 ms after a frame comes or goes). Any device interrupt
 (vectors `0x20` to `0x2F`: a key, a USB event, a network frame, pointer
 movement) unparks it early. While it is parked, the BSP runs other threads,
 or idles.
@@ -131,7 +135,11 @@ or idles.
   `tlb_shootdown` sends `VEC_TLB` to every other CPU and waits for them all
   (`invlpg` per page, or a full flush past 64), and only then gives the pages
   and page tables back. A CPU waiting for the lock, or for a job to finish,
-  answers other shootdowns as it waits.
+  answers other shootdowns as it waits. A CPU asleep in its idle `hlt`
+  (`PC_TLB_LAZY` = 1) is neither sent the IPI nor waited for: the shootdown
+  marks it (1 → 2, by `cmpxchg`), and it flushes its whole TLB as it wakes,
+  in `isr_common` before any handler runs, so it never touches a page that
+  was taken away. The others then get the IPI one by one.
 - **The heap**: `kmalloc(bytes)` gives zeroed, 16-byte aligned memory; up to
   1 KiB it comes from slabs (a page from pmm each, through the direct map,
   one object size per slab: 16 to 1024 bytes), larger from a vm mapping of
@@ -194,6 +202,11 @@ or idles.
   run on, and comes back at most half a slice ahead of the least-run thread,
   preempting the running one if it is 1 ms or more behind it: so the shell
   answers at once while every CPU is busy.
+- **Idle**: a CPU with nothing to run watches its `PC_RESCHED` and run queue
+  for 50 us before `hlt`. While it watches (`PC_POLLING` = 1), a CPU waking
+  a thread there sets `PC_RESCHED` and sends no IPI. Both sides use a locked
+  XCHG and then read the other's flag, so a wake-up is never lost. In a VM, a
+  wake from `hlt` by an IPI costs an exit on each side: 10 us against 0.4.
 - **Where a thread goes**: where it is pinned (`TH_PIN`), where it is hinted
   once (`TH_HINT`), or the CPU that costs least: 64 for each thread there,
   24 for the wrong kind of core for its class (perf: P-cores; eff: E-cores;
@@ -509,7 +522,9 @@ into) on screen and serial.
   page in bits the unit ignores (52-61), so two commands sharing a page
   each leave it as they found it. Unmapping a page forgets it in every
   translating unit's IOTLB (page-selective if the unit can, else the whole
-  domain) before it returns. On a unit that does not snoop the caches,
+  domain) before it returns; a buffer of many pages (`iommu_map_va`,
+  `iommu_unmap_va`) is forgotten once for all of them, as a unit in caching
+  mode (QEMU's) is told once of all the pages mapped. On a unit that does not snoop the caches,
   every table and entry written is flushed with `clflush`.
 - **Faults** are recorded by the interrupt (or by `iommu_faults` when
   asked): who (bus, device, function), reading or writing what page, and
@@ -609,7 +624,8 @@ into) on screen and serial.
   the shortest `NAME~n.EXT` alias nothing else in the directory has, and an 8.3
   name in one case is stored as 8.3 with the lowercase flags Windows uses.
   There is one cached FAT sector (written to every FAT copy) and one cached
-  directory sector; file data goes straight to its clusters. Every operation
+  directory sector; file data goes straight to its clusters, a run of
+  clusters one after another read in one request (up to 1 MiB). Every operation
   ends by flushing both caches, updating FSInfo's next-free hint and telling
   the drive to flush. Replacing a file empties its entry before freeing the
   old clusters, so an interrupted write leaves an empty file, not a dangling
@@ -769,7 +785,8 @@ off. `log` shows the state; `log save`, `log on`, `log off`.
   (With 64, a burst of small segments between two polls overran the ring,
   and each lost one cost TCP a retransmission timeout: over a second.)
   MSI-X or MSI wakes the main loop, which polls the ring; without either
-  (QEMU's 8139) it polls every 4 ms.
+  (QEMU's 8139) it polls every 4 ms, and every 0.25 ms for 50 ms after a
+  frame came in or went out (a round trip took 4 ms, now about 0.3).
 - **Stack** (`net.asm`): drivers register an interface with a table of
   operations (send, poll, link, ack) and hand frames to `net_receive`. The
   first interface carries the one IPv4 address. ARP keeps 16 neighbours for
