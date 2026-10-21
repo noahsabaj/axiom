@@ -37,6 +37,7 @@ kernel_main:
     call cpu_setup_local
     call cpu_telemetry_init
     KLOG "Axiom 0.1 - first light"
+    call cpu_idle_init
     call rtc_read
     call rtc_epoch                      ; the time programs are told (SI_CLOCK)
     KLOG "clock:%04u-%02u-%02u %02u:%02u:%02u", qword [rtc_year], qword [rtc_mon], qword [rtc_day], qword [rtc_hour], qword [rtc_min], qword [rtc_sec]
