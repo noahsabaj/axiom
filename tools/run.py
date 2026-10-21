@@ -314,6 +314,9 @@ def main():
                     "down|up' presses or lets go of one key)")
     opts = ap.parse_args()
     fresh = opts.port == 0 and not opts.vars
+    sys.path.insert(0, str(ROOT / "tools"))
+    import space
+    space.check()                       # stops before the disk fills
 
     if opts.stick and opts.internal:
         # the image as the machine's own disk: not removable; writes stay

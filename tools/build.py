@@ -73,6 +73,9 @@ def main():
     ap.add_argument("--small", action="store_true", help="the kernel with -Ox: NASM sizes "
                     "every jump, in some 200 passes (a minute), for a kernel 4%% smaller")
     opts = ap.parse_args()
+    sys.path.insert(0, str(ROOT / "tools"))
+    import space
+    space.check()                       # stops before the disk fills
 
     boot = BUILD / "esp" / "EFI" / "BOOT"
     boot.mkdir(parents=True, exist_ok=True)

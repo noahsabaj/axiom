@@ -8,7 +8,9 @@ process of its own; QEMU boots share the host's threads through
 tools/test/qemu.py, as many vCPUs at once as the host has idle threads to
 spare, so the timings inside the guests stay honest. Each
 suite's output goes to build/test/<suite>.txt; the failures are printed,
-and a line per suite with how long it took. --quick skips the TCG boots.
+and a line per suite with how long it took. A suite that passes has its disk
+images deleted (tools/space.py); one that fails keeps them. --quick skips
+the TCG boots.
 The sbc suite is left out: Bluetooth is parked.
 """
 import argparse
@@ -73,6 +75,10 @@ def main():
                 print(f"       {line}")
             if code:
                 failed.append(name)
+            else:
+                # it passed: its disk images are made again on the next run
+                for img in (OUT / name).rglob("*.img"):
+                    img.unlink(missing_ok=True)
     print(f"{len(names) - len(failed)} of {len(names)} suites passed in "
           f"{time.monotonic() - start:.0f} s" +
           (f"; failed: {' '.join(failed)} (build/test/<suite>.txt)" if failed else ""))
