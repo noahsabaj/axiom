@@ -1054,7 +1054,9 @@ A TLS 1.3 client and server (RFC 8446) and the crypto under it.
   its signature on the one below must hold. An unknown critical extension
   is refused. Dates get a day of slack (the RTC holds local time), and a
   clock before 2025 is reported rather than trusted. Each failure has its
-  own message and TLS alert.
+  own message and TLS alert. Reading the DER, its dates and the name check
+  are in Rust (`src/rust/src/x509.rs`); the chain is checked in the
+  assembly.
 - **The trusted roots** (`gen/roots.asm`, made by `tools/mkroots.py`): the
   136 CAs of Mozilla's list, as certifi ships it, each reduced to the
   SHA-256 of its Name, its key and its name, 55 KB in all. `x509_extra`
@@ -1988,13 +1990,19 @@ are fast because of the instructions they use (AES-NI, SHA, the blits).
   through the assembly's own wrappers, against the assembly it replaced,
   kept there (`reference.asm`), case for case: answers, flags, where RSI is
   left, the bytes written and the registers kept (`tools/test/json`: some
-  22,000 cases).
+  22,000 cases). Host tests whose shims assemble kernel files that call the
+  Rust (`pki`, `tlsclient`) reach it the same way, through
+  `tools/test/rusthost.inc`'s forwarders and `rusthost.py`.
 
 The pieces so far: `json` (was `json.asm`); `text` (was `text.asm`: UTF-8
 a byte at a time, and each code point's glyph in the console font, whose
 `G_` names a build script reads from `gen/font.inc`; `tools/test/text`
 tries every code point, every sequence of one or two bytes, and longer
-ones over each range's edges).
+ones over each range's edges); `x509` (`x509.asm`'s reading of
+certificates: the DER into the CERT the chain check uses, `x509_unix`, and
+whether a certificate names the host; `tools/test/x509` holds it to the
+assembly on Windows' own certificates, 20,000 made field by field and
+20,000 of those changed, and some 570,000 names).
 
 ## Conventions
 

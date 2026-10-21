@@ -2,7 +2,9 @@
 ;  shim.asm - host test shim for what checks certificates (nasm -f win64):
 ;  src/kernel/sha256.asm, sha512.asm, rand.asm, bignum.asm, pubkey.asm and
 ;  x509.asm
-;  (with gen/roots.asm), included unchanged, linked into a DLL with host.c.
+;  (with gen/roots.asm), included unchanged, linked into a DLL with host.c;
+;  x509.asm's Rust (src/rust/src/x509.rs) through rusthost.inc's forwarders,
+;  which run.py points at the Rust built for the host.
 ;  Exports:
 ;    kc      u64 kc(void *target, const u64 args[6], int *cf): RDI, RSI,
 ;            RDX, RCX, R8, R9 from args, call target, return RAX and store
@@ -28,12 +30,18 @@ global mont_exp, bn_load, bn_store, sig_verify, sig_sign, ec_public
 global x509_chain, x509_leaf, x509_parse
 global x509_unix, x509_extra, x509_anchor, x509_depth, x509_key, x509_roots
 
+%include "macros.inc"
+%include "rusthost.inc"
 %include "sha256.asm"
 %include "sha512.asm"
 %include "rand.asm"
 %include "bignum.asm"
 %include "pubkey.asm"
 %include "x509.asm"
+
+FORWARD rs_x509_parse
+FORWARD rs_x509_unix
+FORWARD rs_x509_name
 
 section .text
 

@@ -53,6 +53,9 @@ MODULES = ("sha256.asm", "sha512.asm", "aesgcm.asm", "x25519.asm", "rand.asm", "
            "pubkey.asm", "x509.asm", "tls.asm")
 sys.path.insert(0, str(ROOT / "tools"))
 import mkroots  # noqa: E402
+sys.path.insert(0, str(ROOT / "tools" / "test"))
+import rusthost  # noqa: E402
+RUST = ["rs_x509_parse", "rs_x509_unix", "rs_x509_name"]       # x509.asm's, in Rust
 
 EV_READY, EV_CLOSED, EV_FAIL = 1, 2, 4
 TLE = {1: "RNG", 2: "PROTO", 3: "VERSION", 4: "CIPHER", 5: "HRR", 6: "MAC", 7: "FINISHED",
@@ -989,21 +992,25 @@ def main():
                     "section .text progbits align=16\n"
                     "section .rodata progbits align=64 follows=.text\n"
                     "section .data progbits align=64 follows=.rodata\n"
-                    "section .bss nobits align=64\nsection .text\n" +
-                    "".join(f'%include "{m}"\n' for m in MODULES))
+                    "section .bss nobits align=64\nsection .text\n%include \"macros.inc\"\n" +
+                    "".join(f'%include "{m}"\n' for m in MODULES) +
+                    "".join(f"{name}:\n" for name in RUST) + "    ret\n")   # (the Rust: not here)
     run([nasm, "-f", "bin", "-w-reloc-abs-qword", "-w-reloc-abs-dword", "-w-reloc-rel-dword",
          "-I", kinc, "-o", OUT / "kernel_like.bin", stub], "nasm -f bin (kernel layout)")
     print("kernel layout: " + ", ".join(MODULES) + " assemble")
     obj = OUT / "shim.obj"
     dll = OUT / "tls_client.dll"
-    run([nasm, "-f", "win64", "-I", kinc, "-o", obj, HERE / "shim.asm"], "nasm -f win64")
+    run([nasm, "-f", "win64", "-I", kinc, "-I", str(HERE.parent) + os.sep, "-o", obj,
+         HERE / "shim.asm"], "nasm -f win64")
     run([cc, "-O2", "-Wall", "-Wextra", "-shared", "-static", "-o", dll, HERE / "host.c", obj],
         "gcc")
     certs = OUT / "certs"
     make_certs(certs)
     print(f"server: Python {sys.version.split()[0]}, {ssl.OPENSSL_VERSION}")
 
-    cl = Client(ctypes.CDLL(str(dll)))
+    lib = ctypes.CDLL(str(dll))
+    rusthost.forward(rusthost.build(OUT), lib, RUST)
+    cl = Client(lib)
     rng = random.Random(opts.seed)
     ca = mkroots.parse(next(mkroots.pem_certs((certs / "ca.pem").read_text())))
     extra = ctypes.create_string_buffer(mkroots.table([ca]))

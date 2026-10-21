@@ -43,6 +43,9 @@ GCC = (r"C:\Users\noahs\AppData\Local\Microsoft\WinGet\Packages"
 MODULES = ("sha256.asm", "sha512.asm", "rand.asm", "bignum.asm", "pubkey.asm", "x509.asm")
 sys.path.insert(0, str(ROOT / "tools"))
 import mkroots  # noqa: E402
+sys.path.insert(0, str(ROOT / "tools" / "test"))
+import rusthost  # noqa: E402
+RUST = ["rs_x509_parse", "rs_x509_unix", "rs_x509_name"]       # x509.asm's, in Rust
 
 FN = {n: i for i, n in enumerate(
     "sha384 sha512 mont_setup mont_mul mont_in mont_out mont_add mont_sub mont_exp "
@@ -1075,17 +1078,20 @@ def main():
                     "section .text progbits align=16\n"
                     "section .rodata progbits align=64 follows=.text\n"
                     "section .data progbits align=64 follows=.rodata\n"
-                    "section .bss nobits align=64\nsection .text\n" +
-                    "".join(f'%include "{m}"\n' for m in MODULES))
+                    "section .bss nobits align=64\nsection .text\n%include \"macros.inc\"\n" +
+                    "".join(f'%include "{m}"\n' for m in MODULES) +
+                    "".join(f"{name}:\n" for name in RUST) + "    ret\n")   # (the Rust: not here)
     run([nasm, "-f", "bin", "-w-reloc-abs-qword", "-w-reloc-abs-dword", "-w-reloc-rel-dword",
          "-I", kinc, "-o", OUT / "kernel_like.bin", stub], "nasm -f bin (kernel layout)")
     print("kernel layout: " + ", ".join(MODULES) + " assemble")
     obj = OUT / "shim.obj"
     dll = OUT / "pki.dll"
-    run([nasm, "-f", "win64", "-I", kinc, "-o", obj, HERE / "shim.asm"], "nasm -f win64")
+    run([nasm, "-f", "win64", "-I", kinc, "-I", str(HERE.parent) + os.sep, "-o", obj,
+         HERE / "shim.asm"], "nasm -f win64")
     run([cc, "-O2", "-Wall", "-Wextra", "-shared", "-static", "-o", dll, HERE / "host.c", obj], "gcc")
     print(f"references: Python {sys.version.split()[0]}, {ossl('version')}")
     k = Kernel(dll)
+    rusthost.forward(rusthost.build(OUT), k.d, RUST)
     rng = random.Random(opts.seed)
     tmp = OUT / "work"
     tmp.mkdir(exist_ok=True)
