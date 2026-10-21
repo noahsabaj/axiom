@@ -1945,8 +1945,7 @@ sched_idle_loop:
 .halt:
     mov byte [r12 + PC_POLLING], 0
     mov dword [r12 + PC_TLB_LAZY], 1    ; asleep: a shootdown need not wake it
-    sti                                 ; STI's shadow makes STI; HLT atomic
-    hlt
+    call cpu_idle                       ; STI; HLT or STI; MWAIT, atomic
     call tlb_wake                       ; (isr_common did, unless an NMI woke it)
     jmp sched_idle_loop
 .run:

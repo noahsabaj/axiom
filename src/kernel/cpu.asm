@@ -53,6 +53,12 @@ cpu_detect:
     mov [cpu_family], ecx
     mov [cpu_model], edx
 
+    cmp dword [cpu_max_leaf], 5
+    jb .no_leaf5
+    mov eax, 5                          ; MONITOR/MWAIT: the C-states there are
+    cpuid
+    mov [cpu_f5_edx], edx
+.no_leaf5:
     cmp dword [cpu_max_leaf], 6
     jb .no_leaf6
     mov eax, 6
@@ -274,7 +280,10 @@ cpu_setup_local:
     and eax, 0xFF                       ; highest performance -> maximum
     shl eax, 8
     shr edx, 24                         ; lowest performance -> minimum
-    or eax, edx                         ; desired 0 (autonomous), EPP 0 (performance)
+    or eax, edx                         ; desired 0 (autonomous),
+    movzx edx, byte [cpu_epp]           ; and the energy-performance preference
+    shl edx, 24
+    or eax, edx
     xor edx, edx
     mov ecx, MSR_HWP_REQUEST
     call wrmsr_safe
@@ -377,6 +386,18 @@ cpu_sample_local:
     mul qword [tsc_mhz]                 ; MHz = tsc_mhz * dA / dM
     div r8
     mov [rbx + PC_MHZ], rax
+    RDTSC64                             ; the share of the time in C0:
+    mov rcx, rax                        ;   delta M / delta TSC (MPERF counts
+    sub rax, [rbx + PC_TSC_LAST]        ;   at the TSC's rate, but only in C0)
+    mov [rbx + PC_TSC_LAST], rcx
+    xchg rax, r8
+    imul rax, rax, 1000
+    xor edx, edx
+    div r8
+    mov ecx, 1000
+    cmp rax, rcx
+    cmova rax, rcx
+    mov [rbx + PC_C0], rax
 .no_freq:
     test dword [cpu_f6_eax], 1          ; digital thermal sensor
     jz .done
@@ -472,6 +493,87 @@ cpu_package_power:
     ret
 
 ; -----------------------------------------------------------------------------
+;  Idle: an idle CPU sleeps in HLT (C1), or, with deep idle on, in MWAIT's
+;  deepest C-state (CPUID 5): only where nothing Axiom relies on stops
+;  there, the local APIC's timer (ARAT) and the TSC (invariant). The
+;  energy-performance preference (HWP) goes with it: what the cores trade
+;  for speed when they run.
+; -----------------------------------------------------------------------------
+; cpu_idle_init (BSP): the deepest C-state's MWAIT hint; deep idle on if
+; there is one
+cpu_idle_init:
+    test dword [cpu_f1_ecx], 1 << 3     ; MONITOR/MWAIT
+    jz .out
+    test dword [cpu_f6_eax], 1 << 2     ; ARAT
+    jz .out
+    test dword [cpu_e7_edx], 1 << 8     ; invariant TSC
+    jz .out
+    mov eax, [cpu_f5_edx]               ; sub-states of C0..C7, a nibble each
+    mov ecx, 7
+.deepest:
+    mov edx, eax                        ; the top nibble: C7's, then C6's...
+    shr edx, 28
+    jnz .found
+    shl eax, 4
+    dec ecx
+    jnz .deepest
+    ret
+.found:
+    mov [cpu_cstate], cl                ; MWAIT's C-state: 1 (C1) to 7 (C10)
+    lea eax, [ecx - 1]
+    shl eax, 4                          ; the hint: that C-state, sub-state 0
+    mov [cpu_mwait_hint], eax
+    mov byte [cpu_idle_deep], 1
+    call power_cstate_name
+    KLOG "cpu: idle CPUs wait in MWAIT, down to %s", rax
+.out:
+    ret
+
+; cpu_idle: with interrupts off, as the idle loop has them, asleep until an
+; interrupt (STI's shadow covers the HLT or MWAIT after it, so none is
+; missed) or, in MWAIT, a write to the line holding PC_RESCHED. Returns
+; with interrupts on. Clobbers RAX, RCX, RDX.
+cpu_idle:
+    cmp byte [cpu_idle_deep], 0
+    jne .deep
+    sti
+    hlt
+    ret
+.deep:
+    mov rax, [gs:abs PC_SELF]
+    add rax, PC_RESCHED
+    xor ecx, ecx
+    xor edx, edx
+    monitor
+    mov eax, [cpu_mwait_hint]
+    xor ecx, ecx
+    sti
+    mwait
+    ret
+
+; cpu_epp_local: this CPU's HWP request given cpu_epp. Preserves all.
+cpu_epp_local:
+    push rax
+    push rcx
+    push rdx
+    cmp byte [cpu_hwp_on], 0
+    je .out
+    mov ecx, MSR_HWP_REQUEST
+    call rdmsr_safe
+    jc .out
+    and eax, 0x00FFFFFF
+    movzx ecx, byte [cpu_epp]
+    shl ecx, 24
+    or eax, ecx
+    mov ecx, MSR_HWP_REQUEST
+    call wrmsr_safe
+.out:
+    pop rdx
+    pop rcx
+    pop rax
+    ret
+
+; -----------------------------------------------------------------------------
 ;  rdmsr_safe(ECX) -> EDX:EAX, CF = 1 if the MSR does not exist
 ;  wrmsr_safe(ECX, EDX:EAX), CF = 1 on #GP
 ;  The #GP handler resumes at the matching *_fault label.
@@ -549,6 +651,8 @@ feature_table:                          ; register id, bit, name
     db 0, 24, 'TSC-deadline', 0
     db 8, 8,  'invariant-TSC', 0
     db 7, 7,  'HWP', 0
+    db 0, 3,  'MWAIT', 0
+    db 7, 2,  'ARAT', 0
     db 6, 26, '1G-pages', 0
     db 6, 20, 'NX', 0
     db 2, 7,  'SMEP', 0
@@ -563,7 +667,10 @@ align 8
 cpu_tjmax:      dd 100
 cpu_xcr0:       dd 0
 cpu_hwp_on:     db 0
+cpu_epp:        db EPP_BALANCED         ; HWP's energy-performance preference
 rapl_ok:        db 0
+cpu_idle_deep:  db 0                    ; 1: idle CPUs MWAIT in cpu_cstate
+cpu_cstate:     db 0
 
 section .bss
 alignb 8
@@ -585,6 +692,8 @@ cpu_family:     resd 1
 cpu_model:      resd 1
 cpu_stepping:   resd 1
 cpu_xcr0_mask:  resd 1
+cpu_f5_edx:     resd 1
+cpu_mwait_hint: resd 1
 rapl_esu:       resd 1
 rapl_last_energy: resd 1
 alignb 8

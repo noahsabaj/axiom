@@ -260,6 +260,7 @@ net_service:
     call dhcp_tick
     call dns_tick
     call ping_tick
+    call lx_udp_tick                    ; Linux programs' datagrams (lxsock.asm)
     call tcp_tick
     call tcp_echo_tick
     call hd_tick
@@ -1097,8 +1098,6 @@ udp_input:
     sub ecx, 8
     cmp eax, 68
     je dhcp_input
-    cmp eax, 49152                      ; where DNS questions go from
-    jb .out
     push rax
     push rdi
     mov eax, edx
@@ -1107,6 +1106,10 @@ udp_input:
     pop rdi
     pop rax
     lea rdx, [net_from]
+    call lx_udp_input                   ; a Linux program's port?
+    jc .out
+    cmp eax, 49152                      ; where DNS questions go from
+    jb .out
     jmp dns_input
 .out:
     ret

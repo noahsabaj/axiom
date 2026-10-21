@@ -1085,8 +1085,10 @@ sk_kick:
     ret
 
 ; sk_settle(RBX = a socket), sk_lock held: SK_RREADY and SK_WREADY as they
-; are now; those waiting for one set are woken. Preserves all.
+; are now; those waiting for one set are woken, and Linux programs' polls
+; look again (lxsock.asm). Preserves all.
 sk_settle:
+    call lx_poll_kick
     push rax
     push rcx
     push rdi

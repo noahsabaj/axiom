@@ -152,12 +152,22 @@ lx_sys_pipe2:
 ; lx_pipe_close(RDI = a pipe's open file, its last reference gone): that end
 ; closed; the pipe freed with its last. Preserves all.
 lx_pipe_close:
-    push rax
+    push rsi
     push rdi
-    mov rax, rdi
-    mov rdi, [rax + LF_PIPE]
-    mov eax, [rax + LF_FLAGS]
-    and eax, O_ACCMODE
+    xor esi, esi
+    test dword [rdi + LF_FLAGS], O_ACCMODE
+    setnz sil
+    mov rdi, [rdi + LF_PIPE]
+    call lx_pipe_end
+    pop rdi
+    pop rsi
+    ret
+
+; lx_pipe_end(RDI = a pipe, ESI = 0 for an end that read it, 1 for one that
+; wrote it): that end gone; the pipe freed with its last. Preserves all.
+lx_pipe_end:
+    push rdi
+    test esi, esi
     jz .reader
     lock dec dword [rdi + PI_WRITERS]
     jmp .closed
@@ -167,27 +177,63 @@ lx_pipe_close:
     call lx_poll_kick                   ; (a reader's end, a writer's EPIPE)
     lock dec dword [rdi + PI_ENDS]
     jnz .out
+    push rax
     push rdi
     mov rdi, [rdi + PI_BUF]
     call vm_free
     pop rdi
     call kfree
+    pop rax
 .out:
     pop rdi
-    pop rax
+    ret
+
+; lx_pipe_new -> RAX = a pipe, with one end that reads it and one that
+; writes it (lx_pipe_end each), or 0. Preserves others.
+lx_pipe_new:
+    push rbx
+    push rdi
+    mov edi, PI_SIZE
+    call kmalloc
+    test rax, rax
+    jz .out
+    mov rbx, rax
+    mov edi, PIPE_SIZE
+    call vm_alloc
+    test rax, rax
+    jz .free
+    mov [rbx + PI_BUF], rax
+    mov dword [rbx + PI_READERS], 1
+    mov dword [rbx + PI_WRITERS], 1
+    mov dword [rbx + PI_ENDS], 2
+    mov rax, rbx
+    jmp .out
+.free:
+    mov rdi, rbx
+    call kfree
+    xor eax, eax
+.out:
+    pop rdi
+    pop rbx
     ret
 
 ; lx_pipe_read(RBX = a pipe's open file, RSI = user buffer, RDX = bytes) ->
 ; RAX = bytes read, 0 once nothing writes it, or -errno
 lx_pipe_read:
+    mov rdi, [rbx + LF_PIPE]
+    mov ecx, [rbx + LF_FLAGS]
+; lx_pipe_rd(RDI = a pipe, RSI, RDX as lx_pipe_read's, ECX & O_NONBLOCK not
+; to wait): an AF_UNIX socket's too
+lx_pipe_rd:
     push r12
     push r13
     push r14
     push r15
-    sub rsp, 16
+    sub rsp, 16                         ; [rsp] = lx_poll_gen, [rsp + 4] = flags
     mov r12, rsi
     mov r13, rdx
-    mov r14, [rbx + LF_PIPE]            ; R14 = the pipe
+    mov r14, rdi                        ; R14 = the pipe
+    mov [rsp + 4], ecx
     xor eax, eax
     test r13, r13
     jz .out
@@ -205,7 +251,7 @@ lx_pipe_read:
     lea rdi, [r14 + PI_LOCK]
     call lx_mutex_unlock
     mov rax, -EAGAIN
-    test dword [rbx + LF_FLAGS], O_NONBLOCK
+    test dword [rsp + 4], O_NONBLOCK
     jnz .out
     lea rdi, [lx_poll_wq]
     lea rsi, [lx_poll_test]
@@ -277,14 +323,21 @@ lx_pipe_out:
 ; lx_pipe_write(RBX = a pipe's open file, RSI = user buffer, RDX = bytes)
 ; -> RAX = bytes written, or -errno
 lx_pipe_write:
+    mov rdi, [rbx + LF_PIPE]
+    mov ecx, [rbx + LF_FLAGS]
+    and ecx, O_NONBLOCK
+; lx_pipe_wr(RDI = a pipe, RSI, RDX as lx_pipe_write's, ECX = O_NONBLOCK not
+; to wait | MSG_NOSIGNAL for no SIGPIPE): an AF_UNIX socket's too
+lx_pipe_wr:
     push r12
     push r13
     push r14
     push r15
-    sub rsp, 16
+    sub rsp, 24                         ; [rsp] = lx_poll_gen, [rsp + 16] = flags
     mov r12, rsi
     mov r13, rdx
-    mov r14, [rbx + LF_PIPE]            ; R14 = the pipe
+    mov r14, rdi                        ; R14 = the pipe
+    mov [rsp + 16], ecx
     mov qword [rsp + 8], 0              ; [rsp + 8] = bytes written
     xor eax, eax
     test r13, r13
@@ -311,7 +364,7 @@ lx_pipe_write:
     lea rdi, [r14 + PI_LOCK]
     call lx_mutex_unlock
     mov rax, -EAGAIN
-    test dword [rbx + LF_FLAGS], O_NONBLOCK
+    test dword [rsp + 16], O_NONBLOCK
     jnz .partial
     lea rdi, [lx_poll_wq]
     lea rsi, [lx_poll_test]
@@ -349,6 +402,9 @@ lx_pipe_write:
 .broken:
     lea rdi, [r14 + PI_LOCK]
     call lx_mutex_unlock
+    mov rax, -EPIPE
+    test dword [rsp + 16], MSG_NOSIGNAL
+    jnz .partial
     call lx_cur_proc                    ; SIGPIPE, to this thread
     mov rdi, rax
     mov rsi, [gs:PC_CURRENT]
@@ -367,7 +423,7 @@ lx_pipe_write:
     je .out
     mov rax, [rsp + 8]
 .out:
-    add rsp, 16
+    add rsp, 24
     pop r15
     pop r14
     pop r13

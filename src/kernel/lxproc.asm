@@ -1141,6 +1141,7 @@ lx_wait:
     mov r13d, edx
     call lx_cur_proc
     mov rbx, rax
+    mov dword [rsp + 4], 0              ; a signal came: look once more, then say so
 .again:
     mov eax, [lx_poll_gen]              ; (before looking: nothing missed)
     mov [rsp], eax
@@ -1201,6 +1202,9 @@ lx_wait:
     xor eax, eax
     test r13d, WNOHANG
     jnz .out
+    mov rax, -ERESTARTSYS               ; (a child that ended as the signal
+    cmp dword [rsp + 4], 0              ; came is said first, as Linux does)
+    jne .out
     lea rdi, [lx_poll_wq]
     lea rsi, [lx_poll_test]
     mov rdx, rsp
@@ -1209,9 +1213,8 @@ lx_wait:
     test eax, eax
     jnz .again
     call user_killed
-    test eax, eax
-    jz .again
-    mov rax, -ERESTARTSYS
+    mov [rsp + 4], eax
+    jmp .again
 .out:
     add rsp, 16
     pop r14

@@ -783,6 +783,8 @@ udp6_input:
     lea rdx, [rdi + 8]                  ; from whom
     add rsi, 8
     sub ecx, 8
+    call lx_udp_input                   ; a Linux program's port?
+    jc .out
     cmp eax, 49152
     jae dns_input
 .out:

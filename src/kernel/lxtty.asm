@@ -1403,15 +1403,45 @@ ly_ioctl:
 ;  poll, ppoll, select, pselect6
 ; -----------------------------------------------------------------------------
 
+; lf_ready(RDI = an open file) -> EAX = poll's mask for it, RDX = when it
+; may change by itself (a timer's TSC), 0 for never. Preserves RBX, RBP,
+; R12-R15.
+lf_ready:
+    xor edx, edx
+    mov eax, [rdi + LF_KIND]
+    cmp eax, LFK_TTY
+    je .tty
+    cmp eax, LFK_PIPE
+    je .pipe
+    cmp eax, LFK_OPS
+    jae .ops
+    mov eax, POLLIN | POLLOUT | POLLRDNORM | POLLWRNORM
+    ret
+.ops:
+    mov rax, [rdi + LF_OPS]
+    jmp [rax + LFO_READY]
+.pipe:
+    call lx_pipe_ready
+    xor edx, edx
+    ret
+.tty:
+    mov rdi, [rdi + LF_TTY]
+    call ly_ready
+    xor edx, edx
+    ret
+
 ; lx_poll_scan(RDI = struct pollfd array, kernel's, ESI = how many) -> EAX
-; = how many have events, their revents set
+; = how many have events, their revents set; RDX = the soonest a timer
+; among them changes by itself (TSC), 0 for none
 lx_poll_scan:
     push rbx
     push r12
     push r13
+    push r14
     mov rbx, rdi
     mov r12d, esi
     xor r13d, r13d                      ; R13 = with events
+    xor r14d, r14d                      ; R14 = the soonest deadline
 .each:
     test r12d, r12d
     jz .done
@@ -1425,19 +1455,16 @@ lx_poll_scan:
     mov eax, POLLNVAL
     jmp .set
 .open:
-    cmp dword [rax + LF_KIND], LFK_TTY
-    je .tty
-    cmp dword [rax + LF_KIND], LFK_PIPE
-    je .pipe
-    mov eax, POLLIN | POLLOUT | POLLRDNORM | POLLWRNORM
-    jmp .events
-.pipe:
     mov rdi, rax
-    call lx_pipe_ready
-    jmp .events
-.tty:
-    mov rdi, [rax + LF_TTY]
-    call ly_ready
+    call lf_ready
+    test rdx, rdx
+    jz .events
+    test r14, r14
+    jz .sooner
+    cmp rdx, r14
+    jae .events
+.sooner:
+    mov r14, rdx
 .events:
     movzx ecx, word [rbx + 4]
     or ecx, POLLERR | POLLHUP
@@ -1453,9 +1480,25 @@ lx_poll_scan:
     jmp .each
 .done:
     mov eax, r13d
+    mov rdx, r14
+    pop r14
     pop r13
     pop r12
     pop rbx
+    ret
+
+; lx_soonest(RAX = a deadline or 0, RDX = another or 0) -> RAX = the
+; sooner, 0 if neither. Preserves others.
+lx_soonest:
+    test rdx, rdx
+    jz .out
+    test rax, rax
+    jz .other
+    cmp rdx, rax
+    jae .out
+.other:
+    mov rax, rdx
+.out:
     ret
 
 ; lx_poll_wait(RDI = pollfds, ESI = how many, RDX = a TSC deadline, 0 for
@@ -1479,16 +1522,20 @@ lx_poll_wait:
     jnz .out
     cmp r13, -1
     je .out
+    mov [rsp + 8], rdx                  ; (a timer among them: looked at again then)
     test r13, r13
     jz .wait
     RDTSC64
     cmp rax, r13
     jae .timeout
 .wait:
+    mov rax, r13
+    mov rdx, [rsp + 8]
+    call lx_soonest
+    mov rcx, rax
     lea rdi, [lx_poll_wq]
     lea rsi, [lx_poll_test]
     mov rdx, rsp
-    mov rcx, r13
     call wq_wait_fn
     test eax, eax
     jnz .again
