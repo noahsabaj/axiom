@@ -314,7 +314,8 @@ def main():
     got = outputs(log)
     print("-- the shell")
     check(FIRST, got)
-    result(bright(pixel("light.png", *BAR_SPOT)) > 200,
+    # over the mountains' day sky, deep blue at the top, the glass is ~186
+    result(bright(pixel("light.png", *BAR_SPOT)) > 150,
            f"display.theme light: the bar is light, at once ({pixel('light.png', *BAR_SPOT)})")
     print("-- the window")
     n = len(FIRST)

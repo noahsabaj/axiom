@@ -1871,12 +1871,17 @@ mn_key_to:
     mov eax, edi
     jmp desk_key
 
-; the light or the dark look
+; the light or the dark look, kept as display.theme (or the next setting
+; of the look would put the old one back)
 mn_look:
     mov [th_mode], dil
+    movzx esi, dil
+    mov edi, CFG_THEME
+    call cfg_set_look
     jmp theme_apply
 
-; the scale, a quarter of a pixel a point bigger (+1) or smaller (-1)
+; the scale, a quarter of a pixel a point bigger (+1) or smaller (-1),
+; kept as display.scale
 mn_scale:
     mov eax, [ui_s4]
     add eax, edi
@@ -1885,6 +1890,9 @@ mn_scale:
     cmp eax, 8
     jg .out
     mov [ui_s4], eax
+    mov edi, CFG_SCALE                  ; (1x: 1)
+    lea esi, [eax - 3]
+    call cfg_set_look
     jmp theme_apply
 .out:
     ret

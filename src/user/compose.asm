@@ -18,7 +18,7 @@
 ;  is the desktop's kind (kit.inc), any size, at the desktop's scale and in
 ;  its look, which compose follows (WE_LOOK); its pixels are given to the
 ;  app as points (view_size). The presenter's is a second window, the whole
-;  screen, its events looked for while compose waits. It says "compose:
+;  screen (WNF_SCREEN), its events looked for while compose waits. It says "compose:
 ;  ..." on the console as it opens, saves and presents.
 ; =============================================================================
 
@@ -539,7 +539,7 @@ plat_present:
     mov edi, [rax + LK_SCR_W]
     mov esi, [rax + LK_SCR_H]
     lea rdx, [pres]
-    mov r8d, WNF_FULL
+    mov r8d, WNF_SCREEN                 ; full screen: over the bar and the dock
     call window_new
     test rax, rax
     js .failed

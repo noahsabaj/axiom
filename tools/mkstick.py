@@ -10,7 +10,8 @@ Boot it with run.py --stick build/stick.img. Axiom keeps its log in
 --file puts more files on it: at the top (CLAUDE.KEY, for instance), or in
 a folder (EFI/AXIOM/START.TXT=start.txt).
 --linux puts a Linux root from mkroot.py at /LINUX (META, ROOT/...), on a
-stick large enough for it, with 4 KiB clusters.
+stick large enough for it, with 4 KiB clusters. A stick is 64 MiB, or as
+large as its files need (with 64 MiB free).
 """
 import argparse
 import pathlib
@@ -47,16 +48,17 @@ def build(out, serial, mib=64, extra=None, linux=None):
     if linux:
         extra = dict(extra or {})
         extra["LINUX"] = {"META": (linux / "META").read_bytes(), "ROOT": tree(linux / "ROOT")}
-        need = size_of(extra) // (1 << 20) * 5 // 4 + 64
-        mib, spc = max(mib, need, 300), 8
+        mib, spc = max(mib, 300), 8
+    files = tree(ROOT / "build" / "esp")
+    merge(files, extra or {})
+    # what it holds, a quarter more, and 64 MiB free besides
+    mib = max(mib, size_of(files) // (1 << 20) * 5 // 4 + 64)
     total = mib * 1024 * 1024 // fat32.SECTOR
     img = bytearray(total * fat32.SECTOR)
     part = (2048, total - 34)
     fat32.write_gpt(img, total, [(fat32.ESP_TYPE, *part, "AXIOM BOOT")])
     fs = fat32.Fat32(img, part[0], part[1] - part[0] + 1)
     fs.format(spc=spc, label=b"AXIOM BOOT ", serial=serial)
-    files = tree(ROOT / "build" / "esp")
-    merge(files, extra or {})
     fs.add_tree(files)
     fs.flush_fat()
     out.write_bytes(img)

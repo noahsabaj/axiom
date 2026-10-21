@@ -494,9 +494,11 @@ def check_std(log):
         ("rstd: spawn a name that is not there Err(", "a program that is not there"),
         ("rstd: spawn info ram ", "SYS_INFO's memory"),
         ("free some true, uptime some true", "SYS_INFO's free memory and uptime"),
-        ("rstd: spawn the boot volume 62 MiB, free some true", "a volume's free space (FV_FREE)"),
     ]:
         result(has(line), f"rstd spawn: {what}")
+    # the stick is 64 MiB, or as large as its files need (mkstick.py)
+    m = re.search(r"rstd: spawn the boot volume (\d+) MiB, free some true", log)
+    result(m is not None and int(m.group(1)) >= 62, "rstd spawn: a volume's free space (FV_FREE)")
     panics = log.count("panicked")
     result(panics == 1, f"rstd: no panic but the one asked for ({panics})")
     for line in log.splitlines():
