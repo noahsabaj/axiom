@@ -13,9 +13,11 @@
 //! with std, for its tests.
 //!
 //!   json      just enough JSON to talk to a web API (was json.asm)
+//!   text      UTF-8 a byte at a time, and the console font's glyphs (was text.asm)
 #![cfg_attr(target_os = "none", no_std)]
 
 pub mod json;
+pub mod text;
 
 #[cfg(target_os = "none")]
 mod kernel {

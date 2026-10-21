@@ -1183,8 +1183,8 @@ A TLS 1.3 client and server (RFC 8446) and the crypto under it.
   events (401, 400, 529...), is said with the API's own message; a body
   that ends before `message_stop` is said to be cut short.
 - **On the screen** the answer is wrapped at word boundaries, tracking the
-  console's column; its UTF-8 is decoded (`text.asm`) and each code point
-  drawn as the font has it (ASCII, or one of its 39 symbols: bullets,
+  console's column; its UTF-8 is decoded (`text.asm`, in Rust:
+  `src/rust/src/text.rs`) and each code point drawn as the font has it (ASCII, or one of its 39 symbols: bullets,
   arrows, box drawing, check marks), as a look-alike (curly quotes, dashes,
   accented Latin letters) or as `?`. The log and the serial port get the
   UTF-8 itself.
@@ -1990,7 +1990,11 @@ are fast because of the instructions they use (AES-NI, SHA, the blits).
   left, the bytes written and the registers kept (`tools/test/json`: some
   22,000 cases).
 
-The pieces so far: `json` (was `json.asm`).
+The pieces so far: `json` (was `json.asm`); `text` (was `text.asm`: UTF-8
+a byte at a time, and each code point's glyph in the console font, whose
+`G_` names a build script reads from `gen/font.inc`; `tools/test/text`
+tries every code point, every sequence of one or two bytes, and longer
+ones over each range's edges).
 
 ## Conventions
 
