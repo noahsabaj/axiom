@@ -1,7 +1,9 @@
 # Axiom architecture (M0)
 
-Everything here is NASM in `-f bin` mode: no linker, no object files. Two
-images come out of the build, and the second contains the first.
+The loader and the programs are NASM in `-f bin` mode: no linker, no object
+files. The kernel is NASM's ELF object and a static library of Rust, linked
+by rust-lld into one flat image. Two images come out of the build, and the
+second contains the first.
 
 ## Boot: `src/boot/uefi.asm`
 
@@ -57,7 +59,14 @@ One file that `%include`s every module into four sections (`.text`,
 each starting on a page of their own (`kernel_rodata`, `kernel_data`) so
 that each can be mapped as it should be. The first bytes are a header the
 loader reads: magic `AXIOMKRN`, entry point, file size, memory size.
-`build/kernel.map` lists every symbol.
+
+NASM assembles it to an ELF object, `build/kernel.o`. `kernel.ld` puts that
+first in each section, the kernel's Rust (`src/rust`) after it, and
+rust-lld links them into `build/kernel.elf`; `tools/build.py` writes what it
+loads out flat, from `KERNEL_BASE`, as `build/kernel.bin`, which is what the
+loader wants. The header's two sizes, `kernel_file_end` and `kernel_end`,
+are the linker script's. `build/kernel.map` lists every symbol, from the ELF
+file's.
 
 `kernel_main` (`boot.asm`) brings the machine up in dependency order:
 
@@ -1179,9 +1188,10 @@ A TLS 1.3 client and server (RFC 8446) and the crypto under it.
   arrows, box drawing, check marks), as a look-alike (curly quotes, dashes,
   accented Latin letters) or as `?`. The log and the serial port get the
   UTF-8 itself.
-- **JSON** (`json.asm`): find a key in an object, read a string (escapes,
-  `\u` and surrogate pairs to UTF-8, cut on a character boundary), a number,
-  skip any value; and escape text for a string.
+- **JSON** (`json.asm`, in Rust: `src/rust/src/json.rs`): find a key in an
+  object, read a string (escapes, `\u` and surrogate pairs to UTF-8, cut on a
+  character boundary), a number, skip any value; and escape text for a
+  string.
 - **The key** is typed (`claude key <key>`: the shell shows it as stars and
   logs `claude key (not logged)` instead, and it never enters the line
   history) or read from `CLAUDE.KEY` at the top of the boot stick (`NAME=`
@@ -1946,6 +1956,42 @@ and the FADT's button is the fixed one, `power_button_init` sets
 restart or nothing. A control-method button (one the DSDT drives) is not
 seen yet.
 
+## Rust in the kernel: `src/rust/`, `rust.asm`
+
+The kernel moves to Rust piece by piece: logic first (parsers, protocols,
+the structures behind them), each piece behind the calls it had, so nothing
+that calls it changes. What has to be assembly stays: the start, interrupt
+and trap entry, system call entry, switching threads, and the loops that
+are fast because of the instructions they use (AES-NI, SHA, the blits).
+
+- **The target** (`x86_64-axiom-kernel.json`): no SSE at all (`soft-float`:
+  no code an interrupt or a system call reaches may use SIMD, see
+  Conventions), no red zone (interrupts push onto the stack in use), the
+  kernel code model (the top 2 GiB), static, `panic = abort`. core and
+  compiler_builtins (with its `memcpy` and kin) are built from rust-src
+  (`-Zbuild-std`), offline, into `build/rust-kernel`.
+- **The calls**: each piece's entry points are `extern "sysv64"`,
+  `#[unsafe(no_mangle)]` and named `rs_<routine>`. The routine keeps its
+  name in the assembly, where it was, as a wrapper that keeps its contract:
+  `RUST_ENTER` (`macros.inc`) saves RCX, RDX, RDI and R8-R11, which System V
+  lets Rust change, aligns the stack and clears the direction flag; the
+  wrapper moves the arguments into place, calls, and turns Rust's answer (RAX,
+  and RDX for a second word) into what its callers test, CF or ZF, before
+  `RUST_LEAVE`. `json.asm` has one macro for its six readers: the text's
+  RSI and R11 go to Rust as a cursor on the stack, and come back moved.
+- **Rust into assembly**: `extern "sysv64"` too. A panic is the kernel's:
+  the handler writes `rust: <message> (<file>:<line>)` and calls
+  `rust_panic`, which is `panic(0, message)`: the panic screen, every CPU
+  stopped.
+- **Tests**: `cargo test` on the host, where the crate builds with std; and
+  `tools/test/<piece>` holds the Rust, built for the host as a DLL and called
+  through the assembly's own wrappers, against the assembly it replaced,
+  kept there (`reference.asm`), case for case: answers, flags, where RSI is
+  left, the bytes written and the registers kept (`tools/test/json`: some
+  22,000 cases).
+
+The pieces so far: `json` (was `json.asm`).
+
 ## Conventions
 
 - System V-like: arguments in RDI, RSI, RDX, RCX, R8, R9; result in RAX;
@@ -1966,3 +2012,4 @@ seen yet.
   error is checked with `cmp rax, E_ANY` and `jae`, not the sign.
 - Self-contained modules are also tested on the host: `tools/test/<module>/`
   assembles the module with a small shim and drives it from C or Python.
+  One moved to Rust is held there against the assembly it was.

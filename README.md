@@ -1,8 +1,12 @@
 # Axiom
 
-An operating system written entirely in x86-64 assembly, booting straight from
-UEFI onto the hardware that is actually present. No C, no libc, no GRUB, no
-borrowed kernel: about seventy-three thousand lines of NASM, top to bottom.
+An operating system written in x86-64 assembly and Rust, booting straight
+from UEFI onto the hardware that is actually present. No C, no libc, no GRUB,
+no borrowed kernel: about seventy-three thousand lines of NASM, top to bottom,
+with the kernel moving to Rust piece by piece where Rust says it better
+(`src/rust`). What has to be assembly stays assembly: the start, interrupt
+and system call entry, switching threads, and the loops that are fast
+because of the instructions they use.
 
 Why it exists and where it is going: [docs/VISION.md](docs/VISION.md).
 How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
@@ -242,7 +246,9 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Build
 
-Needs [NASM](https://nasm.us) 2.15+ and Python 3 on the PATH.
+Needs [NASM](https://nasm.us) 2.15+ and Python 3 on the PATH, and rustup's
+nightly toolchain with its `rust-src` (`rustup toolchain install nightly
+--component rust-src`) for the kernel's Rust; nothing is downloaded.
 
 ```bash
 python tools/build.py
@@ -254,7 +260,11 @@ mode if you'd rather have bigger text. The kernel and the programs are
 assembled side by side, and only what changed (or includes a file that
 changed) is assembled again; `--all` assembles everything. The kernel's
 jumps are left long (`-O1`): sizing each (`-Ox`, `--small`) takes NASM
-some 200 passes, a minute, for a kernel 4% smaller.
+some 200 passes, a minute, for a kernel 4% smaller. The kernel is NASM's
+ELF object linked with its Rust (cargo builds it beside the assembly, core
+from `rust-src`, some 20 s the first time) by rust-lld, through
+`src/kernel/kernel.ld`; `build/kernel.bin` is the result's loaded bytes and
+`build/kernel.map` its symbols.
 
 The Rust programs (`sdk/rust`) are built apart, with rustup's nightly
 toolchain and its `rust-src`, nothing downloaded: `python tools/rust.py`
@@ -620,13 +630,15 @@ hold the numbers Linux reports at that moment.
 ```
 src/boot/uefi.asm       the loader: a hand-built PE32+ UEFI application
 src/kernel/*.asm        the kernel, one flat image at 0xFFFFFFFF80000000
+src/kernel/kernel.ld    its link: the assembly first in each section, the Rust after
+src/rust/               the kernel's Rust (rust.asm: how the two call each other)
 src/user/               programs for ring 3 (axe.inc: their header and runtime)
 src/include/            structures shared by the two
 sdk/rust/               programs in Rust: the axiom crate, the target, five programs
 tools/rust.py           build them; tools/mkaxe.py turns each into an .AXE
 sdk/masm/               programs in MASM: axiom.inc (made from defs.inc), mhello
 tools/masm.py           build them with ml64 and link.exe, then tools/mkaxe.py
-tools/build.py          assemble everything
+tools/build.py          assemble everything, and link the kernel (tools/elf.py)
 tools/run.py            boot in QEMU; type keys, move the pointer, take screenshots
 tools/mkdisk.py         a GPT + FAT32 test disk (as an NVMe drive or a USB stick)
 tools/mkstick.py        a bootable stick image with build/esp on it (and,

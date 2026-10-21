@@ -70,7 +70,7 @@ kernel_main:
     call ui_init
     BOOTMARK BM_DISPLAY
     mov byte [log_to_screen], 1
-    KLOG "Axiom 0.1 - first light. Written in assembly, nothing else underneath."
+    KLOG "Axiom 0.1 - first light. Written in assembly and Rust, nothing else underneath."
     mov rax, [boot_info]
     mov ecx, [rax + BI_FB_WIDTH]
     mov edx, [rax + BI_FB_HEIGHT]

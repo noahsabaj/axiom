@@ -108,3 +108,34 @@
     and %1, 0xFF00FF00
     or %1, %3
 %endmacro
+
+; RUST_ENTER / RUST_LEAVE: around a call into the kernel's Rust (src/rust;
+; rust.asm), from a routine whose callers expect RCX, RDX, RDI and R8-R11
+; kept, which System V lets Rust change: they are saved, and RBP; the stack
+; is aligned to 16 bytes, and the direction flag cleared, as Rust expects.
+; RUST_LEAVE leaves the flags as they are, so a wrapper can set them first.
+%macro RUST_ENTER 0
+    push rcx
+    push rdx
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push rbp
+    mov rbp, rsp
+    and rsp, -16
+    cld
+%endmacro
+
+%macro RUST_LEAVE 0
+    mov rsp, rbp
+    pop rbp
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rdx
+    pop rcx
+%endmacro
