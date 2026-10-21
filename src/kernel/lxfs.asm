@@ -42,6 +42,8 @@ LNK_LINK        equ 3
 LNK_DEV         equ 4                   ; a character device
 LNK_MAGIC       equ 5                   ; a link that is the process's own (/proc/self/exe)
 LNK_FIFO        equ 6                   ; a pipe (lxpipe.asm's one node)
+LNK_SOCK        equ 7                   ; a socket (lxsock.asm's one node)
+LNK_ANON        equ 8                   ; epoll, eventfd, timerfd (lxevent.asm's)
 
 LNS_NONE        equ 0
 LNS_QUEUED      equ 1
@@ -62,13 +64,29 @@ LF_POS          equ 16
 LF_FLAGS        equ 24                  ; dword: O_ACCMODE, O_APPEND, O_NONBLOCK
 LF_TTY          equ 32
 LF_PIPE         equ 40                  ; a pipe's (lxpipe.asm)
-LF_SIZE         equ 48
+LF_PRIV         equ 40                  ; (or, for LFK_OPS and past, its own state)
+LF_OPS          equ 48                  ; LFK_OPS and past: what it does (OP_*)
+LF_WATCH        equ 56                  ; epolls watching it (lxevent.asm's EW_*)
+LF_SIZE         equ 64
 
 LFK_FILE        equ 1
 LFK_DIR         equ 2
 LFK_DEV         equ 3
 LFK_TTY         equ 4
 LFK_PIPE        equ 5                   ; one end of a pipe
+LFK_OPS         equ 6                   ; from here on, LF_OPS says what it does:
+LFK_EPOLL       equ 6
+LFK_EVENT       equ 7                   ; eventfd
+LFK_TIMER       equ 8                   ; timerfd
+LFK_SOCK        equ 9
+
+; LF_OPS: a table of what an open file of LFK_OPS and past does
+LFO_READ         equ 0                   ; (RBX = it, RSI = user buffer, RDX = bytes) -> RAX
+LFO_WRITE        equ 8                   ; (RBX = it, RSI = user buffer, RDX = bytes) -> RAX
+LFO_READY        equ 16                  ; (RDI = it) -> EAX = poll's mask, RDX = when it may
+                                        ; change by itself (TSC), 0 for never; preserves RBX, RBP, R12-R15
+LFO_CLOSE        equ 24                  ; (RDI = it): its last reference gone (its state, not it)
+LFO_IOCTL        equ 32                  ; (RDI = it, ESI = request, RDX = arg) -> RAX, or 0: none
 
 LX_PATH         equ 4096                ; a path, at most (with its NUL)
 LX_NAME         equ 255                 ; a name in it
@@ -455,6 +473,7 @@ lx_tree_load:
     add r12, 32
     jmp .extra
 .made:
+    call lx_resolv_init                 ; (the kernel's: lxsock.asm)
     KLOG "linux: a root of %u paths, from /LINUX/META on the boot stick", qword [lx_inodes]
     clc
     jmp .out
@@ -965,6 +984,20 @@ lf_put:
     push r9
     push r10
     push r11
+    cmp qword [rdi + LF_WATCH], 0       ; off any epoll first
+    je .unwatched
+    push rdi
+    call lx_epoll_forget
+    pop rdi
+.unwatched:
+    cmp dword [rdi + LF_KIND], LFK_OPS
+    jb .not_ops
+    mov rax, [rdi + LF_OPS]
+    push rdi
+    call [rax + LFO_CLOSE]
+    pop rdi
+    jmp .free
+.not_ops:
     cmp dword [rdi + LF_KIND], LFK_PIPE
     jne .not_pipe
     call lx_pipe_close
@@ -1018,6 +1051,39 @@ lx_fd_get:
     ret
 .bad:
     mov rax, -EBADF
+    pop rcx
+    ret
+
+; lx_fd_ref(EDI = a descriptor) -> RAX = its open file, a reference for the
+; caller (lf_put it), or -EBADF: for a call that may wait while another
+; thread closes the descriptor. Preserves others.
+lx_fd_ref:
+    push rcx
+    push rdi
+    call lx_cur_proc
+    mov rcx, rax
+    lea rdi, [rcx + LP_FDLOCK]
+    call lx_mutex_lock
+    mov rdi, [rsp]
+    mov rax, -EBADF
+    test edi, edi
+    js .unlock
+    cmp edi, [rcx + LP_NFD]
+    jae .unlock
+    mov rax, [rcx + LP_FDS]
+    mov edi, edi
+    mov rax, [rax + rdi * 8]
+    and rax, -2
+    jz .bad
+    mov rdi, rax
+    call lf_get
+    jmp .unlock
+.bad:
+    mov rax, -EBADF
+.unlock:
+    lea rdi, [rcx + LP_FDLOCK]
+    call lx_mutex_unlock
+    pop rdi
     pop rcx
     ret
 
@@ -1181,7 +1247,18 @@ lf_read:
     je .tty
     cmp eax, LFK_PIPE
     je .pipe
+    cmp eax, LFK_OPS
+    jae .ops
     mov rax, -EISDIR
+    jmp .out
+.ops:
+    mov rax, -ESPIPE
+    cmp r14, -1
+    jne .out
+    mov rsi, r12
+    mov rdx, r13
+    mov rax, [rbx + LF_OPS]
+    call [rax + LFO_READ]
     jmp .out
 .pipe:
     mov rax, -ESPIPE
@@ -1270,10 +1347,18 @@ lf_write:
     je .tty
     cmp eax, LFK_PIPE
     je .pipe
+    cmp eax, LFK_OPS
+    jae .ops
     cmp eax, LFK_DEV
     mov rax, -EBADF
     jne .out
     mov rax, r13                        ; a device takes it all
+    jmp .out
+.ops:
+    mov rsi, r12
+    mov rdx, r13
+    mov rax, [rbx + LF_OPS]
+    call [rax + LFO_WRITE]
     jmp .out
 .pipe:
     mov rsi, r12
@@ -1321,7 +1406,7 @@ lx_read_at:
     push rsi
     push rdx
     push r8
-    call lx_fd_get
+    call lx_fd_ref
     pop r8
     pop rdx
     pop rsi
@@ -1329,6 +1414,8 @@ lx_read_at:
     jae .out
     mov rbx, rax
     call lf_read
+    mov rdi, rbx
+    call lf_put
 .out:
     pop rbx
     ret
@@ -1348,13 +1435,15 @@ lx_sys_write:
     push rbx
     push rsi
     push rdx
-    call lx_fd_get
+    call lx_fd_ref
     pop rdx
     pop rsi
     cmp rax, -4095
     jae .out
     mov rbx, rax
     call lf_write
+    mov rdi, rbx
+    call lf_put
 .out:
     pop rbx
     ret
@@ -1454,6 +1543,11 @@ lx_open:
     jnz .out
     test r12d, O_TRUNC
     jnz .out
+    cmp rbx, [lx_resolv_node]           ; said afresh
+    jne .data
+    mov rdi, rbx
+    call lx_resolv_fill
+.data:
     mov rdi, rbx
     call lx_file_data
     cmp rax, -4095
@@ -1699,7 +1793,15 @@ lx_mode:
     je .reg
     cmp ecx, LNK_FIFO
     je .fifo
+    cmp ecx, LNK_SOCK
+    je .sock
+    cmp ecx, LNK_ANON
+    je .anon
     or eax, S_IFLNK | 0o777
+    ret
+.sock:
+    or eax, S_IFSOCK
+.anon:                                  ; (no kind at all, as Linux's anon inodes)
     ret
 .fifo:
     or eax, S_IFIFO
@@ -2378,6 +2480,15 @@ lx_sys_ioctl:
     mov rdi, [rax + LF_TTY]
     jmp ly_ioctl
 .not_tty:
+    cmp dword [rax + LF_KIND], LFK_OPS
+    jb .not_ops
+    mov rdi, rax
+    mov rax, [rdi + LF_OPS]
+    mov rax, [rax + LFO_IOCTL]
+    test rax, rax
+    jz .no
+    jmp rax
+.not_ops:
     cmp dword [rax + LF_KIND], LFK_PIPE
     jne .no
     cmp esi, 0x541B                     ; FIONREAD

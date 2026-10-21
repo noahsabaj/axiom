@@ -58,11 +58,27 @@ ERANGE          equ 34
 ENAMETOOLONG    equ 36
 ENOSYS          equ 38
 ELOOP           equ 40
+EDOM            equ 33
 ENODATA         equ 61
 ENOTSOCK        equ 88
+EDESTADDRREQ    equ 89
+EMSGSIZE        equ 90
+ENOPROTOOPT     equ 92
+EPROTONOSUPPORT equ 93
+ESOCKTNOSUPPORT equ 94
 EOPNOTSUPP      equ 95
 EAFNOSUPPORT    equ 97
+EADDRINUSE      equ 98
+ENETUNREACH     equ 101
+ECONNRESET      equ 104
+ENOBUFS         equ 105
+EISCONN         equ 106
+ENOTCONN        equ 107
 ETIMEDOUT       equ 110
+ECONNREFUSED    equ 111
+EHOSTUNREACH    equ 113
+EALREADY        equ 114
+EINPROGRESS     equ 115
 
 SIGINT          equ 2
 SIGILL          equ 4
@@ -247,6 +263,8 @@ lx_init:
     mov byte [lx_ready], 1
     call lx_sig_init
     call lx_pipe_init
+    call lx_event_init
+    call lx_sock_init
 .out:
     ret
 
@@ -2092,20 +2110,6 @@ lx_sys_prctl:
     call lx_copy_out
     ret
 
-; socket(...): no network yet (L5)
-lx_sys_socket:
-    mov rax, -EAFNOSUPPORT
-    ret
-
-; getsockname / getpeername(fd, ...): no descriptor is a socket yet
-lx_sys_notsock:
-    call lx_fd_get
-    cmp rax, -4095
-    jae .out
-    mov rax, -ENOTSOCK
-.out:
-    ret
-
 ; getresuid(ruid, euid, suid) / getresgid: root's, 0 each
 lx_sys_getresuid:
     push rbx
@@ -2216,8 +2220,20 @@ lx_calls:
     dq 35, lx_sys_nanosleep
     dq 39, lx_sys_getpid
     dq 41, lx_sys_socket
-    dq 51, lx_sys_notsock               ; getsockname
-    dq 52, lx_sys_notsock               ; getpeername
+    dq 42, lx_sys_connect
+    dq 43, lx_sys_accept
+    dq 44, lx_sys_sendto
+    dq 45, lx_sys_recvfrom
+    dq 46, lx_sys_sendmsg
+    dq 47, lx_sys_recvmsg
+    dq 48, lx_sys_shutdown
+    dq 49, lx_sys_bind
+    dq 50, lx_sys_listen
+    dq 51, lx_sys_getsockname
+    dq 52, lx_sys_getpeername
+    dq 53, lx_sys_socketpair
+    dq 54, lx_sys_setsockopt
+    dq 55, lx_sys_getsockopt
     dq 56, lx_sys_clone
     dq 57, lx_sys_fork
     dq 58, lx_sys_vfork
@@ -2288,7 +2304,10 @@ lx_calls:
     dq 228, lx_sys_clock_gettime
     dq 229, lx_sys_clock_getres
     dq 230, lx_sys_clock_nanosleep
+    dq 213, lx_sys_epoll_create
     dq 231, lx_sys_exit_group
+    dq 232, lx_sys_epoll_wait
+    dq 233, lx_sys_epoll_ctl
     dq 234, lx_sys_tgkill
     dq 247, lx_sys_waitid
     dq 257, lx_sys_openat
@@ -2299,14 +2318,25 @@ lx_calls:
     dq 271, lx_sys_ppoll
     dq 273, lx_sys_zero                 ; set_robust_list
     dq 292, lx_sys_dup3
+    dq 281, lx_sys_epoll_pwait
+    dq 283, lx_sys_timerfd_create
+    dq 284, lx_sys_eventfd
+    dq 286, lx_sys_timerfd_settime
+    dq 287, lx_sys_timerfd_gettime
+    dq 288, lx_sys_accept4
+    dq 290, lx_sys_eventfd2
+    dq 291, lx_sys_epoll_create1
     dq 293, lx_sys_pipe2
+    dq 299, lx_sys_recvmmsg
     dq 302, lx_sys_prlimit64
+    dq 307, lx_sys_sendmmsg
     dq 318, lx_sys_getrandom
     dq 322, lx_sys_execveat
     dq 332, lx_sys_statx
     dq 334, lx_sys_enosys               ; rseq
     dq 435, lx_sys_enosys               ; clone3: glibc falls back to clone
     dq 439, lx_sys_faccessat            ; faccessat2
+    dq 441, lx_sys_epoll_pwait2
     dq -1
 
 section .bss

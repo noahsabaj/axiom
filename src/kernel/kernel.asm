@@ -116,6 +116,8 @@ section .text
 %include "lxtty.asm"
 %include "lxproc.asm"
 %include "lxpipe.asm"
+%include "lxevent.asm"
+%include "lxsock.asm"
 %include "boot.asm"
 
 section .data
