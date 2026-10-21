@@ -14,10 +14,12 @@
 //!
 //!   json      just enough JSON to talk to a web API (was json.asm)
 //!   text      UTF-8 a byte at a time, and the console font's glyphs (was text.asm)
+//!   x509      certificates read from DER, their dates, the host they name (x509.asm's)
 #![cfg_attr(target_os = "none", no_std)]
 
 pub mod json;
 pub mod text;
+pub mod x509;
 
 #[cfg(target_os = "none")]
 mod kernel {

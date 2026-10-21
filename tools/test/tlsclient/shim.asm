@@ -25,6 +25,8 @@ global x509_extra, tls_layout
 global kc, host_send, host_ops, tl_text
 extern c_send, c_ready, c_data, c_closed, c_fail
 
+%include "macros.inc"
+%include "rusthost.inc"
 %include "sha256.asm"
 %include "sha512.asm"
 %include "aesgcm.asm"
@@ -34,6 +36,10 @@ extern c_send, c_ready, c_data, c_closed, c_fail
 %include "pubkey.asm"
 %include "x509.asm"
 %include "tls.asm"
+
+FORWARD rs_x509_parse                   ; x509.asm's Rust (rusthost.inc)
+FORWARD rs_x509_unix
+FORWARD rs_x509_name
 
 section .text
 
