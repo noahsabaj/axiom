@@ -2,6 +2,11 @@
 ;  kernel.asm - the Axiom kernel: one flat image linked at KERNEL_BASE.
 ;  The loader copies the file, zeroes the rest up to the header's memory
 ;  size (.bss) and jumps to kernel_main.
+;
+;  NASM makes an ELF object of it (build/kernel.o); kernel.ld links that,
+;  first in each section, with the kernel's Rust (src/rust, a static
+;  library), and tools/build.py takes the image from the ELF file it makes:
+;  build/kernel.bin, and build/kernel.map, every symbol.
 ; =============================================================================
 
 bits 64
@@ -11,14 +16,12 @@ default rel
 %include "defs.inc"
 %include "macros.inc"
 
-org KERNEL_BASE
-
 section .text progbits align=16
-section .rodata progbits align=4096 follows=.text
-section .data progbits align=4096 follows=.rodata
+section .rodata progbits align=4096
+section .data progbits align=4096
 section .bss nobits align=4096
 
-[map all build/kernel.map]
+extern kernel_file_end, kernel_end      ; kernel.ld's: the file's end, the image's
 
 section .rodata                         ; each section starts on a page of
 kernel_rodata:                          ; its own, for vmm_init's W^X
@@ -104,6 +107,7 @@ section .text
 %include "http.asm"
 %include "httpd.asm"
 %include "socket.asm"
+%include "rust.asm"
 %include "json.asm"
 %include "text.asm"
 %include "claude.asm"
@@ -160,10 +164,7 @@ align 8
 boot_info:      dq 0
 boot_rsp:       dq 0                    ; the loader's stack, until it goes back
 phys_base:      dq PHYS_BASE
-kernel_file_end:
 
 section .bss
 alignb 64
 percpu:         resb MAX_CPUS * PC_SIZE
-alignb 4096
-kernel_end:

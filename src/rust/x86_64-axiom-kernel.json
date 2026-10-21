@@ -1,0 +1,31 @@
+{
+  "arch": "x86_64",
+  "cpu": "x86-64",
+  "data-layout": "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128",
+  "llvm-target": "x86_64-unknown-none-elf",
+  "os": "none",
+  "vendor": "axiom",
+  "linker-flavor": "gnu-lld",
+  "linker": "rust-lld",
+  "max-atomic-width": 64,
+  "panic-strategy": "abort",
+  "code-model": "kernel",
+  "relocation-model": "static",
+  "disable-redzone": true,
+  "features": "-mmx,-sse,-sse2,-sse3,-ssse3,-sse4.1,-sse4.2,-avx,-avx2,+soft-float",
+  "rustc-abi": "x86-softfloat",
+  "position-independent-executables": false,
+  "static-position-independent-executables": false,
+  "relro-level": "off",
+  "executables": true,
+  "default-uwtable": false,
+  "eh-frame-header": false,
+  "stack-probes": { "kind": "inline" },
+  "target-pointer-width": 64,
+  "metadata": {
+    "description": "Axiom's kernel: the Rust linked into kernel.bin (no SSE, no red zone, the top 2 GiB)",
+    "std": false,
+    "tier": 3,
+    "host_tools": false
+  }
+}
