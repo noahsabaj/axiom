@@ -16,6 +16,7 @@
 ; =============================================================================
 
 %include "axe.inc"
+WANTS AW_STORE
 
 CHECKS          equ 30
 IO_NAME         equ 0                   ; the page: a name's field (64 bytes)

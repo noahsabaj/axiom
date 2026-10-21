@@ -1,0 +1,3 @@
+# Hearth wants rust 1.97.1; nightly builds it with --ignore-rust-version until stable catches up.
+[toolchain]
+channel = "nightly"

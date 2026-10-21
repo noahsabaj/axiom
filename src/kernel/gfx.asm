@@ -55,6 +55,8 @@ gfx_init:
     mov rax, [scr_h]
     mov [back_sf + SF_H], rax
     call gfx_target_back
+    call cpu_has_avx2_fma               ; fills and text 8 pixels at a time
+    setnz byte [gfx_avx2]
 
     xor ecx, ecx                        ; largest font that still gives 50 rows
     xor r8d, r8d
@@ -75,6 +77,7 @@ gfx_init:
     inc r8d
     jmp .font_loop
 .font_done:
+    call cfg_font                       ; display.text-size
     mov edi, ecx
     call gfx_set_font
     mov byte [gfx_ready], 1
@@ -371,6 +374,10 @@ gfx_fill:
     add r9, [tg_ptr]                    ; first pixel
     mov r10, rcx                        ; rows
     mov eax, r8d
+    cmp rdx, 8
+    jb .row
+    cmp byte [gfx_avx2], 0
+    jne .wide
 .row:
     mov rdi, r9
     mov rcx, rdx
@@ -378,6 +385,36 @@ gfx_fill:
     add r9, [tg_pitch]
     dec r10
     jnz .row
+    jmp .out
+.wide:                                  ; 8 pixels or more: 8 at a time, the
+    vmovd xmm0, r8d                     ; last 8 overlapping what came before
+    vpbroadcastd ymm0, xmm0
+    lea rdx, [rdx * 4 - 32]             ; RDX = where the last 8 start
+.wide_row:
+    mov rdi, r9
+    lea rcx, [r9 + rdx]
+    lea rsi, [rcx - 96]                 ; 32 more fit while RDI <= RSI
+.wide_4:
+    cmp rdi, rsi
+    ja .wide_1
+    vmovdqu [rdi], ymm0
+    vmovdqu [rdi + 32], ymm0
+    vmovdqu [rdi + 64], ymm0
+    vmovdqu [rdi + 96], ymm0
+    sub rdi, -128
+    jmp .wide_4
+.wide_1:
+    cmp rdi, rcx
+    jae .wide_last
+    vmovdqu [rdi], ymm0
+    add rdi, 32
+    jmp .wide_1
+.wide_last:
+    vmovdqu [rcx], ymm0
+    add r9, [tg_pitch]
+    dec r10
+    jnz .wide_row
+    vzeroupper
 .out:
     pop r10
     pop r9
@@ -483,8 +520,13 @@ gfx_color:
 .changed:
     mov [text_fg], edi
     mov [text_bg], esi
-    cmp esi, GFX_CLEAR
-    je .done
+    mov byte [ramp_stale], 1            ; made when a glyph needs it
+    ret
+
+; gfx_ramp: text_ramp[a] = fg over bg at coverage a, for gfx_glyph's
+; pixel-at-a-time way. Preserves all.
+gfx_ramp:
+    mov byte [ramp_stale], 0
     push rax
     push rbx
     push rcx
@@ -527,7 +569,6 @@ gfx_color:
     pop rcx
     pop rbx
     pop rax
-.done:
     ret
 
 ; gfx_glyph(RDI x, RSI y, EDX character). Preserves all.
@@ -599,9 +640,17 @@ gfx_glyph:
     imul rax, [tg_pitch]
     lea r8, [rax + rdi * 4]
     add r8, [tg_ptr]                    ; destination
+    cmp r12, 8
+    jb .one_by_one
+    cmp byte [gfx_avx2], 0
+    jne .simd
+.one_by_one:
     lea r11, [text_ramp]
     cmp dword [text_bg], GFX_CLEAR
     je .blend_row
+    cmp byte [ramp_stale], 0
+    je .opaque_row
+    call gfx_ramp
 .opaque_row:
     mov rcx, r12
     mov rdi, r8
@@ -666,6 +715,136 @@ gfx_glyph:
     add r8, [tg_pitch]
     dec r9
     jnz .blend_row
+    jmp .out
+; 8 pixels at a time, each channel (fg * a + bg * (255 - a) + 127) / 255 in
+; 16-bit lanes, the division as gfx_ramp's (* 0x8081 >> 23): the same pixels
+; as one at a time. A row's last 8 overlap what came before.
+.simd:
+    vpxor xmm7, xmm7, xmm7
+    vmovdqu ymm9, [glyph_spread]
+    vpbroadcastw ymm5, [glyph_w255]
+    vpbroadcastw ymm6, [glyph_w127]
+    vpbroadcastw ymm8, [glyph_w8081]
+    mov eax, [text_fg]
+    and eax, 0x00FFFFFF
+    vmovd xmm3, eax
+    vpbroadcastd ymm3, xmm3
+    vpunpcklbw ymm3, ymm3, ymm7         ; YMM3 = fg, a word a channel
+    lea r10, [r12 - 8]                  ; R10 = where a row's last 8 start
+    cmp dword [text_bg], GFX_CLEAR
+    je .simd_blend
+    mov eax, [text_bg]
+    and eax, 0x00FFFFFF
+    vmovd xmm4, eax
+    vpbroadcastd ymm4, xmm4
+    vpunpcklbw ymm4, ymm4, ymm7         ; YMM4 = bg
+.so_row:
+    xor ecx, ecx
+.so_px:
+    vpmovzxbd ymm0, [rdx + rcx]         ; coverage, a dword a pixel
+    vpshufb ymm0, ymm0, ymm9            ; a, a, a, 0
+    vpunpcklbw ymm1, ymm0, ymm7         ; pixels 0, 1, 4, 5
+    vpunpckhbw ymm2, ymm0, ymm7         ; pixels 2, 3, 6, 7
+    vpsubw ymm10, ymm5, ymm1
+    vpsubw ymm11, ymm5, ymm2
+    vpmullw ymm1, ymm1, ymm3
+    vpmullw ymm2, ymm2, ymm3
+    vpmullw ymm10, ymm10, ymm4
+    vpmullw ymm11, ymm11, ymm4
+    vpaddw ymm1, ymm1, ymm10
+    vpaddw ymm2, ymm2, ymm11
+    vpaddw ymm1, ymm1, ymm6
+    vpaddw ymm2, ymm2, ymm6
+    vpmulhuw ymm1, ymm1, ymm8
+    vpmulhuw ymm2, ymm2, ymm8
+    vpsrlw ymm1, ymm1, 7
+    vpsrlw ymm2, ymm2, 7
+    vpackuswb ymm1, ymm1, ymm2
+    vmovdqu [r8 + rcx * 4], ymm1
+    cmp rcx, r10
+    jae .so_next
+    add rcx, 8
+    cmp rcx, r10
+    jbe .so_px
+    mov rcx, r10                        ; the last 8: drawn again, the same
+    jmp .so_px
+.so_next:
+    add rdx, r12
+    add rdx, r13
+    add r8, [tg_pitch]
+    dec r9
+    jnz .so_row
+    vzeroupper
+    jmp .out
+.simd_blend:                            ; over what is there: coverage 0 keeps
+    vpbroadcastd ymm12, [text_fg]       ; it, 255 is fg itself
+    vpcmpeqd ymm13, ymm13, ymm13
+    vpsrld ymm13, ymm13, 8              ; YMM13 = 0x00FFFFFF
+    vpsrld ymm14, ymm13, 16             ; YMM14 = 255
+.sb_row:
+    xor ecx, ecx
+    xor esi, esi                        ; RSI = pixels of these 8 already drawn
+.sb_px:
+    mov rax, [rdx + rcx]
+    test esi, esi
+    jz .sb_fresh
+    push rcx                            ; the last 8: those already drawn
+    lea ecx, [esi * 8]                  ; blended once, not twice
+    mov rbx, -1
+    shl rbx, cl
+    and rax, rbx
+    pop rcx
+.sb_fresh:
+    test rax, rax
+    jz .sb_skip                         ; nothing to draw in these 8
+    vmovq xmm0, rax
+    vpmovzxbd ymm0, xmm0
+    vmovdqu ymm15, [r8 + rcx * 4]       ; what is there
+    vpand ymm4, ymm15, ymm13
+    vpshufb ymm2, ymm0, ymm9
+    vpunpcklbw ymm1, ymm2, ymm7
+    vpunpckhbw ymm2, ymm2, ymm7
+    vpunpcklbw ymm10, ymm4, ymm7
+    vpunpckhbw ymm11, ymm4, ymm7
+    vpsubw ymm4, ymm5, ymm1
+    vpmullw ymm10, ymm10, ymm4
+    vpsubw ymm4, ymm5, ymm2
+    vpmullw ymm11, ymm11, ymm4
+    vpmullw ymm1, ymm1, ymm3
+    vpmullw ymm2, ymm2, ymm3
+    vpaddw ymm1, ymm1, ymm10
+    vpaddw ymm2, ymm2, ymm11
+    vpaddw ymm1, ymm1, ymm6
+    vpaddw ymm2, ymm2, ymm6
+    vpmulhuw ymm1, ymm1, ymm8
+    vpmulhuw ymm2, ymm2, ymm8
+    vpsrlw ymm1, ymm1, 7
+    vpsrlw ymm2, ymm2, 7
+    vpackuswb ymm1, ymm1, ymm2
+    vpcmpeqd ymm4, ymm0, ymm7
+    vpblendvb ymm1, ymm1, ymm15, ymm4   ; coverage 0: as it was
+    vpcmpeqd ymm4, ymm0, ymm14
+    vpblendvb ymm1, ymm1, ymm12, ymm4   ; 255: fg
+    vmovdqu [r8 + rcx * 4], ymm1
+.sb_skip:
+    cmp rcx, r10
+    jae .sb_next
+    add rcx, 8
+    xor esi, esi
+    cmp rcx, r10
+    jbe .sb_px
+    mov rsi, rcx
+    sub rsi, r10
+    mov rcx, r10
+    jmp .sb_px
+.sb_next:
+    add rdx, r12
+    add rdx, r13
+    add r8, [tg_pitch]
+    dec r9
+    jnz .sb_row
+    vzeroupper
+    jmp .out
 .out:
     pop r13
     pop r12
@@ -710,12 +889,20 @@ gfx_text_width:
 
 section .rodata
 str_no_backbuffer: db 'Not enough memory for the screen back buffer', 0
+align 32
+glyph_spread:   db 0, 0, 0, 0x80, 4, 4, 4, 0x80, 8, 8, 8, 0x80, 12, 12, 12, 0x80
+                db 0, 0, 0, 0x80, 4, 4, 4, 0x80, 8, 8, 8, 0x80, 12, 12, 12, 0x80
+glyph_w255:     dw 255
+glyph_w127:     dw 127
+glyph_w8081:    dw 0x8081
 
 section .data
 align 8
 text_fg:        dd 0xFFFFFFFE
 text_bg:        dd 0xFFFFFFFE
 gfx_ready:      db 0
+ramp_stale:     db 1
+gfx_avx2:       db 0
 fb_swap:        db 0
 
 section .bss

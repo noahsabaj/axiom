@@ -1,11 +1,13 @@
 ; =============================================================================
-;  hello.asm - the smallest program worth running: says hello, and where it
-;  is, through its ring
+;  hello.asm - the smallest program worth running: says hello, where it is,
+;  and what it was given (the network, the store, the desktop, the files,
+;  the speakers), through its ring
 ;
-;    run hello [arguments]
+;    hello [arguments]
 ; =============================================================================
 
 %include "axe.inc"
+WANTS nothing
 
 main:
     push rbx
@@ -31,6 +33,51 @@ main:
     mov rdi, [ax_ring_va]
     call ax_addx
     call ax_flush
+    lea rsi, [s_given]                  ; and what it was given
+    call ax_add
+    xor ebx, ebx                        ; how many
+    cmp dword [ax_net], 0
+    je .no_net
+    lea rsi, [s_net]
+    call ax_add
+    inc ebx
+.no_net:
+    cmp dword [ax_store], 0
+    je .no_store
+    lea rsi, [s_store]
+    call ax_add
+    inc ebx
+.no_store:
+    cmp dword [ax_desk], 0
+    je .no_desk
+    lea rsi, [s_desk]
+    call ax_add
+    inc ebx
+.no_desk:
+    cmp dword [ax_files], 0
+    je .no_files
+    lea rsi, [s_files]
+    call ax_add
+    inc ebx
+.no_files:
+    cmp dword [ax_sound], 0
+    je .no_sound
+    lea rsi, [s_sound]
+    call ax_add
+    inc ebx
+.no_sound:
+    cmp dword [ax_settings], 0
+    je .no_settings
+    lea rsi, [s_settings]
+    call ax_add
+    inc ebx
+.no_settings:
+    test ebx, ebx
+    jnz .given
+    lea rsi, [s_nothing]
+    call ax_add
+.given:
+    call ax_flush
     xor eax, eax
     pop rbx
     ret
@@ -41,5 +88,13 @@ s_args:         db 'hello: arguments: ', 0
 s_code:         db 'hello: code at ', 0
 s_stack:        db ', stack at ', 0
 s_ring:         db ', ring at ', 0
+s_given:        db 'hello: given:', 0
+s_net:          db ' net', 0
+s_store:        db ' store', 0
+s_desk:         db ' desk', 0
+s_files:        db ' files', 0
+s_sound:        db ' sound', 0
+s_settings:     db ' settings', 0
+s_nothing:      db ' nothing', 0
 
 AXE_END

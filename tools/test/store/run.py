@@ -384,7 +384,7 @@ def main():
     ro = OUT / "readonly.img"
     mkstore(ro, 4096)
     ro_before = ro.read_bytes()
-    jobs = {"first": (FIRST, ["--smp", "4", "--extra", nvme(a)] + st, 240),
+    jobs = {"first": (FIRST, ["--smp", "4", "--extra", nvme(a)] + st, 240, 1),
             "readonly": (READONLY, ["--smp", "2", "--extra", nvme(ro, "OTHERDISK")], 90)}
     if not opts.quick:
         t = OUT / "tcg.img"

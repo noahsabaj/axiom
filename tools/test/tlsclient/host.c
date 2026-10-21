@@ -14,7 +14,7 @@ typedef uint32_t u32;
 typedef uint64_t u64;
 
 u64 kc(void *target, const u64 *args, int *cf);
-extern char tls_start[], tls_input[], tls_write[], tls_close[], tls_abort[];
+extern char tls_start[], tls_accept[], tls_input[], tls_write[], tls_close[], tls_abort[];
 extern char tls_error_text[], host_send[], host_ops[];
 extern u64 x509_extra;
 /* shim.asm: TLS_SESSION, then the offsets of TLS_STATE, TLS_ERROR,
@@ -115,6 +115,15 @@ API int h_start(const char *host, int insecure, u64 now)
     s->events = s->fail_code = s->refuse_send = 0;
     s->reply_cf = -1;
     K5(tls_start, P(s->mem), P(host), P(host_send), P(host_ops), (u64)insecure, now);
+    return cf ? -(int)f32(s, L_ERROR) : 0;
+}
+/* a server's session: the identity (TID_*) must stay while it lasts */
+API int h_accept(const u8 *identity, u64 now)
+{
+    s->out_len = s->app_len = 0;
+    s->events = s->fail_code = s->refuse_send = 0;
+    s->reply_cf = -1;
+    K5(tls_accept, P(s->mem), P(identity), P(host_send), P(host_ops), 0, now);
     return cf ? -(int)f32(s, L_ERROR) : 0;
 }
 API void h_set_extra(const void *table) { x509_extra = P(table); }

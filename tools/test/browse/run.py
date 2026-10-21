@@ -42,17 +42,17 @@ SITE = HERE / "site"
 FAILS = 0
 NL = "\\n"
 SCR_W, SCR_H = 2560, 1600                       # QEMU's screen, as Axiom sets it
-BAR = 60                                        # the desktop's bar
-TITLE = 45                                      # a title bar
-BORDER = 1
-BTN = 45                                        # a title bar button
-PLUS = (105 + 240) // 2                         # '+ shell' on the bar
+PT = 2                                          # pixels a point there
+TITLE = 28 * PT                                 # a title bar
+CLOSE = (8 + 6) * PT                            # its close button's middle, from its left
+TERMINAL = (916, 1532)                          # Terminal in the dock (the apps, and
+                                                # the Mandelbrot's)
 TABLET = "-device qemu-xhci,id=ux -device usb-tablet,bus=ux.0"
 BX, BY = 1100, 80                               # browse's frame, once moved
 WIN_W, WIN_H = 1400, 1000
 TB_H, SB_H = 56, 32                             # its toolbar, its status line
 VIEW_W, VIEW_H = WIN_W - 14, WIN_H - TB_H - SB_H
-VX, VY = BX + BORDER, BY + BORDER + TITLE + TB_H   # its page, on the screen
+VX, VY = BX, BY + TITLE + TB_H                  # its page, on the screen
 SHELL2 = (300, 1300)                            # a point in shell 2, once moved
 BLANK = (VX + 1300, VY + 700)                   # nothing there on the first page
 LATIN = (b"<html><head><title>Latin-1</title></head><body><h1>Caf\xe9 cr\xe8me</h1>"
@@ -192,8 +192,11 @@ def script(links):
     return [
         "until log: kept in", "until dhcp: address", "wait 0.5",
         "type run browse " + U + "/" + NL, f"until browse: {U}/: 200", "wait 1",
-        # a shell to work from, browse moved to where its page is known
-        click((PLUS, BAR // 2)), "until desk: shell 2 opens", "wait 0.5",
+        # a shell to work from (Terminal in the dock: the first click brings
+        # shell 1 forward, the second opens one), browse moved to where its
+        # page is known
+        click(TERMINAL), "wait 0.5",
+        click(TERMINAL), "until desk: shell 2 opens", "wait 0.5",
         "type win size 6 1000 400" + NL, "wait 0.3",
         "type win move 6 0 1150" + NL, "wait 0.3",
         f"type win move 5 {BX} {BY}" + NL, "wait 0.5", *win("loaded"),
@@ -225,7 +228,7 @@ def script(links):
         *address("about:start"), "wait 1.5",
         "shot build/test/browse/start.png",
         click(SHELL2), "wait 0.5", *win("end"),
-        click((BX + BORDER + WIN_W - BTN // 2, BY + BORDER + TITLE // 2)),
+        click((BX + CLOSE, BY + TITLE // 2)),
         "until run: BROWSE exited", "wait 0.5",
         "type poweroff" + NL, "ended",
     ]
@@ -356,7 +359,7 @@ def main():
                    check=True, capture_output=True)
     logs = boot_all(OUT, {"browse": (script(links), [
         "--smp", "4", "--nic", "rtl8139", "--extra", TABLET,
-        "--stick", stick.relative_to(ROOT).as_posix()], 300)})
+        "--stick", stick.relative_to(ROOT).as_posix()], 300, 1)})     # it mostly waits
     check(*logs["browse"], pages, views)
     print(f"{'all passed' if not FAILS else f'{FAILS} FAILED'}")
     return 1 if FAILS else 0

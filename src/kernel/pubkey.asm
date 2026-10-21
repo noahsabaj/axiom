@@ -21,8 +21,25 @@
 ;  curve to the scheme; tls.asm checks that). The ECDSA signature is DER, as
 ;  in both certificates and TLS.
 ;
-;  sig_verify and hash_of preserve all general registers but RAX, and
-;  clobber XMM0-XMM10 (sha256.asm). Scratch in .bss: main loop only.
+;  And signing, for what Axiom serves with TLS: ECDSA P-256 with SHA-256.
+;
+;    sig_sign(RDI = out, ECDSA_MAX bytes; RSI = the private key, 32 bytes
+;        big-endian; RDX = message, RCX = bytes) -> CF if the key is not
+;        one (0 < d < n) or there are no hardware random numbers; else EAX
+;        = the signature's bytes (DER, as TLS's 0x0403 wants it)
+;    ec_public(RDI = out, 65 bytes; RSI = the private key) -> CF as above;
+;        else its public key, uncompressed (04, X, Y)
+;
+;  The private key and the nonce are secrets, and bignum.asm is not
+;  constant-time, so neither is used bare: the point is multiplied by a
+;  Montgomery ladder (the same doubling and addition for every bit, the
+;  points swapped by mask), on the scalar plus a random multiple of n, from
+;  a base point in random projective coordinates; the nonce is inverted
+;  times a random number. What the scratch held is wiped afterwards.
+;
+;  sig_verify, sig_sign, ec_public and hash_of preserve all general
+;  registers but RAX, and clobber XMM0-XMM10 (sha256.asm). Scratch in
+;  .bss: main loop only.
 ; =============================================================================
 
 K_TYPE          equ 0
@@ -34,6 +51,8 @@ KEY             equ 24
 KT_RSA          equ 1
 KT_P256         equ 2
 KT_P384         equ 3
+
+ECDSA_MAX       equ 72                  ; a P-256 signature, DER, at most
 
 ; the curves: 48-byte big-endian slots, the first CV_SIZE bytes used
 CV_SIZE         equ 0
@@ -809,6 +828,449 @@ ec_add:
 .same:
     ret
 
+; -----------------------------------------------------------------------------
+;  Signing, on P-256
+; -----------------------------------------------------------------------------
+
+%macro SIGN_SAVE 0
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+%endmacro
+
+%macro SIGN_RESTORE 0
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+%endmacro
+
+sig_sign:
+    SIGN_SAVE
+    mov [pk_sig], rdi
+    mov rbx, rsi                        ; RBX = the key
+    mov eax, 4                          ; SHA-256
+    lea rdi, [pk_hash]
+    mov rsi, rdx
+    mov rdx, rcx
+    call hash_of
+    call ec_setup256
+    lea rdi, [ec_priv]                  ; d
+    mov rsi, rbx
+    mov ecx, 32
+    mov edx, 4
+    call bn_load
+    lea rsi, [ec_priv]
+    call ec_scalar_ok
+    jc .bad
+    lea rdi, [ec_e]                     ; e: the hash, mod n
+    lea rsi, [pk_hash]
+    mov ecx, 32
+    mov edx, 4
+    call bn_load
+    lea rsi, [ec_e]
+    lea rdi, [ec_n + MC_N]
+    mov ecx, 4
+    call bn_cmp
+    jb .try
+    lea rdi, [ec_e]
+    lea rdx, [ec_n + MC_N]
+    call bn_sub
+.try:
+    lea rdi, [ec_k]                     ; the nonce k
+    lea rsi, [ec_n]
+    call ec_random
+    jc .bad
+    lea rsi, [ec_k]
+    call ec_mul_g
+    jc .bad
+    lea r12, [ec_L0]
+    call ec_affine
+    lea rsi, [ec_x]                     ; r = x mod n
+    lea rdi, [ec_n + MC_N]
+    mov ecx, 4
+    call bn_cmp
+    jb .r
+    lea rdi, [ec_x]
+    lea rdx, [ec_n + MC_N]
+    call bn_sub
+.r:
+    lea rsi, [ec_x]
+    call bn_is_zero
+    jz .try
+    lea rdi, [ec_r]
+    mov ecx, 8
+    rep movsq
+    lea rdi, [ec_bl]                    ; b, to blind k's inverse
+    lea rsi, [ec_n]
+    call ec_random
+    jc .bad
+    lea rcx, [ec_n]                     ; mod n, in Montgomery form:
+    lea rdi, [ec_w]
+    lea rsi, [ec_k]
+    call mont_in
+    lea rdi, [ec_u1]
+    lea rsi, [ec_bl]
+    call mont_in
+    lea rdi, [ec_w]
+    lea rsi, [ec_w]
+    lea rdx, [ec_u1]
+    call mont_mul                       ; k b
+    lea rdi, [ec_u2]
+    lea rsi, [ec_n + MC_N]
+    call ec_minus2
+    lea rdi, [ec_w]
+    lea rsi, [ec_w]
+    lea rdx, [ec_u2]
+    mov r8, [ec_l]
+    lea rcx, [ec_n]
+    call mont_exp                       ; 1 / (k b)
+    lea rdi, [ec_w]
+    lea rsi, [ec_w]
+    lea rdx, [ec_u1]
+    call mont_mul                       ; 1 / k
+    lea rdi, [ec_u1]
+    lea rsi, [ec_r]
+    call mont_in
+    lea rdi, [ec_u2]
+    lea rsi, [ec_priv]
+    call mont_in
+    lea rdi, [ec_u1]
+    lea rsi, [ec_u1]
+    lea rdx, [ec_u2]
+    call mont_mul                       ; r d
+    lea rdi, [ec_u2]
+    lea rsi, [ec_e]
+    call mont_in
+    lea rdi, [ec_u1]
+    lea rsi, [ec_u1]
+    lea rdx, [ec_u2]
+    call mont_add                       ; e + r d
+    lea rdi, [ec_u1]
+    lea rsi, [ec_u1]
+    lea rdx, [ec_w]
+    call mont_mul                       ; s = (e + r d) / k
+    lea rdi, [ec_s]
+    lea rsi, [ec_u1]
+    call mont_out
+    lea rsi, [ec_s]
+    mov ecx, 4
+    call bn_is_zero
+    jz .try
+    mov rdi, [pk_sig]
+    call ec_der
+    call ec_forget
+    clc
+    jmp .out
+.bad:
+    call ec_forget
+    stc
+.out:
+    SIGN_RESTORE
+    ret
+
+ec_public:
+    SIGN_SAVE
+    mov rbx, rdi
+    mov r14, rsi
+    call ec_setup256
+    lea rdi, [ec_priv]
+    mov rsi, r14
+    mov ecx, 32
+    mov edx, 4
+    call bn_load
+    lea rsi, [ec_priv]
+    call ec_scalar_ok
+    jc .bad
+    lea rsi, [ec_priv]
+    call ec_mul_g
+    jc .bad
+    lea r12, [ec_L0]
+    call ec_affine
+    mov byte [rbx], 4
+    lea rdi, [rbx + 1]
+    lea rsi, [ec_x]
+    mov ecx, 32
+    call bn_store
+    lea rdi, [rbx + 33]
+    lea rsi, [ec_y]
+    call bn_store
+    call ec_forget
+    clc
+    jmp .out
+.bad:
+    call ec_forget
+    stc
+.out:
+    SIGN_RESTORE
+    ret
+
+; ec_setup256: P-256's contexts in ec_p and ec_n, ec_size and ec_l
+ec_setup256:
+    lea rsi, [ec_p256]
+    mov qword [ec_size], 32
+    lea rdi, [ec_n]
+    add rsi, CV_N
+    mov ecx, 32
+    call mont_setup
+    lea rdi, [ec_p]
+    lea rsi, [ec_p256 + CV_P]
+    call mont_setup
+    mov rax, [ec_n + MC_L]
+    mov [ec_l], rax
+    ret
+
+; ec_random(RDI = 4 limbs, RSI = ec_n or ec_p) -> CF if there are no
+; hardware random numbers; else 0 < it < that modulus
+ec_random:
+    push rdi
+    push rsi
+.again:
+    lea rdi, [ec_rnd]
+    mov ecx, 32
+    call rand_bytes
+    jc .out
+    mov rdi, [rsp + 8]
+    lea rsi, [ec_rnd]
+    mov edx, 4
+    call bn_load
+    mov rsi, rdi
+    mov ecx, 4
+    call bn_is_zero
+    jz .again
+    mov rdi, [rsp]
+    add rdi, MC_N
+    call bn_cmp
+    jnc .again
+    clc
+.out:
+    pop rsi
+    pop rdi
+    ret
+
+; ec_mul_g(RSI = a scalar, 4 limbs, 0 < it < n) -> CF if there are no
+; hardware random numbers; else ec_L0 = it times G (Jacobian, Montgomery
+; form). Changes every register but RBX, RBP, R14 and R15.
+ec_mul_g:
+    push rbx
+    push rbp
+    push r14
+    push r15
+    mov rbx, rsi
+    lea rdi, [ec_rnd]                   ; the scalar blinded: k + m n, m with
+    mov ecx, 8                          ; its top two bits set, so that
+    call rand_bytes                     ; 2^319 < it < 2^320
+    jc .out
+    mov rbp, [ec_rnd]
+    bts rbp, 63
+    bts rbp, 62
+    lea rsi, [ec_n + MC_N]
+    lea rdi, [ec_kk]
+    xor r8d, r8d
+    xor ecx, ecx
+.mul:
+    mov rax, [rsi + rcx * 8]
+    mul rbp
+    add rax, r8
+    adc rdx, 0
+    add rax, [rbx + rcx * 8]
+    adc rdx, 0
+    mov [rdi + rcx * 8], rax
+    mov r8, rdx
+    inc ecx
+    cmp ecx, 4
+    jb .mul
+    mov [rdi + 32], r8
+    lea r12, [ec_p256]                  ; G, in Montgomery form
+    mov r13d, 32
+    lea rdi, [ec_L0 + PX]
+    lea rsi, [r12 + CV_GX]
+    call ec_coord
+    lea rdi, [ec_L0 + PY]
+    lea rsi, [r12 + CV_GY]
+    call ec_coord
+    lea rdi, [ec_lam]                   ; and as (l^2 X, l^3 Y, l), l random
+    lea rsi, [ec_p]
+    call ec_random
+    jc .out
+    lea rdi, [ec_L0 + PZ]
+    lea rsi, [ec_lam]
+    lea rcx, [ec_p]
+    call mont_in
+    FMUL [ec_t1], [ec_L0 + PZ], [ec_L0 + PZ]
+    FMUL [ec_L0 + PX], [ec_L0 + PX], [ec_t1]
+    FMUL [ec_t1], [ec_t1], [ec_L0 + PZ]
+    FMUL [ec_L0 + PY], [ec_L0 + PY], [ec_t1]
+    lea r12, [ec_L0]                    ; the ladder: L1 - L0 = G all along,
+    lea r13, [ec_L1]                    ; from G and 2 G for the top bit
+    call ec_double
+    mov r15d, 319
+.bit:
+    dec r15d
+    xor eax, eax
+    bt qword [ec_kk], r15
+    setc al
+    mov ebp, eax
+    call ec_cswap
+    lea r12, [ec_L1]                    ; L1 = L0 + L1
+    lea r14, [ec_L0]
+    lea r13, [ec_L1]
+    call ec_add
+    lea r12, [ec_L0]                    ; L0 = 2 L0
+    lea r13, [ec_L0]
+    call ec_double
+    mov eax, ebp
+    call ec_cswap
+    test r15d, r15d
+    jnz .bit
+    clc
+.out:
+    pop r15
+    pop r14
+    pop rbp
+    pop rbx
+    ret
+
+; ec_cswap(EAX = 0 or 1): ec_L0 and ec_L1 swapped if 1, the same work
+; either way
+ec_cswap:
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    neg rax
+    lea rsi, [ec_L0]
+    lea rdi, [ec_L1]
+    xor ecx, ecx
+.q:
+    mov rdx, [rsi + rcx * 8]
+    xor rdx, [rdi + rcx * 8]
+    and rdx, rax
+    xor [rsi + rcx * 8], rdx
+    xor [rdi + rcx * 8], rdx
+    inc ecx
+    cmp ecx, PT / 8
+    jb .q
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    ret
+
+; ec_affine(R12 = a point, not at infinity) -> ec_x, ec_y: its coordinates,
+; plain
+ec_affine:
+    lea rdi, [ec_x]                     ; 1/Z = Z^(p - 2)
+    lea rsi, [ec_p + MC_N]
+    call ec_minus2
+    lea rdi, [ec_t1]
+    lea rsi, [r12 + PZ]
+    lea rdx, [ec_x]
+    mov r8, [ec_l]
+    lea rcx, [ec_p]
+    call mont_exp
+    FMUL [ec_t2], [ec_t1], [ec_t1]
+    FMUL [ec_t3], [ec_t2], [ec_t1]
+    FMUL [ec_x], [r12 + PX], [ec_t2]
+    FMUL [ec_y], [r12 + PY], [ec_t3]
+    lea rcx, [ec_p]
+    lea rdi, [ec_x]
+    mov rsi, rdi
+    call mont_out
+    lea rdi, [ec_y]
+    mov rsi, rdi
+    jmp mont_out
+
+; ec_der(RDI = out): SEQUENCE { INTEGER r, INTEGER s }, from ec_r and ec_s
+; -> EAX = its bytes
+ec_der:
+    push rbx
+    mov rbx, rdi
+    lea rdi, [rbx + 2]
+    lea rsi, [ec_r]
+    call ec_der_int
+    lea rsi, [ec_s]
+    call ec_der_int
+    mov rax, rdi
+    sub rax, rbx
+    mov byte [rbx], 0x30
+    lea ecx, [rax - 2]
+    mov [rbx + 1], cl
+    pop rbx
+    ret
+
+; ec_der_int(RDI = out, RSI = 4 limbs, not zero) -> RDI past it, as an
+; INTEGER
+ec_der_int:
+    push rdi
+    lea rdi, [ec_rnd + 1]
+    mov ecx, 32
+    call bn_store
+    pop rdi
+    mov byte [ec_rnd], 0
+    lea rsi, [ec_rnd + 1]
+.strip:
+    cmp byte [rsi], 0
+    jne .lead
+    inc rsi
+    dec ecx
+    jmp .strip
+.lead:
+    test byte [rsi], 0x80               ; positive
+    jz .copy
+    dec rsi
+    inc ecx
+.copy:
+    mov byte [rdi], 2
+    mov [rdi + 1], cl
+    add rdi, 2
+    rep movsb
+    ret
+
+; ec_forget: the scratch that held secrets, wiped
+ec_forget:
+    push rax
+    push rcx
+    push rdi
+    xor eax, eax
+    lea rdi, [ec_wipe]
+    mov ecx, ec_wipe_end - ec_wipe
+    rep stosb
+    lea rdi, [bn_t]
+    mov ecx, (BN_LIMBS + 2) * 8
+    rep stosb
+    lea rdi, [bn_s]
+    mov ecx, BN_LIMBS * 8
+    rep stosb
+    lea rdi, [bn_acc]
+    mov ecx, BN_LIMBS * 8
+    rep stosb
+    pop rdi
+    pop rcx
+    pop rax
+    ret
+
 section .rodata
 pk_digestinfo:  db 0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01
                 db 0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00, 0x04, 0x20  ; SHA-256
@@ -879,6 +1341,7 @@ ec_sp:          resq 1
 ec_sl:          resq 1
 ec_p:           resb MONT_CTX
 ec_n:           resb MONT_CTX
+ec_wipe:                                ; (to ec_wipe_end: wiped after signing)
 ec_r:           resq 8
 ec_s:           resq 8
 ec_e:           resq 8
@@ -910,4 +1373,15 @@ ec_z3:          resq 8
 ec_G:           resb PT
 ec_Q:           resb PT
 ec_GQ:          resb PT
+ec_y:           resq 8
+ec_priv:        resq 8                  ; d
+ec_k:           resq 8                  ; the nonce
+ec_kk:          resq 8                  ; a scalar, blinded (5 limbs)
+ec_bl:          resq 8                  ; what the nonce's inverse is blinded by
+ec_lam:         resq 8
+ec_rnd:         resb 40
+alignb 8
+ec_L0:          resb PT                 ; the ladder's two points
+ec_L1:          resb PT
+ec_wipe_end:
 ec_R:           resb PT

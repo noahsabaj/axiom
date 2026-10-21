@@ -7,13 +7,22 @@
 ;  bytes a row, and what happens to it (a key while it has the keys, a
 ;  button pressed in it and let go, the pointer dragged across it, the wheel,
 ;  its close button) comes as messages of WE_SIZE bytes from the channel end
-;  it was given, at that end's peer. On a ring:
+;  it was given, at that end's peer. A game may ask for more (WNF_KEYS: each
+;  key down and up; WNF_HOVER: the pointer over it with no button held, and
+;  leaving). On a ring:
 ;    RO_WIN_SHOW (a window, a0 = x, a1 = y, a2 = w | h << 32, 0 for all of
 ;      it): what was drawn there is put on the screen
 ;    RO_WIN_TITLE (a window, handle2 + a0: a1 bytes of UTF-8): its title
-;  Its size is the program's: it does not resize. The close button only asks
-;  (WE_CLOSE); the window goes when its last handle does, and so when the
-;  program ends, is killed (ctrl+C), or the shell it was run in closes.
+;    RO_WIN_POINTER (a window, a0 = PTRM_*): the arrow over it, none, or
+;      none and the pointer held (ptr_mode)
+;    RO_WIN_ZOOM (a window that may be resized, a0 = WZ_*): full screen,
+;      zoomed or neither (win_set_zoom; WE_ZOOM says which it is now,
+;      whoever changed it)
+;  Its size is the program's, unless it lets the user resize it (WNF_RESIZE,
+;  WNF_FULL, WNF_SCREEN: WE_RESIZED says how much shows). The close button
+;  only asks (WE_CLOSE); the window goes when its last handle does, and so
+;  when the program ends, is killed (ctrl+C), or the shell it was run in
+;  closes.
 ;
 ;  The program's side runs on any CPU and never touches the desktop: what it
 ;  asks for is noted in the object (WO_FLAGS) and done by the main loop
@@ -29,12 +38,18 @@ WO_CH           equ 88                  ; the channel end it speaks from, a refe
 WO_W            equ 96                  ; dword: its size
 WO_H            equ 100                 ; dword
 WO_FLAGS        equ 104                 ; dword WOF_*: for the main loop to do
+WO_WNF          equ 108                 ; dword WNF_*: as it was asked for
 WO_TITLE        equ 112
-WO_SIZE         equ WO_TITLE + WN_TITLE_MAX
+WO_PROG         equ WO_TITLE + WN_TITLE_MAX ; the program's name (the dock's)
+WO_PROG_MAX     equ 32
+WO_PTRM         equ WO_PROG + WO_PROG_MAX ; dword PTRM_*: the pointer, as it asked
+WO_ZOOM         equ WO_PTRM + 4         ; dword WZ_*: full screen or not, as it asked
+WO_SIZE         equ WO_PTRM + 8
 
 WOF_OPEN        equ 1                   ; its window is to be opened
 WOF_TITLE       equ 2                   ; retitled
 WOF_GONE        equ 4                   ; and closed: no handle to it is left
+WOF_ZOOM        equ 8                   ; full screen, zoomed or neither (WO_ZOOM)
 
 %macro WIN_LOCK 0
     pushfq
@@ -87,14 +102,22 @@ desk_program:
     ret
 
 ; sys_window_new(EDI = the desktop, ESI = width, EDX = height, ECX = a
-; channel's end) -> RAX = a handle to the window, RDX = to its pixels. The
-; program keeps its handle to the end: closing it cuts what the window says.
+; channel's end, R8D = WNF_*) -> RAX = a handle to the window, RDX = to its
+; pixels. The program keeps its handle to the end: closing it cuts what the
+; window says. One the user may resize has pixels for the whole screen, a
+; row of them the screen's width.
 sys_window_new:
     push rbx
     push r12
     push r13
     push r14
     push r15
+    test r8d, WNF_FULL | WNF_SCREEN     ; full and full screen are resizable
+    jz .flags
+    or r8d, WNF_RESIZE
+.flags:
+    and r8d, WNF_RESIZE | WNF_FULL | WNF_KEYS | WNF_HOVER | WNF_SCREEN
+    push r8                             ; [RSP]: WNF_*
     mov r12d, esi
     mov r13d, edx
     mov r14d, ecx
@@ -127,10 +150,21 @@ sys_window_new:
     jz .no_object
     mov rbx, rax                        ; RBX = the window, its first reference
     mov [rbx + WO_CH], r15
-    mov [rbx + WO_W], r12d
-    mov [rbx + WO_H], r13d
+    mov eax, [rsp]
+    mov [rbx + WO_WNF], eax
     mov edi, r12d
     imul rdi, r13
+    test eax, WNF_RESIZE
+    jz .pixels
+    cmp r12, [scr_w]                    ; within the screen, which its pixels
+    cmova r12, [scr_w]                  ; cover
+    cmp r13, [scr_h]
+    cmova r13, [scr_h]
+    mov rdi, [scr_w]
+    imul rdi, [scr_h]
+.pixels:
+    mov [rbx + WO_W], r12d
+    mov [rbx + WO_H], r13d
     shl rdi, 2
     lea rsi, [str_win_pixels]
     call mem_new
@@ -149,6 +183,18 @@ sys_window_new:
     dec ecx
     jnz .name
 .named:
+    mov byte [rdi], 0
+    lea rsi, [rbx + WO_TITLE]           ; and so is whose it is
+    lea rdi, [rbx + WO_PROG]
+    mov ecx, WO_PROG_MAX - 1
+.prog:
+    lodsb
+    test al, al
+    jz .progged
+    stosb
+    dec ecx
+    jnz .prog
+.progged:
     mov byte [rdi], 0
     mov dword [rbx + WO_FLAGS], WOF_OPEN
     mov rdi, [rbx + WO_MEM]             ; the program's handles: its pixels,
@@ -194,6 +240,7 @@ sys_window_new:
     xor edx, edx
 .done:
     call op_done
+    pop r8
     pop r15
     pop r14
     pop r13
@@ -255,6 +302,72 @@ h_win_show:
     call op_done
     pop r14
     pop r13
+    pop r12
+    pop rbx
+    ret
+
+; h_win_pointer(EDI = a window, RSI = PTRM_*) -> RAX = 0 (needs
+; RT_WIN_DRAW): the pointer over it as it asks, from the main loop's next
+; turn (ptr_mode)
+h_win_pointer:
+    push rbx
+    push r12
+    mov r12, rsi
+    mov esi, OT_WINDOW
+    mov edx, RT_WIN_DRAW
+    call handle_get
+    cmp rax, E_ANY
+    jae .out
+    mov rbx, rax
+    mov rax, E_ARG
+    cmp r12, PTRM_GRAB
+    ja .put
+    mov [rbx + WO_PTRM], r12d
+    mov rdi, [main_thread]
+    call thread_unpark
+    xor eax, eax
+.put:
+    push rax
+    mov rdi, rbx
+    call obj_put
+    pop rax
+.out:
+    call op_done
+    pop r12
+    pop rbx
+    ret
+
+; h_win_zoom(EDI = a window, RSI = WZ_*) -> RAX = 0 (needs RT_WIN_DRAW;
+; E_ARG for one that may not be resized): full screen, zoomed or neither,
+; from the main loop's next turn (win_set_zoom)
+h_win_zoom:
+    push rbx
+    push r12
+    mov r12, rsi
+    mov esi, OT_WINDOW
+    mov edx, RT_WIN_DRAW
+    call handle_get
+    cmp rax, E_ANY
+    jae .out
+    mov rbx, rax
+    mov rax, E_ARG
+    cmp r12, WZ_SCREEN
+    ja .put
+    test dword [rbx + WO_WNF], WNF_RESIZE
+    jz .put
+    WIN_LOCK
+    mov [rbx + WO_ZOOM], r12d
+    or dword [rbx + WO_FLAGS], WOF_ZOOM
+    WIN_UNLOCK
+    call wo_kick
+    xor eax, eax
+.put:
+    push rax
+    mov rdi, rbx
+    call obj_put
+    pop rax
+.out:
+    call op_done
     pop r12
     pop rbx
     ret
@@ -414,13 +527,23 @@ wo_service:
     test r13d, WOF_OPEN
     jz .title
     call wo_open
-    jmp .put
+    jmp .zoom
 .title:
+    test r13d, WOF_TITLE
+    jz .zoom
     mov rdi, [rbx + WO_WIN]             ; (only the main loop changes it)
     test rdi, rdi
-    jz .put
+    jz .zoom
     mov rsi, rsp
     call win_title
+.zoom:
+    test r13d, WOF_ZOOM
+    jz .put
+    mov rdi, [rbx + WO_WIN]
+    test rdi, rdi
+    jz .put                             ; (no room for it)
+    mov esi, [rbx + WO_ZOOM]
+    call win_set_zoom
     jmp .put
 .gone:
     mov rdi, [rbx + WO_WIN]
@@ -440,7 +563,7 @@ wo_service:
     ret
 
 ; wo_open(RBX = a window, [RSP + 8] = its title): on the desktop, on top,
-; with the keys
+; with the keys (WNF_FULL: zoomed; WNF_SCREEN: full screen)
 wo_open:
     lea rdi, [prog_ops]
     lea rsi, [rsp + 8]
@@ -449,6 +572,11 @@ wo_open:
     mov r8, -1
     xor r9d, r9d
     mov r10d, WF_CLOSE | WF_PROGRAM
+    test dword [rbx + WO_WNF], WNF_RESIZE
+    jz .new
+    or r10d, WF_RESIZE
+.new:
+    lea r11, [rbx + WO_PROG]
     call win_new
     test rax, rax
     jz .full
@@ -459,6 +587,11 @@ wo_open:
     mov eax, [rbx + WO_W]
     mov [rdi + WN_SF + SF_W], rax
     shl rax, 2
+    test dword [rbx + WO_WNF], WNF_RESIZE
+    jz .pitch
+    mov rax, [scr_w]                    ; a row: the screen's width
+    shl rax, 2
+.pitch:
     mov [rdi + WN_SF + SF_PITCH], rax
     mov eax, [rbx + WO_H]
     mov [rdi + WN_SF + SF_H], rax
@@ -470,7 +603,34 @@ wo_open:
     WIN_LOCK
     mov [rbx + WO_WIN], rdi
     WIN_UNLOCK
-    jmp win_focus
+    test dword [rbx + WO_WNF], WNF_FULL
+    jz .sized
+    push rdi
+    call win_zoom                       ; filling the screen, to begin with
+    pop rdi
+    jmp .screen                         ; (and told its size, if not the same)
+.sized:
+    test dword [rbx + WO_WNF], WNF_SCREEN
+    jnz .screen                         ; (told its size there)
+    test dword [rbx + WO_WNF], WNF_RESIZE
+    jz .focus
+    push rbx                            ; the size it was given, if the
+    push rdi                            ; screen took less
+    mov rbx, rdi
+    call prog_resized
+    pop rdi
+    pop rbx
+.screen:
+    test dword [rbx + WO_WNF], WNF_SCREEN
+    jz .focus
+    call win_screen                     ; all of the screen, to begin with
+.focus:
+    push rdi
+    call win_focus                      ; with the keys, and said (a test
+    pop rdi                             ; types into it from here)
+    lea rax, [rdi + WN_TITLE]
+    KLOG "desk: '%s' opens", rax
+    ret
 .full:
     lea rax, [rsp + 8]
     KLOG "desk: no room for '%s'", rax
@@ -496,7 +656,7 @@ wo_post:
 prog_key:
     mov esi, eax
     mov edi, WE_KEY
-    xor edx, edx
+    movzx edx, byte [kbd_got]           ; with the modifiers it came with
     xor ecx, ecx
     jmp wo_post
 
@@ -520,14 +680,87 @@ prog_wheel:
     jmp wo_post
 
 prog_move:
-    cmp rbx, [press_win]                ; only while a button is held in it
-    jne .out
+    cmp rbx, [press_win]                ; while a button is held in it
+    je .post
+    cmp rbx, [grab_win]                 ; or it holds the pointer
+    je .post
+    mov rax, [rbx + WN_DATA]            ; or always, if it asked
+    test rax, rax
+    jz .out
+    test dword [rax + WO_WNF], WNF_HOVER
+    jz .out
+    mov [wo_hover], rbx
+.post:
     mov ecx, esi
     mov edx, edi
-    xor esi, esi
+    call ptr_delta
     mov edi, WE_MOVE
     jmp wo_post
 .out:
+    ret
+
+; prog_left(RBX = the window whose client the pointer is over now, 0 if
+; none): the one it was over, which asked (WNF_HOVER), told it left.
+; Preserves RBX, R8, R9.
+prog_left:
+    mov rax, [wo_hover]
+    test rax, rax
+    jz .out
+    cmp rax, rbx
+    je .out
+    mov qword [wo_hover], 0
+    push rbx
+    push r8
+    push r9
+    mov rbx, rax
+    mov edi, WE_LEAVE
+    xor esi, esi
+    xor edx, edx
+    xor ecx, ecx
+    call wo_post
+    pop r9
+    pop r8
+    pop rbx
+.out:
+    ret
+
+; win_key_event(EAX = a key down or up, from key_next): to the window with
+; the keys, if it is a program's that asked (WNF_KEYS)
+win_key_event:
+    test eax, 1 << 8                    ; ctrl and alt down together: a pointer
+    jz .tell                            ; held is let go (until clicked)
+    mov ecx, eax
+    shr ecx, 16
+    and ecx, WM_CTRL | WM_ALT
+    cmp ecx, WM_CTRL | WM_ALT
+    jne .tell
+    cmp qword [grab_win], 0
+    je .tell
+    mov byte [grab_off], 1
+.tell:
+    push rbx
+    mov rbx, [desk_focus]
+    test rbx, rbx
+    jz .out
+    test dword [rbx + WN_FLAGS], WF_PROGRAM
+    jz .out
+    mov rdi, [rbx + WN_DATA]
+    test rdi, rdi
+    jz .out
+    test dword [rdi + WO_WNF], WNF_KEYS
+    jz .out
+    movzx esi, al                       ; the usage
+    mov edi, WE_KEYUP
+    test eax, 1 << 8
+    jz .up
+    mov edi, WE_KEYDOWN
+.up:
+    shr eax, 16
+    movzx edx, al                       ; WM_*
+    xor ecx, ecx
+    call wo_post
+.out:
+    pop rbx
     ret
 
 prog_ask:
@@ -537,7 +770,56 @@ prog_ask:
     xor ecx, ecx
     jmp wo_post
 
+; prog_resized(RBX = its window on the desktop, its client now WN_W by
+; WN_H): its pixels shown that size, and the program told. Preserves RBX,
+; RBP, R12-R15.
+prog_resized:
+    mov rdi, [rbx + WN_DATA]
+    test rdi, rdi
+    jz .out                             ; not its yet (win_new)
+    mov rax, [rbx + WN_W]
+    mov rcx, [rbx + WN_H]
+    mov [rbx + WN_SF + SF_W], rax
+    mov [rbx + WN_SF + SF_H], rcx
+    WIN_LOCK
+    mov [rdi + WO_W], eax
+    mov [rdi + WO_H], ecx
+    WIN_UNLOCK
+    mov edx, eax
+    mov edi, WE_RESIZED
+    xor esi, esi
+    jmp wo_post
+.out:
+    ret
+
+; prog_focus(RBX = its window, ESI = 1: it has the keys now, 0: not)
+prog_focus:
+    cmp qword [rbx + WN_DATA], 0
+    je .out
+    mov edi, WE_FOCUS
+    xor edx, edx
+    xor ecx, ecx
+    jmp wo_post
+.out:
+    ret
+
+; prog_zoom(RBX = its window, ESI = WZ_*): full screen, zoomed or neither
+; now (zoom_tell)
+prog_zoom:
+    cmp qword [rbx + WN_DATA], 0
+    je .out
+    mov edi, WE_ZOOM
+    xor edx, edx
+    xor ecx, ecx
+    jmp wo_post
+.out:
+    ret
+
 prog_close:
+    cmp rbx, [wo_hover]
+    jne .not_over
+    mov qword [wo_hover], 0
+.not_over:
     mov rdi, [rbx + WN_DATA]
     WIN_LOCK
     mov qword [rdi + WO_WIN], 0
@@ -555,4 +837,5 @@ prog_ops:       dq 0, prog_key, prog_click, prog_wheel, prog_close, prog_move, p
 section .bss
 alignb 8
 wo_list:        resq 1                  ; programs' windows, newest first
+wo_hover:       resq 1                  ; the window (WNF_HOVER) the pointer is over
 win_lock:       resd 1

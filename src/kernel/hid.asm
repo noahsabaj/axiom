@@ -980,7 +980,7 @@ hid_add_key:
     ret
 
 ; hid_keys(R12 = record, R13D = report ID): compare with the last report,
-; new presses become key codes
+; new presses become key codes; keys down and up, key_event
 hid_keys:
     push rbx
     push rcx
@@ -1033,10 +1033,10 @@ hid_keys:
     xor esi, esi                        ; each pressed key
 .press:
     cmp esi, [hid_ncur]
-    jae .released
+    jae .ups
     movzx eax, word [hid_cur + rsi * 2]
-    cmp eax, 0xE0                       ; modifiers are not keys
-    jae .press_next
+    cmp eax, 0xFF
+    ja .press_next
     movzx ecx, byte [rbx + 1]           ; held before?
     xor edi, edi
 .held:
@@ -1047,12 +1047,16 @@ hid_keys:
     inc edi
     jmp .held
 .new:
+    mov edx, 1                          ; down
+    call key_event
+    cmp eax, 0xE0                       ; modifiers are not keys
+    jae .press_next
     mov [hid_repeat_key], eax
     lea rdx, [r12 + r13]
     mov [hid_repeat_src], rdx
     push rax
     push rdi
-    mov edi, 500
+    call cfg_repeat_delay               ; keyboard.repeat-delay
     call usb_deadline
     mov [hid_repeat_at], rax
     pop rdi
@@ -1061,6 +1065,27 @@ hid_keys:
 .press_next:
     inc esi
     jmp .press
+.ups:
+    movzx ecx, byte [rbx + 1]           ; each held before and not now: up
+    xor edi, edi
+.up:
+    cmp edi, ecx
+    jae .released
+    movzx eax, byte [rbx + 2 + rdi]
+    xor esi, esi
+.still_held:
+    cmp esi, [hid_ncur]
+    jae .let_go
+    cmp [hid_cur + rsi * 2], ax
+    je .up_next
+    inc esi
+    jmp .still_held
+.let_go:
+    xor edx, edx
+    call key_event
+.up_next:
+    inc edi
+    jmp .up
 .released:
     lea rdx, [r12 + r13]                ; the repeating key let go?
     cmp [hid_repeat_src], rdx
@@ -1112,7 +1137,7 @@ hid_key_repeat:
     call usb_expired
     jnc .done
     push rdi
-    mov edi, 33
+    call cfg_repeat_every               ; keyboard.repeat-rate
     call usb_deadline
     mov [hid_repeat_at], rax
     pop rdi
@@ -1161,7 +1186,13 @@ hid_press:
     lea rdx, [hid_map_shift]
 .lookup:
     movzx edx, byte [rdx + rax - 4]
-    cmp eax, 0x1D                       ; letters: caps lock and ctrl
+    call cfg_key                        ; keyboard.layout
+    push rax                            ; letters: caps lock and ctrl
+    mov eax, edx
+    or eax, 0x20
+    sub eax, 'a'
+    cmp eax, 'z' - 'a'
+    pop rax
     ja .other
     cmp byte [hid_caps], 0
     je .ctrl

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Host tests for what checks certificates: src/kernel/sha512.asm (SHA-384,
 SHA-512), bignum.asm (Montgomery arithmetic), pubkey.asm (RSA PKCS #1 v1.5
-and PSS, ECDSA P-256 and P-384) and x509.asm (certificates, chains, names,
-dates, with Mozilla's roots in gen/roots.asm).
+and PSS, ECDSA P-256 and P-384, and signing with P-256) and x509.asm
+(certificates, chains, names, dates, with Mozilla's roots in
+gen/roots.asm).
 
     python tools/test/pki/run.py [--seed N] [--cc PATH] [--offline]
 
@@ -39,13 +40,13 @@ OUT = ROOT / "build" / "test" / "pki"
 GCC = (r"C:\Users\noahs\AppData\Local\Microsoft\WinGet\Packages"
        r"\BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe"
        r"\mingw64\bin\gcc.exe")
-MODULES = ("sha256.asm", "sha512.asm", "bignum.asm", "pubkey.asm", "x509.asm")
+MODULES = ("sha256.asm", "sha512.asm", "rand.asm", "bignum.asm", "pubkey.asm", "x509.asm")
 sys.path.insert(0, str(ROOT / "tools"))
 import mkroots  # noqa: E402
 
 FN = {n: i for i, n in enumerate(
     "sha384 sha512 mont_setup mont_mul mont_in mont_out mont_add mont_sub mont_exp "
-    "bn_load bn_store sig_verify x509_chain x509_leaf x509_parse x509_unix".split())}
+    "bn_load bn_store sig_verify x509_chain x509_leaf x509_parse x509_unix sig_sign ec_public".split())}
 MONT_CTX = 32 + 3 * 512
 MC_L, MC_N0, MC_BITS, MC_N, MC_RR, MC_ONE = 0, 8, 16, 32, 32 + 512, 32 + 1024
 KT_RSA, KT_P256, KT_P384 = 1, 2, 3
@@ -578,6 +579,114 @@ def test_ecdsa(k, rng, keys, curves, tmp):
            ("" if not problems else ": " + "; ".join(problems[:5])))
 
 
+def parse_sig(sig):
+    """(r, s) from a DER signature, or None unless it is strict DER."""
+    if len(sig) < 8 or sig[0] != 0x30 or sig[1] != len(sig) - 2:
+        return None
+    out, i = [], 2
+    for _ in range(2):
+        if sig[i] != 2 or i + 2 + sig[i + 1] > len(sig):
+            return None
+        n, body = sig[i + 1], sig[i + 2:i + 2 + sig[i + 1]]
+        if not n or body[0] & 0x80 or (n > 1 and body[0] == 0 and not body[1] & 0x80):
+            return None
+        out.append(int.from_bytes(body, "big"))
+        i += 2 + n
+    return tuple(out) if i == len(sig) else None
+
+
+def ref_verify(c, q, h, r, s):
+    if not (0 < r < c.n and 0 < s < c.n):
+        return False
+    w = pow(s, -1, c.n)
+    pt = c.add(c.mul(c.e(h) * w % c.n, c.g), c.mul(r * w % c.n, q))
+    return pt is not None and pt[0] % c.n == r
+
+
+def sign(k, d, msg):
+    out, m = buf(80), buf(msg)
+    n, cf = k("sig_sign", out, buf(d.to_bytes(32, "big")), m, len(msg))
+    return None if cf else out.raw[:n]
+
+
+def public(k, d, size=32):
+    out = buf(65)
+    _, cf = k("ec_public", out, buf(d.to_bytes(size, "big")))
+    return None if cf else out.raw
+
+
+def test_sign(k, rng, keys, curves, tmp):
+    c = curves[0]
+    problems = []
+    count = 0
+    # RFC 6979 A.2.5's P-256 key and its public key
+    d = 0xC9AFA9D845BA75166B5C215767B1D6934E50C3DB36E89B127B8A622B120F6721
+    want = bytes.fromhex("04" "60FED4BA255A9D31C961EB74C6356D68C049B8923B61FA6CE669622E60F29FB6"
+                         "7903FE1008B8BC99A41AE9E95628BC64F2F1B20C2D7E9F5177A3C294D4462299")
+    count += 1
+    if public(k, d) != want:
+        problems.append("RFC 6979's key gives the wrong public key")
+    for d in [1, 2, 3, c.n - 1, c.n - 2, 2 ** 255, 2 ** 128 + 1] + [rng.randrange(1, c.n) for _ in range(40)]:
+        count += 1
+        if public(k, d) != c.point(c.mul(d, c.g)):
+            problems.append(f"ec_public({d:#x}) is wrong")
+    for d in (0, c.n, c.n + 1, 2 ** 256 - 1):
+        count += 1
+        if public(k, d) is not None:
+            problems.append(f"ec_public takes the key {d:#x}")
+    result(not problems, f"ec_public: {count} keys (RFC 6979's, 1, 2, n - 1, random) give the "
+           "reference's point, and 0, n and above are refused" +
+           ("" if not problems else ": " + "; ".join(problems[:5])))
+
+    problems = []
+    count = 0
+    sigs = set()
+    for i in range(60):
+        d = rng.choice([1, c.n - 1, rng.randrange(1, c.n)]) if i < 6 else rng.randrange(1, c.n)
+        q = c.mul(d, c.g)
+        m = rng.randbytes(rng.randrange(0, 600))
+        sig = sign(k, d, m)
+        count += 1
+        if sig is None:
+            problems.append(f"no signature for the key {d:#x}")
+            continue
+        rs = parse_sig(sig)
+        if rs is None or der_sig(*rs) != sig:
+            problems.append(f"not strict DER: {sig.hex()}")
+            continue
+        sigs.add(sig)
+        if not ref_verify(c, q, hashlib.sha256(m).digest(), *rs):
+            problems.append(f"the reference refuses a signature by {d:#x}")
+        if not verify(k, key_struct(c.kt, c.point(q)), 0x0403, m, sig):
+            problems.append(f"sig_verify refuses a signature by {d:#x}")
+        if verify(k, key_struct(c.kt, c.point(q)), 0x0403, m + b"!", sig):
+            problems.append("a signature verifies for another message")
+    d = rng.randrange(1, c.n)
+    again = {sign(k, d, b"the same message") for _ in range(8)}
+    count += 1
+    if len(again) != 8:
+        problems.append("signing the same message twice gave the same signature (the nonce repeats)")
+    for d in (0, c.n, 2 ** 256 - 1):
+        count += 1
+        if sign(k, d, b"x") is not None:
+            problems.append(f"sig_sign takes the key {d:#x}")
+    f, _, info = keys["p256"]
+    ossl("pkey", "-inform", "DER", "-in", f, "-pubout", "-out", tmp / "pub256.pem")
+    for i in range(4):
+        m = rng.randbytes(100 + i)
+        (tmp / "smsg").write_bytes(m)
+        sig = sign(k, info["d"], m) or b""
+        (tmp / "ssig").write_bytes(sig)
+        out = ossl("dgst", "-sha256", "-verify", tmp / "pub256.pem", "-signature", tmp / "ssig",
+                   tmp / "smsg", check=False)
+        count += 1
+        if "Verified OK" not in out:
+            problems.append(f"openssl refuses a signature: {out[:60]}")
+    result(not problems, f"sig_sign: {count} cases: P-256 SHA-256 signatures in strict DER that "
+           "the reference, sig_verify and the openssl tool take, a fresh nonce each time, bad keys "
+           "refused" + ("" if not problems else ": " + "; ".join(problems[:5])))
+
+
 # ---- certificates ----------------------------------------------------------------------------
 
 EXTS = """\
@@ -891,7 +1000,10 @@ def test_regs(k, keys, curves, pki, extra):
     ctx = buf(MONT_CTX)
     k("mont_setup", ctx, buf(info["n"].to_bytes(256, "big")), 0, 256)
     a = limbs(5, 32)
+    sk = buf((98765432109876543210).to_bytes(32, "big"))
     calls = [("sig_verify RSA-PSS", "sig_verify", (rk[0], 0x0804, m, 9, rs, 256), 0),
+             ("sig_sign", "sig_sign", (buf(80), sk, m, 9), 0),
+             ("ec_public", "ec_public", (buf(65), sk), 0),
              ("sig_verify ECDSA P-384", "sig_verify", (ek[0], 0x0503, m, 9, es, len(es.raw)), 0),
              ("x509_chain", "x509_chain", (0, lst, host, 2, int(time.time())), 0),
              ("mont_exp", "mont_exp", (a, a, limbs(65537, 1), ctx, 1), None),
@@ -931,12 +1043,14 @@ def test_speed(k, keys, curves, pki, extra):
         key = key_struct(c.kt, c.point(c.mul(d, c.g)))
         sig = der_sig(*c.sign(d, hashlib.sha256(b"speed").digest(), rng))
         rate(c.name, lambda: verify(k, key, 0x0403, b"speed", sig), 50)
+    d = rng.randrange(1, curves[0].n)
+    rate("signing, P-256", lambda: sign(k, d, b"speed"), 50)
     k.d.h_set_extra(ctypes.addressof(extra))
     ders = [pki.der("leafRsa"), pki.der("interR")]
     now = int(time.time())
     rate("a chain of two", lambda: chain(k, ders, "axiom.test", now), 30)
     k.d.h_set_extra(None)
-    result(True, "speed, one verification: " + ", ".join(out))
+    result(True, "speed, one verification (or signature): " + ", ".join(out))
 
 
 def main():
@@ -983,6 +1097,7 @@ def main():
     print("-- signatures")
     test_rsa(k, rng, keys, tmp)
     test_ecdsa(k, rng, keys, curves, tmp)
+    test_sign(k, rng, keys, curves, tmp)
     print("-- certificates")
     test_unix(k, rng)
     pki, extra = test_x509(k, rng, OUT)

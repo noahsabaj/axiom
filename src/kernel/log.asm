@@ -105,6 +105,21 @@ log_volume:
     push rcx
     push rdx
     push r8
+    push r9
+    mov r9d, DKF_REMOVABLE
+    jmp vol_by_serial
+
+; boot_volume -> R14 = the volume the loader came from, removable or not
+; (a laptop's own EFI partition: hp-1), CF if it is not here (yet). As
+; log_volume otherwise; only reads are meant, but for the kernel slots
+; update.asm writes. Preserves all but RAX.
+boot_volume:
+    push rcx
+    push rdx
+    push r8
+    push r9
+    xor r9d, r9d                        ; any disk
+vol_by_serial:
     xor r8d, r8d
     cmp dword [log_fs], 32
     jne .none
@@ -122,8 +137,10 @@ log_volume:
     cmp byte [r14 + VF_MOUNTED], 0
     je .next
     mov rax, [r14 + VO_DISK]
-    test dword [rax + DK_FLAGS], DKF_REMOVABLE
-    jz .next
+    mov eax, [rax + DK_FLAGS]
+    and eax, r9d
+    cmp eax, r9d                        ; removable, if that was asked
+    jne .next
     cmp [r14 + VF_SERIAL], edx
     jne .next
     test r8, r8
@@ -139,6 +156,7 @@ log_volume:
 .none:
     stc
 .out:
+    pop r9
     pop r8
     pop rdx
     pop rcx
@@ -167,6 +185,10 @@ log_save:
 .write:
     mov rcx, [log_len]
     mov [log_saving], rcx
+    push rdx
+    RDTSC64
+    mov [log_began], rax
+    pop rdx
     mov bl, [r14 + VO_WRITABLE]
     mov byte [r14 + VO_WRITABLE], 1
     lea rsi, [str_log_name]
@@ -175,6 +197,11 @@ log_save:
     mov [r14 + VO_WRITABLE], bl
     mov byte [log_busy], 0
     jc .fail
+    push rdx
+    RDTSC64
+    sub rax, [log_began]
+    mov [log_took], rax
+    pop rdx
     mov rcx, [log_saving]
     mov [log_saved], rcx
     clc
@@ -213,8 +240,10 @@ log_service:
 .out:
     ret
 
-; log_final: before a reboot or power-off. Preserves all.
+; log_final: before a reboot or power-off (the settings kept too).
+; Preserves all.
 log_final:
+    call cfg_final
     push rax
     cmp byte [log_auto], 0
     je .out
@@ -286,6 +315,10 @@ cmd_log:
     cmp byte [log_auto], 0
     cmove rcx, rdx
     KLOG "log: %b in memory, %b saved; automatic saving %s", qword [log_len], qword [log_saved], rcx
+    mov rax, [log_took]
+    xor edx, edx
+    div qword [tsc_per_ms]
+    KLOG "log: the last save took %u ms", rax
     cmp dword [log_fs], 0
     je .unknown
     call log_volume
@@ -333,6 +366,8 @@ log_len:        resq 1
 log_saved:      resq 1
 log_saving:     resq 1
 log_next:       resq 1
+log_began:      resq 1
+log_took:       resq 1
 log_serial:     resd 1
 log_fs:         resd 1
 log_buf:        resb LOG_MAX

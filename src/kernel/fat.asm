@@ -3,7 +3,8 @@
 ;  that no other entry in the directory has. One cached FAT sector (written
 ;  to every copy of the FAT) and one cached directory sector, both flushed
 ;  at the end of each operation, after which the drive is told to flush.
-;  File data goes straight to its clusters.
+;  File data goes straight to its clusters: those that follow one another on
+;  the disk in one command, up to FAT_RUN bytes.
 ;
 ;  Registers by convention: R14 = volume. Writes need 'vol <n> rw'.
 ; =============================================================================
@@ -24,9 +25,13 @@ VF_HINT         equ VO_FAT + 48         ; where to look for a free cluster
 VF_CWD          equ VO_FAT + 52         ; current directory's cluster
 VF_PATH         equ VO_FAT + 64         ; and its path, 256 bytes
 VF_SERIAL       equ VO_FAT + 320        ; the volume serial number
+VF_FREE         equ VO_FAT + 324        ; free clusters, once counted
+VF_FREE_OK      equ VO_FAT + 328        ; byte: they were (fat_free_count)
 
 FAT_EOC         equ 0x0FFFFFFF
 FAT_FILE_MAX    equ 64 * 1024           ; what cat and the shell move at once
+FAT_RUN         equ 1024 * 1024         ; file data read or written at once, at most
+FC_SCAN         equ 64 * 1024           ; the FAT read at once, to count what is free
 
 section .text
 
@@ -129,6 +134,7 @@ fat_mount:
     mov [r14 + VF_CWD], eax
     mov dword [r14 + VF_HINT], 2
     mov dword [r14 + VF_FSINFO], 0
+    mov byte [r14 + VF_FREE_OK], 0
     movzx eax, word [rbx + 48]          ; FSInfo: where free clusters start
     test eax, eax
     jz .path
@@ -290,8 +296,21 @@ fat_set:
     lea rcx, [fc_buf]
     add rcx, rdx
     mov eax, [rcx]
-    and eax, 0xF0000000                 ; the top four bits are not ours
     and esi, 0x0FFFFFFF
+    cmp byte [r14 + VF_FREE_OK], 0      ; free clusters, as they change
+    je .kept
+    test eax, 0x0FFFFFFF
+    jnz .was_used
+    test esi, esi
+    jz .kept
+    dec dword [r14 + VF_FREE]
+    jmp .kept
+.was_used:
+    test esi, esi
+    jnz .kept
+    inc dword [r14 + VF_FREE]
+.kept:
+    and eax, 0xF0000000                 ; the top four bits are not ours
     or eax, esi
     mov [rcx], eax
     mov byte [fc_dirty], 1
@@ -313,6 +332,69 @@ clus_ok:
     ret
 .bad:
     stc
+    ret
+
+; clus_run(R14, EAX = a cluster, EDX = how many are wanted, 1 or more) ->
+; ECX = how many from it follow one another both in its chain and on the
+; disk (1 to EDX), EAX = the cluster after them in the chain; CF on a disk
+; error. Preserves others.
+clus_run:
+    push rsi
+    mov esi, eax
+    xor ecx, ecx
+.grow:
+    inc ecx
+    call fat_get                        ; the next in the chain
+    jc .out
+    cmp ecx, edx
+    jae .end
+    cmp eax, [r14 + VF_MAXCL]
+    ja .end
+    push rcx
+    add ecx, esi                        ; and the next on the disk
+    cmp eax, ecx
+    pop rcx
+    je .grow
+.end:
+    clc
+.out:
+    pop rsi
+    ret
+
+; run_write(R14, ESI = a run's first cluster, ECX = its clusters, 0 for
+; none, R10 = the data just past it) -> CF: the run, whole clusters that
+; follow one another on the disk, written at once. Preserves all.
+run_write:
+    test ecx, ecx
+    jz .none
+    push rax
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    mov eax, esi
+    call clus_block
+    mov rsi, rax                        ; its first block
+    mov edx, ecx
+    mov ecx, [r14 + VF_CSHIFT]
+    shl edx, cl                         ; its blocks
+    mov ecx, [r14 + VF_SSHIFT]
+    mov rdi, rdx
+    shl rdi, cl
+    neg rdi
+    add rdi, r10                        ; its data
+    call vol_write
+    jc .out
+    mov byte [fat_dirtied], 1
+.out:
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rax
+    ret
+.none:
+    clc
     ret
 
 ; clus_block(R14, EAX = cluster) -> RAX = its first block in the volume.
@@ -381,6 +463,85 @@ fat_alloc:
 .out:
     pop rsi
     pop rcx
+    ret
+
+; fat_free_count(R14) -> EAX = its free clusters; CF on a disk error. The
+; FAT is read through once, the first time, FC_SCAN bytes at a time;
+; fat_set keeps the count after. Preserves others.
+fat_free_count:
+    cmp byte [r14 + VF_FREE_OK], 0
+    jne .known
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    call fat_flush_cache                ; what is cached, on the disk first
+    jc .failed
+    xor r8d, r8d                        ; free clusters
+    xor ebx, ebx                        ; the FAT's sector,
+    xor r9d, r9d                        ; the entry its first
+.piece:
+    cmp r9d, [r14 + VF_MAXCL]
+    ja .counted
+    mov eax, [r14 + VF_FATSZ]
+    sub eax, ebx
+    jbe .counted                        ; (the FAT ends sooner)
+    mov ecx, [r14 + VF_SSHIFT]
+    mov edx, FC_SCAN
+    shr edx, cl                         ; sectors at once
+    cmp edx, eax
+    jbe .sized
+    mov edx, eax
+.sized:
+    mov esi, [r14 + VF_FAT]
+    add esi, ebx
+    lea rdi, [fc_scan]
+    call vol_read
+    jc .failed
+    add ebx, edx
+    shl edx, cl
+    shr edx, 2                          ; its entries
+    lea rsi, [fc_scan]
+.entry:
+    cmp r9d, 2                          ; (0 and 1 are not clusters)
+    jb .next
+    cmp r9d, [r14 + VF_MAXCL]
+    ja .counted
+    test dword [rsi], 0x0FFFFFFF
+    jnz .next
+    inc r8d
+.next:
+    add rsi, 4
+    inc r9d
+    dec edx
+    jnz .entry
+    jmp .piece
+.counted:
+    mov [r14 + VF_FREE], r8d
+    mov byte [r14 + VF_FREE_OK], 1
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+.known:
+    mov eax, [r14 + VF_FREE]
+    clc
+    ret
+.failed:
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    stc
     ret
 
 ; fat_free_chain(R14, EAX = first cluster) -> CF. Preserves all but RAX.
@@ -1011,7 +1172,7 @@ fat_enter:
     cmp byte [fat_hush], 0
     jne .missing_hushed
     lea rax, [fat_comp]
-    KLOG "no directory '%s'", rax
+    KLOG "no folder '%s'", rax
 .missing_hushed:
     stc
     jmp .out
@@ -1019,7 +1180,7 @@ fat_enter:
     cmp byte [fat_hush], 0
     jne .not_dir_hushed
     lea rax, [fat_comp]
-    KLOG "'%s' is not a directory", rax
+    KLOG "'%s' is not a folder", rax
 .not_dir_hushed:
     stc
 .out:
@@ -1738,7 +1899,7 @@ fat_create:
     inc esi
     cmp esi, 65536                      ; the most a FAT directory holds
     jb .scan
-    KLOG "that directory is full"
+    KLOG "that folder is full"
     jmp .fail
 .grow:
     cmp byte [fat_ioerr], 0
@@ -1918,6 +2079,7 @@ fat_read_file:
     push rdi
     push r8
     push r9
+    push r10
     mov r8, rdi
     mov r9, rcx
     call fat_resolve
@@ -1931,13 +2093,43 @@ fat_read_file:
 .sized:
     push rdx
     xor ebx, ebx                        ; bytes so far
-    mov ecx, [r14 + VF_MAXCL]
 .cluster:
     cmp rbx, r9
     jae .done
     call clus_ok
     jc .done                            ; the chain is shorter than the size
+    mov ecx, [r14 + VF_CSHIFT]
+    add ecx, [r14 + VF_SSHIFT]
+    mov rdx, r9
+    sub rdx, rbx
+    shr rdx, cl                         ; the whole clusters still wanted
+    jz .part
+    mov r10d, FAT_RUN
+    shr r10d, cl                        ; at most this many at once
+    cmp rdx, r10
+    jbe .run
+    mov rdx, r10
+.run:
+    mov r10d, eax                       ; a run from this cluster: ECX of
+    call clus_run                       ; them, EAX the one after
+    jc .io
     push rax
+    mov eax, r10d
+    call clus_block
+    mov rsi, rax
+    mov edx, ecx
+    mov ecx, [r14 + VF_CSHIFT]
+    shl edx, cl                         ; its blocks
+    lea rdi, [r8 + rbx]                 ; straight into the buffer
+    call vol_read
+    pop rax
+    jc .io
+    mov ecx, [r14 + VF_SSHIFT]
+    shl rdx, cl
+    add rbx, rdx
+    jmp .cluster
+.part:
+    push rax                            ; a part of the last, through fat_buf
     call clus_block
     mov rsi, rax
     mov edx, [r14 + VF_SPC]
@@ -1945,23 +2137,12 @@ fat_read_file:
     call vol_read
     pop rax
     jc .io
-    push rcx
-    mov ecx, [r14 + VF_CBYTES]
-    mov rdx, r9
-    sub rdx, rbx
-    cmp rdx, rcx
-    jae .whole
-    mov ecx, edx
-.whole:
+    mov rcx, r9
+    sub rcx, rbx
     lea rsi, [fat_buf]
     lea rdi, [r8 + rbx]
     add rbx, rcx
     rep movsb
-    pop rcx
-    call fat_get
-    jc .io
-    dec ecx
-    jnz .cluster
 .done:
     pop rdx
     mov rax, rbx
@@ -1973,9 +2154,10 @@ fat_read_file:
     stc
     jmp .out
 .dir:
-    KLOG "that is a directory"
+    KLOG "that is a folder"
     stc
 .out:
+    pop r10
     pop r9
     pop r8
     pop rdi
@@ -1995,6 +2177,7 @@ fat_write_file:
     push r8
     push r9
     push r10
+    push r11
     push r12
     push r13
     push r15
@@ -2046,11 +2229,16 @@ fat_write_file:
     call sec_drop
     xor r8d, r8d                        ; first cluster
     xor edx, edx                        ; the one before
-    mov r10, r12
+    mov r10, r12                        ; the data not yet given a cluster
     mov r9, r13
+    mov ecx, [r14 + VF_CSHIFT]
+    add ecx, [r14 + VF_SSHIFT]
+    mov r11d, FAT_RUN
+    shr r11d, cl                        ; clusters written at once, at most
+    xor ecx, ecx                        ; given, not yet written: from ESI
 .cluster:
     test r9, r9
-    jz .entry
+    jz .written
     call fat_alloc
     jc .undo
     test r8d, r8d
@@ -2058,9 +2246,38 @@ fat_write_file:
     mov r8d, eax
 .linked:
     mov edx, eax
-    call clus_write
+    mov edi, [r14 + VF_CBYTES]
+    cmp r9, rdi
+    jb .last                            ; a part of one is left
+    test ecx, ecx
+    jz .run
+    cmp ecx, r11d
+    jae .flush
+    lea edi, [esi + ecx]
+    cmp eax, edi                        ; the next on the disk: onto the run
+    jne .flush
+    inc ecx
+    jmp .advance
+.flush:
+    call run_write
     jc .undo
+.run:
+    mov esi, eax
+    mov ecx, 1
+.advance:
+    mov edi, [r14 + VF_CBYTES]
+    add r10, rdi
+    sub r9, rdi
     jmp .cluster
+.last:
+    call run_write
+    jc .undo
+    xor ecx, ecx
+    call clus_write                     ; through fat_buf, with zeros after
+    jc .undo
+.written:
+    call run_write
+    jc .undo
 .entry:
     mov edi, r15d
     mov esi, ebx
@@ -2093,7 +2310,7 @@ fat_write_file:
     stc
     jmp .out
 .is_dir:
-    KLOG "that is a directory"
+    KLOG "that is a folder"
     stc
     jmp .out
 .locked:
@@ -2108,6 +2325,7 @@ fat_write_file:
     pop r15
     pop r13
     pop r12
+    pop r11
     pop r10
     pop r9
     pop r8
@@ -2280,10 +2498,10 @@ fat_remove:
     KLOG "that cannot be removed"
     jmp .fail
 .busy:
-    KLOG "that is the current directory ('cd ..' first)"
+    KLOG "that is the current folder ('go ..' first)"
     jmp .fail
 .not_empty:
-    KLOG "that directory is not empty"
+    KLOG "that folder is not empty"
     jmp .fail
 .io:
     call fat_io_failed
@@ -2299,102 +2517,548 @@ fat_remove:
     pop rcx
     pop rbx
     ret
+RN_ENTRIES      equ 32                  ; a name's entries, at most (20 long, 1 short)
 
-; -----------------------------------------------------------------------------
-;  Shell: ls, cd, cat, write, mkdir, rm
-; -----------------------------------------------------------------------------
-
-; ls_line: one line for fat_ent and fat_name. Preserves all.
-ls_line:
-    push rax
+; fat_rename(R14, RSI = path, RDI = its new path) -> CF and RAX = E_* (said
+; why): a file or a folder renamed where it is, or moved to another folder
+; of the volume. Its entries are written again; what it holds stays where it
+; is on the disk. Preserves others but RAX.
+fat_rename:
+    push rbx
     push rcx
     push rdx
+    push rsi
     push rdi
-    push r8
-    push r9
-    push r10
-    push r11
-    lea r10, [str_ls_dir]
-    lea r11, [str_ls_slash]
-    test byte [fat_ent + 11], 0x10
-    jnz .date
-    mov eax, [fat_ent + 28]
-    lea r10, [ls_size]
-    SPRINTF r10, "%b", rax
-    lea r11, [str_ls_none]
-.date:
-    movzx eax, word [fat_ent + 24]      ; date
-    mov ecx, eax
-    shr ecx, 9
-    add ecx, 1980
-    mov edx, eax
-    shr edx, 5
-    and edx, 15
-    and eax, 31
-    movzx r8d, word [fat_ent + 22]      ; time
-    mov r9d, r8d
-    shr r9d, 5
-    and r9d, 63
-    shr r8d, 11
-    lea rdi, [fat_name]
-    KLOG "  %04u-%02u-%02u %02u:%02u  %10s  %s%s", rcx, rdx, rax, r8, r9, r10, rdi, r11
-    pop r11
-    pop r10
-    pop r9
-    pop r8
+    push rbp
+    push r12
+    push r13
+    push r15
+    mov [rn_new], rdi
+    call fat_need_rw
+    mov eax, E_READONLY
+    jc .err
+    call fat_parent                     ; the old: the folder it is in
+    jc .missing_part
+    call comp_here
+    jc .refuse
+    cmp word [fat_comp], '..'
+    jne .look
+    cmp byte [fat_comp + 2], 0
+    je .refuse
+.look:
+    mov r15d, edi                       ; R15D: the folder it is in
+    lea rsi, [fat_comp]
+    call fat_lookup
+    jc .missing
+    mov r12d, eax                       ; R12D: its cluster
+    mov ebx, [ent_idx]                  ; EBX: its own entry, R13D: its first
+    mov r13d, [ent_first]
+    mov eax, ebx
+    sub eax, r13d
+    cmp eax, RN_ENTRIES
+    jae .refuse
+    lea rsi, [fat_ent]
+    lea rdi, [rn_ent]
+    mov ecx, 4
+    rep movsq
+    test byte [rn_ent + 11], 0x10
+    jz .new
+    cmp r12d, [r14 + VF_ROOT]
+    je .refuse
+    mov eax, [r14 + VF_CWD]             ; not the shell's folder, nor one it is in
+    mov edx, r12d
+    call dir_within
+    jc .busy
+.new:
+    mov rsi, [rn_new]                   ; the new: its folder
+    call fat_parent
+    jc .missing_part
+    call comp_here
+    jc .refuse
+    mov ebp, edi                        ; EBP: the folder it goes to
+    lea rsi, [fat_comp]
+    call fat_lookup
+    jc .free
+    cmp ebp, r15d                       ; itself, its case changed: fine
+    jne .exists
+    cmp [ent_idx], ebx
+    jne .exists
+    jmp .named
+.free:
+    cmp byte [fat_ioerr], 0
+    jne .io
+.named:
+    push r12
+    lea r12, [fat_comp]
+    call fat_name_ok
+    pop r12
+    mov eax, E_ARG
+    jc .err
+    test byte [rn_ent + 11], 0x10       ; a folder: not into itself
+    jz .unmark
+    cmp ebp, r15d
+    je .unmark
+    mov eax, ebp
+    mov edx, r12d
+    call dir_within
+    jc .inside
+.unmark:
+    mov edi, r15d                       ; its entries let go, their first
+    mov esi, r13d                       ; bytes kept, to put back
+    xor ecx, ecx
+.mark:
+    call dir_entry
+    jc .io
+    mov dl, [rax]
+    mov [rn_first + rcx], dl
+    mov byte [rax], 0xE5
+    call sec_mark
+    inc ecx
+    inc esi
+    cmp esi, ebx
+    jbe .mark
+    mov [rn_count], ecx
+    lea rsi, [fat_comp]                 ; its new ones
+    mov edi, ebp
+    mov dl, [rn_ent + 11]
+    call fat_create
+    jc .restore
+    call dir_entry
+    jc .io
+    push rsi
+    push rdi
+    lea rsi, [rn_ent + 13]              ; its times, its cluster, its size
+    lea rdi, [rax + 13]
+    mov ecx, 32 - 13
+    rep movsb
     pop rdi
+    pop rsi
+    call sec_mark
+    test byte [rn_ent + 11], 0x10       ; a folder moved: its ".." too
+    jz .synced
+    cmp ebp, r15d
+    je .synced
+    mov edi, r12d
+    mov esi, 1
+    call dir_entry
+    jc .io
+    mov edx, ebp
+    cmp edx, [r14 + VF_ROOT]
+    jne .up
+    xor edx, edx                        ; the root is cluster 0 here
+.up:
+    mov [rax + 26], dx
+    shr edx, 16
+    mov [rax + 20], dx
+    call sec_mark
+.synced:
+    call fat_sync
+    jc .io
+    xor eax, eax
+    clc
+    jmp .out
+.restore:
+    mov edi, r15d
+    mov esi, r13d
+    xor ecx, ecx
+.back:
+    cmp ecx, [rn_count]
+    jae .restored
+    call dir_entry
+    jc .io
+    mov dl, [rn_first + rcx]
+    mov [rax], dl
+    call sec_mark
+    inc ecx
+    inc esi
+    jmp .back
+.restored:
+    call fat_sync
+    mov eax, E_ARG
+    cmp byte [fat_ioerr], 0
+    je .err
+    mov eax, E_IO
+    jmp .err
+.missing_part:
+    mov eax, E_NOFILE
+    cmp byte [fat_ioerr], 0
+    je .err
+    mov eax, E_IO
+    jmp .err
+.missing:
+    cmp byte [fat_ioerr], 0
+    jne .io
+    lea rax, [fat_comp]
+    KLOG "nothing called '%s' there", rax
+    mov eax, E_NOFILE
+    jmp .err
+.exists:
+    lea rax, [fat_comp]
+    KLOG "'%s' is already there", rax
+    mov eax, E_EXISTS
+    jmp .err
+.refuse:
+    KLOG "that cannot be renamed"
+    mov eax, E_ARG
+    jmp .err
+.busy:
+    KLOG "that is the current folder, or holds it ('go' elsewhere first)"
+    mov eax, E_ARG
+    jmp .err
+.inside:
+    KLOG "a folder cannot go inside itself"
+    mov eax, E_ARG
+    jmp .err
+.io:
+    call fat_io_failed
+    call fat_sync
+    mov eax, E_IO
+.err:
+    movsx rax, eax
+    stc
+.out:
+    pop r15
+    pop r13
+    pop r12
+    pop rbp
+    pop rdi
+    pop rsi
     pop rdx
     pop rcx
+    pop rbx
+    ret
+
+; dir_within(R14, EAX = a directory, EDX = another) -> CF if the other is it,
+; or a folder it is in (or the disk failed finding out). Preserves others but
+; RAX.
+dir_within:
+    push rcx
+    push rsi
+    push rdi
+    mov ecx, 256                        ; deeper than a path goes
+.each:
+    cmp eax, edx
+    je .yes
+    cmp eax, [r14 + VF_ROOT]
+    je .no
+    test eax, eax
+    jz .no
+    dec ecx
+    jz .no
+    mov edi, eax                        ; up, by its ".."
+    mov esi, 1
+    call dir_entry
+    jc .yes
+    movzx edi, word [rax + 20]
+    shl edi, 16
+    mov di, [rax + 26]
+    mov eax, edi
+    test eax, eax
+    jnz .each
+    mov eax, [r14 + VF_ROOT]
+    jmp .each
+.yes:
+    stc
+    jmp .out
+.no:
+    clc
+.out:
+    pop rdi
+    pop rsi
+    pop rcx
+    ret
+
+; -----------------------------------------------------------------------------
+;  Shell: the files thing, go and here. Each action takes its words (EDI =
+;  how many, RSI = them) and gives records (records.asm); CF if it failed.
+;  Paths may have wildcards in their last part (copy, move, remove).
+; -----------------------------------------------------------------------------
+
+FX_PATHS        equ 64 * 1024           ; the paths an action works through
+
+; fx_columns: name (or path), kind, size, changed
+fx_columns:
+    COLUMN 'name', FT_TEXT
+    COLUMN 'kind', FT_TEXT
+    COLUMN 'size', FT_SIZE
+    COLUMN 'changed', FT_TIME
+    ret
+
+; fx_row(RSI = its name or path): a row for fat_ent. Preserves all.
+fx_row:
+    push rax
+    push rsi
+    push rdi
+    call rec_row
+    xor edi, edi
+    call rec_str
+    mov edi, 1
+    lea rsi, [str_fx_file]
+    test byte [fat_ent + 11], 0x10
+    jz .kind
+    lea rsi, [str_fx_folder]
+.kind:
+    call rec_set
+    mov edi, 2
+    test byte [fat_ent + 11], 0x10
+    jz .size
+    call rec_none
+    jmp .time
+.size:
+    mov esi, [fat_ent + 28]
+    call rec_set
+.time:
+    mov edi, 3
+    movzx eax, word [fat_ent + 24]      ; the date,
+    test eax, eax
+    jnz .dated
+    call rec_none
+    jmp .out
+.dated:
+    shl eax, 16
+    mov ax, [fat_ent + 22]              ; and the time
+    call rec_fat_time
+    mov rsi, rax
+    call rec_set
+.out:
+    pop rdi
+    pop rsi
     pop rax
     ret
 
-cmd_ls:
+; fx_skip -> ZF if fat_name is . or ..
+fx_skip:
+    cmp word [fat_name], '.'
+    je .out
+    cmp word [fat_name], '..'
+    jne .out
+    cmp byte [fat_name + 2], 0
+.out:
+    ret
+
+; fx_split(RSI = a path) -> fx_dir = the folder part ("" if there is none),
+; RAX = what follows the last /. Preserves others.
+fx_split:
+    push rcx
+    push rdx
+    push rdi
+    xor ecx, ecx
+    xor edx, edx                        ; just after the last /
+.scan:
+    mov al, [rsi + rcx]
+    test al, al
+    jz .found
+    inc ecx
+    cmp al, '/'
+    jne .scan
+    mov edx, ecx
+    jmp .scan
+.found:
+    lea rdi, [fx_dir]
+    xor ecx, ecx
+.copy:
+    cmp ecx, edx
+    jae .copied
+    cmp ecx, 255
+    jae .copied
+    mov al, [rsi + rcx]
+    mov [rdi + rcx], al
+    inc ecx
+    jmp .copy
+.copied:
+    cmp ecx, 1                          ; "a/": "a"; "/" stays
+    jbe .end
+    cmp byte [rdi + rcx - 1], '/'
+    jne .end
+    dec ecx
+.end:
+    mov byte [rdi + rcx], 0
+    lea rax, [rsi + rdx]
+    pop rdi
+    pop rdx
+    pop rcx
+    ret
+
+; fx_list_dir(R14, EDI = a folder's cluster, RSI = a pattern or 0): a row
+; for each thing in it that matches -> CF (said) if it could not be read
+fx_list_dir:
+    push rdi
+    call dir_open
+.next:
+    call dir_next
+    jc .done
+    call fx_skip
+    je .next
+    test rsi, rsi
+    jz .row
+    push rsi
+    mov rdi, rsi
+    lea rsi, [fat_name]
+    call glob_match
+    pop rsi
+    test eax, eax
+    jz .next
+.row:
+    push rsi
+    lea rsi, [fat_name]
+    call fx_row
+    pop rsi
+    jmp .next
+.done:
+    pop rdi
+    cmp byte [fat_ioerr], 0
+    je .ok
+    call fat_io_failed
+    stc
+    ret
+.ok:
+    clc
+    ret
+
+; fx_folder(R14, RSI = a path) -> EAX = the folder's cluster; CF (said) if
+; it is not one
+fx_folder:
+    call fat_resolve
+    jc .out
+    test byte [fat_ent + 11], 0x10
+    jnz .out
+    KLOG "%s is a file, not a folder", rsi
+    stc
+.out:
+    ret
+
+; files [folder | pattern]: what is there
+files_list:
+    push r12
+    push r13
+    push r14
+    mov r12d, edi
+    mov r13, rsi
+    cmp r12d, 1
+    ja .usage
+    call fat_vol
+    jc .fail
+    call fx_columns
+    lea rsi, [rec_empty]                ; here
+    test r12d, r12d
+    jz .path
+    mov rsi, [r13]
+    mov rdi, rsi
+    call rec_wild
+    test eax, eax
+    jnz .pattern
+.path:
+    call fat_resolve
+    jc .fail
+    test byte [fat_ent + 11], 0x10
+    jnz .folder
+    call fx_row                         ; one file
+    clc
+    jmp .out
+.folder:
+    mov edi, eax
+    xor esi, esi
+    call fx_list_dir
+    jmp .out
+.pattern:
+    call fx_split
+    mov r13, rax
+    lea rsi, [fx_dir]
+    call fx_folder
+    jc .fail
+    mov edi, eax
+    mov rsi, r13
+    call fx_list_dir
+    jmp .out
+.usage:
+    KLOG "usage: files [folder | pattern]"
+.fail:
+    stc
+.out:
+    pop r14
+    pop r13
+    pop r12
+    ret
+
+; files show <file>: its lines, UTF-8 drawn as the console can, a long one
+; in pieces
+files_show:
     push rbx
     push r12
     push r13
     push r14
     push r15
+    cmp edi, 1
+    jne .usage
+    mov rsi, [rsi]
     call fat_vol
-    jc .out
-    mov rsi, [sh_args]
-    call fat_resolve
-    jc .out
-    test byte [fat_ent + 11], 0x10
-    jnz .dir
-    call ls_line
-    jmp .out
-.dir:
-    mov edi, eax
-    call dir_open
-    xor r12d, r12d                      ; files
-    xor r13d, r13d                      ; directories
-    xor r15d, r15d                      ; bytes
-.next:
-    call dir_next
+    jc .fail
+    mov rdi, [rec_tmp]
+    mov ecx, TB_BYTES
+    call fat_read_file
+    jc .fail
+    mov r12, [rec_tmp]
+    mov r13, rax                        ; bytes read
+    mov r15, rdx                        ; its size
+    COLUMN 'text', FT_TEXT
+    mov edi, TBF_LINES
+    call rec_flag
+    cmp r15, r13
+    jbe .whole
+    mov edi, TBF_CUT
+    call rec_flag
+.whole:
+    mov qword [fx_utf8], 0
+    xor ebx, ebx                        ; the line so far
+.byte:
+    test r13, r13
+    jz .last
+    mov al, [r12]
+    inc r12
+    dec r13
+    lea rdi, [fx_utf8]
+    call utf8_step
+    jc .byte
+    cmp eax, 10
+    je .line
+    cmp eax, 13
+    je .byte
+    call glyph_of
+    test eax, eax
+    jz .byte
+    cmp eax, ' '
+    jae .put
+    mov eax, '.'
+.put:
+    mov [fx_line + rbx], al
+    inc ebx
+    cmp ebx, REC_CHUNK
+    jb .byte
+.line:
+    call rec_row
     jc .done
-    cmp word [fat_name], '.'
-    je .next
-    cmp word [fat_name], '..'
-    jne .show
-    cmp byte [fat_name + 2], 0
-    je .next
-.show:
-    call ls_line
-    test byte [fat_ent + 11], 0x10
-    jnz .count_dir
-    inc r12d
-    mov eax, [fat_ent + 28]
-    add r15, rax
-    jmp .next
-.count_dir:
-    inc r13d
-    jmp .next
+    xor edi, edi
+    lea rsi, [fx_line]
+    mov edx, ebx
+    call rec_strn
+    xor ebx, ebx
+    jmp .byte
+.last:
+    test ebx, ebx
+    jz .done
+    call rec_row
+    jc .done
+    xor edi, edi
+    lea rsi, [fx_line]
+    mov edx, ebx
+    call rec_strn
 .done:
-    cmp byte [fat_ioerr], 0
-    je .total
-    call fat_io_failed
-.total:
-    KLOG "  %u files (%b), %u directories", r12, r15, r13
+    clc
+    jmp .out
+.usage:
+    KLOG "usage: files show <file>"
+.fail:
+    stc
 .out:
     pop r15
     pop r14
@@ -2403,64 +3067,712 @@ cmd_ls:
     pop rbx
     ret
 
-cmd_cd:
-    push r14
-    call fat_vol
-    jc .out
-    mov rsi, [sh_args]
-    cmp byte [rsi], 0
-    jne .go
-    lea rax, [r14 + VF_PATH]
-    KLOG "%s", rax
+; fx_add(RSI = a path) -> onto fx_paths; CF (said) if there is no room.
+; Preserves all.
+fx_add:
+    push rax
+    push rcx
+    push rsi
+    push rdi
+    mov rdi, rsi
+    call strlen
+    mov rdi, [fx_end]
+    lea rcx, [rdi + rax + 1]
+    lea rax, [fx_paths + FX_PATHS]
+    cmp rcx, rax
+    ja .full
+.copy:
+    lodsb
+    stosb
+    test al, al
+    jnz .copy
+    mov [fx_end], rdi
+    inc dword [fx_count]
+    clc
     jmp .out
+.full:
+    KLOG "that is too many files at once"
+    stc
+.out:
+    pop rdi
+    pop rsi
+    pop rcx
+    pop rax
+    ret
+
+; fx_expand(R14, RSI = a path, with a pattern in its last part, or not) ->
+; onto fx_paths, each thing it names; CF (said) if a pattern matches nothing
+fx_expand:
+    push rbx
+    push r12
+    push r13
+    mov r12, rsi
+    mov rdi, rsi
+    call rec_wild
+    test eax, eax
+    jnz .pattern
+    call fx_add
+    jmp .out
+.pattern:
+    call fx_split
+    mov r13, rax                        ; the pattern
+    lea rsi, [fx_dir]
+    call fx_folder
+    jc .out
+    mov ebx, [fx_count]
+    mov edi, eax
+    call dir_open
+.next:
+    call dir_next
+    jc .looked
+    call fx_skip
+    je .next
+    mov rdi, r13
+    lea rsi, [fat_name]
+    call glob_match
+    test eax, eax
+    jz .next
+    call rec_begin                      ; the folder, then the name
+    lea rsi, [fx_dir]
+    call rec_puts
+    cmp byte [fx_dir], 0
+    je .name
+    cmp word [fx_dir], '/'
+    je .name
+    lea rsi, [str_fx_slash]
+    call rec_puts
+.name:
+    lea rsi, [fat_name]
+    call rec_puts
+    lea rsi, [rec_line]
+    call fx_add
+    jc .out
+    jmp .next
+.looked:
+    cmp byte [fat_ioerr], 0
+    je .counted
+    call fat_io_failed
+    stc
+    jmp .out
+.counted:
+    cmp [fx_count], ebx
+    jne .found
+    KLOG "nothing matches %s", r12
+    stc
+    jmp .out
+.found:
+    clc
+.out:
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+; fx_start: fx_paths empty
+fx_start:
+    lea rax, [fx_paths]
+    mov [fx_end], rax
+    mov dword [fx_count], 0
+    ret
+
+; fx_target(R14, RSI = from, RDI = to, EDX = 1 if <to> is a folder) ->
+; fx_to = where the copy goes. Preserves all.
+fx_target:
+    push rax
+    push rcx
+    push rsi
+    push rdi
+    push rsi
+    call rec_begin
+    mov rsi, rdi
+    call rec_puts
+    pop rsi
+    test edx, edx
+    jz .copy
+    mov eax, [rec_len]                  ; <to>/<its last part>
+    test eax, eax
+    jz .base
+    cmp byte [rec_line + rax - 1], '/'
+    je .base
+    push rsi
+    lea rsi, [str_fx_slash]
+    call rec_puts
+    pop rsi
+.base:
+    call fx_split
+    mov rsi, rax
+    call rec_puts
+.copy:
+    lea rdi, [fx_to]
+    lea rsi, [rec_line]
+    mov ecx, 256
+    call rec_copyz
+    pop rdi
+    pop rsi
+    pop rcx
+    pop rax
+    ret
+
+; fx_same(R14, RSI = a path, RDI = another) -> CF if both name one file.
+; Preserves all.
+fx_same:
+    push rax
+    push rcx
+    push rsi
+    push rdi
+    push rdi
+    call path_join
+    pop rdi
+    jc .no
+    push rdi
+    lea rdi, [fx_from]
+    lea rsi, [fat_path]
+    mov ecx, 256
+    call rec_copyz
+    pop rsi
+    call path_join
+    jc .no
+    lea rdi, [fx_from]
+    lea rsi, [fat_path]
+    call rec_icmp
+    test eax, eax
+    jnz .no
+    stc
+    jmp .out
+.no:
+    clc
+.out:
+    pop rdi
+    pop rsi
+    pop rcx
+    pop rax
+    ret
+
+; fx_copy_one(R14, RSI = from, RDI = to) -> RAX = bytes; CF (said) if not
+fx_copy_one:
+    push rbx
+    push rcx
+    push rdx
+    push r12
+    push r13
+    mov r12, rdi
+    call fat_resolve
+    jc .fail
+    test byte [fat_ent + 11], 0x10
+    jnz .folder
+    mov r13d, [fat_ent + 28]
+    lea rdi, [r13 + 1]
+    call vm_alloc
+    test rax, rax
+    jz .no_memory
+    mov rbx, rax
+    mov rdi, rbx
+    mov rcx, r13
+    call fat_read_file
+    jc .free
+    cmp rax, r13
+    jb .short
+    push rsi
+    mov rsi, r12
+    mov rdi, rbx
+    mov rcx, r13
+    call fat_write_file
+    pop rsi
+    jc .free
+    mov rdi, rbx
+    call vm_free
+    mov rax, r13
+    clc
+    jmp .out
+.short:
+    KLOG "%s: its data is shorter than its size", rsi
+.free:
+    mov rdi, rbx
+    call vm_free
+    jmp .fail
+.folder:
+    KLOG "%s is a folder: copy and move take files", rsi
+    jmp .fail
+.no_memory:
+    KLOG "no memory for %s", rsi
+.fail:
+    stc
+.out:
+    pop r13
+    pop r12
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; files copy <from>... <to>, and files move (EDX = 1): each into <to> if it
+; is a folder, else <to> is the one copy
+files_copy:
+    xor edx, edx
+    jmp fx_copy
+files_move:
+    mov edx, 1
+fx_copy:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    push rbp
+    mov ebp, edx                        ; moving
+    cmp edi, 2
+    jb .usage
+    mov r12d, edi
+    mov r13, rsi
+    call fat_vol
+    jc .fail
+    call fx_start
+    xor ebx, ebx
+.expand:
+    lea eax, [r12d - 1]
+    cmp ebx, eax
+    jae .expanded
+    mov rsi, [r13 + rbx * 8]
+    call fx_expand
+    jc .fail
+    inc ebx
+    jmp .expand
+.expanded:
+    mov r15, [r13 + rbx * 8]            ; <to>
+    mov byte [fx_into], 0               ; a folder?
+    mov byte [fat_hush], 1
+    mov rsi, r15
+    call fat_resolve
+    mov byte [fat_hush], 0
+    jc .to_said
+    test byte [fat_ent + 11], 0x10
+    jz .to_said
+    mov byte [fx_into], 1
+.to_said:
+    mov rdi, r15                        ; a name ending in / must be one
+    call strlen
+    test rax, rax
+    jz .one
+    cmp byte [r15 + rax - 1], '/'
+    jne .one
+    cmp byte [fx_into], 0
+    jne .one
+    KLOG "there is no folder %s", r15
+    jmp .fail
+.one:
+    cmp byte [fx_into], 0
+    jne .each_start
+    mov eax, [fx_count]
+    cmp eax, 1
+    je .each_start
+    KLOG "%s is not a folder, and there are %u to go into it", r15, rax
+    jmp .fail
+.each_start:
+    xor r12d, r12d                      ; done
+    xor ebx, ebx                        ; bytes
+    lea r13, [fx_paths]
+.each:
+    cmp r13, [fx_end]
+    jae .each_done
+    mov rsi, r13
+    mov rdi, r15
+    movzx edx, byte [fx_into]
+    call fx_target
+    lea rdi, [fx_to]
+    call fx_same
+    jc .same
+    call fx_copy_one
+    jc .each_next
+    add rbx, rax
+    test ebp, ebp
+    jz .copied
+    call fat_remove
+    jc .each_next
+.copied:
+    inc r12d
+.each_next:
+    mov rdi, r13
+    call strlen
+    lea r13, [r13 + rax + 1]
+    jmp .each
+.same:
+    KLOG "%s and %s are the same file", rsi, rdi
+    jmp .each_next
+.each_done:
+    mov eax, [fx_count]
+    lea rsi, [str_fx_copied]
+    test ebp, ebp
+    jz .verb
+    lea rsi, [str_fx_moved]
+.verb:
+    cmp eax, 1
+    jne .many
+    cmp r12d, 1
+    jne .none
+    lea rax, [fx_to]
+    lea rdx, [fx_paths]
+    KLOG "%s %s to %s (%b)", rsi, rdx, rax, rbx
+    clc
+    jmp .out
+.many:
+    KLOG "%s %u of %u (%b) to %s", rsi, r12, rax, rbx, r15
+    cmp r12d, eax
+    jne .fail
+    clc
+    jmp .out
+.none:
+    jmp .fail
+.usage:
+    KLOG "usage: files copy|move <from>... <to>"
+.fail:
+    stc
+.out:
+    pop rbp
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+; files new <name>[/]...: an empty file, or a folder
+files_new:
+    push rbx
+    push r12
+    push r13
+    push r14
+    test edi, edi
+    jz .usage
+    mov r12d, edi
+    mov r13, rsi
+    call fat_vol
+    jc .fail
+    xor ebx, ebx
+.next:
+    cmp ebx, r12d
+    jae .done
+    mov rsi, [r13 + rbx * 8]
+    mov rdi, rsi
+    call strlen
+    test rax, rax
+    jz .bad
+    mov rcx, rax
+    mov byte [fat_hush], 1
+    call fat_resolve
+    mov byte [fat_hush], 0
+    jnc .there
+    cmp byte [rsi + rcx - 1], '/'
+    je .folder
+    lea rdi, [fx_from]                  ; (no bytes)
+    xor ecx, ecx
+    call fat_write_file
+    jc .fail
+    KLOG "made %s", rsi
+    jmp .made
+.folder:
+    call fat_mkdir
+    jc .fail
+    KLOG "made %s", rsi
+.made:
+    inc ebx
+    jmp .next
+.there:
+    KLOG "%s is there already", rsi
+    jmp .fail
+.bad:
+    KLOG "a name, please"
+    jmp .fail
+.done:
+    clc
+    jmp .out
+.usage:
+    KLOG "usage: files new <name>... (a folder if it ends in /)"
+.fail:
+    stc
+.out:
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+; files write <file> <text>...: the text and a newline become the file
+files_write:
+    push r12
+    push r13
+    push r14
+    test edi, edi
+    jz .usage
+    mov r12d, edi
+    mov r13, rsi
+    call fat_vol
+    jc .fail
+    lea edi, [r12d - 1]
+    lea rsi, [r13 + 8]
+    call sh_join
+    lea rsi, [sh_joined]
+    lea rdi, [fat_file]
+    xor ecx, ecx
+.copy:
+    mov al, [rsi + rcx]
+    test al, al
+    jz .copied
+    mov [rdi + rcx], al
+    inc ecx
+    jmp .copy
+.copied:
+    test ecx, ecx
+    jz .empty
+    mov byte [rdi + rcx], 10
+    inc ecx
+.empty:
+    mov rsi, [r13]
+    call fat_write_file
+    jc .fail
+    KLOG "wrote %u bytes to %s", rcx, rsi
+    clc
+    jmp .out
+.usage:
+    KLOG "usage: files write <file> <text>..."
+.fail:
+    stc
+.out:
+    pop r14
+    pop r13
+    pop r12
+    ret
+
+; files remove <path or pattern>...: each file, or empty folder
+files_remove:
+    push rbx
+    push r12
+    push r13
+    push r14
+    test edi, edi
+    jz .usage
+    mov r12d, edi
+    mov r13, rsi
+    call fat_vol
+    jc .fail
+    call fx_start
+    xor ebx, ebx
+.expand:
+    cmp ebx, r12d
+    jae .expanded
+    mov rsi, [r13 + rbx * 8]
+    call fx_expand
+    jc .fail
+    inc ebx
+    jmp .expand
+.expanded:
+    xor r12d, r12d                      ; removed
+    lea r13, [fx_paths]
+.each:
+    cmp r13, [fx_end]
+    jae .done
+    mov rsi, r13
+    call fat_remove
+    jc .next
+    inc r12d
+.next:
+    mov rdi, r13
+    call strlen
+    lea r13, [r13 + rax + 1]
+    jmp .each
+.done:
+    mov eax, [fx_count]
+    cmp eax, 1
+    jne .many
+    test r12d, r12d
+    jz .fail
+    lea rax, [fx_paths]
+    KLOG "removed %s", rax
+    clc
+    jmp .out
+.many:
+    KLOG "removed %u of %u", r12, rax
+    cmp r12d, eax
+    jne .fail
+    clc
+    jmp .out
+.usage:
+    KLOG "usage: files remove <path or pattern>..."
+.fail:
+    stc
+.out:
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+; files find [pattern]: everything below here that matches (everything if
+; no pattern), a folder at a time, nearest first, each with its path from
+; here. The folders still to look in queue in rec_tmp: a dword cluster,
+; then the path.
+files_find:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    push rbp
+    cmp edi, 1
+    ja .usage
+    lea r12, [str_fx_all]
+    test edi, edi
+    jz .pattern
+    mov r12, [rsi]
+.pattern:
+    call fat_vol
+    jc .fail
+    COLUMN 'path', FT_TEXT
+    COLUMN 'kind', FT_TEXT
+    COLUMN 'size', FT_SIZE
+    COLUMN 'changed', FT_TIME
+    mov r13, [rec_tmp]                  ; the next folder to look in
+    mov r15, r13                        ; where the next one queued goes
+    lea rbp, [r13 + TB_BYTES - 512]
+    mov eax, [r14 + VF_CWD]
+    mov [r15], eax
+    mov byte [r15 + 4], 0               ; "" : here
+    add r15, 5
+.folder:
+    cmp r13, r15
+    jae .done
+    mov edi, [r13]
+    lea rbx, [r13 + 4]                  ; its path
+    call dir_open
+.entry:
+    call dir_next
+    jc .looked
+    call fx_skip
+    je .entry
+    call rec_begin                      ; its path: the folder's, then its name
+    mov rsi, rbx
+    call rec_puts
+    cmp byte [rbx], 0
+    je .named
+    lea rsi, [str_fx_slash]
+    call rec_puts
+.named:
+    lea rsi, [fat_name]
+    call rec_puts
+    cmp dword [rec_len], 250
+    jae .entry                          ; too deep to name
+    mov rdi, r12
+    lea rsi, [fat_name]
+    call glob_match
+    test eax, eax
+    jz .queue
+    lea rsi, [rec_line]
+    call fx_row
+.queue:
+    test byte [fat_ent + 11], 0x10
+    jz .entry
+    cmp r15, rbp
+    jae .full
+    movzx eax, word [fat_ent + 20]      ; its cluster
+    shl eax, 16
+    mov ax, [fat_ent + 26]
+    mov [r15], eax
+    lea rdi, [r15 + 4]
+    lea rsi, [rec_line]
+    mov ecx, 256
+    call rec_copyz
+    mov rdi, rsi
+    call strlen
+    lea r15, [r15 + 4 + rax + 1]
+    jmp .entry
+.full:
+    mov edi, TBF_CUT
+    call rec_flag
+    jmp .entry
+.looked:
+    cmp byte [fat_ioerr], 0
+    jne .io
+    mov rdi, rbx                        ; on to the next folder queued
+    call strlen
+    lea r13, [rbx + rax + 1]
+    jmp .folder
+.io:
+    call fat_io_failed
+    jmp .fail
+.done:
+    clc
+    jmp .out
+.usage:
+    KLOG "usage: files find [pattern]"
+.fail:
+    stc
+.out:
+    pop rbp
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+; go [folder]: there (to / alone)
+cmd_go:
+    push r12
+    push r14
+    cmp edi, 1
+    ja .usage
+    lea r12, [str_fx_root]
+    test edi, edi
+    jz .go
+    mov r12, [rsi]
 .go:
+    call fat_vol
+    jc .fail
+    mov rsi, r12
     call path_join
     jc .long
     lea rsi, [fat_path]
-    call fat_resolve
-    jc .out
-    test byte [fat_ent + 11], 0x10
-    jz .not_dir
+    call fx_folder
+    jc .fail
     mov [r14 + VF_CWD], eax
     lea rsi, [fat_path]
     lea rdi, [r14 + VF_PATH]
     mov ecx, 256 / 8
     rep movsq
-    jmp .out
-.not_dir:
-    KLOG "that is a file"
+    clc
     jmp .out
 .long:
     KLOG "that path is too long"
+    jmp .fail
+.usage:
+    KLOG "usage: go [folder]"
+.fail:
+    stc
 .out:
     pop r14
+    pop r12
     ret
 
-cmd_cat:
-    push rbx
+; here: the folder you are in, as vol<n>:<path>
+cmd_here:
     push r14
     call fat_vol
     jc .out
-    mov rsi, [sh_args]
-    cmp byte [rsi], 0
-    je .usage
-    lea rdi, [fat_file]
-    mov ecx, FAT_FILE_MAX
-    call fat_read_file
-    jc .out
-    mov rbx, rdx
-    lea rsi, [fat_file]
-    mov rcx, rax
-    call print_text
-    cmp rbx, rax
-    jbe .out
-    KLOG "(the first %b of %b)", rax, rbx
-    jmp .out
-.usage:
-    KLOG "usage: cat <file>"
+    COLUMN 'path', FT_TEXT
+    push rdi
+    mov edi, TBF_LINES
+    call rec_flag
+    pop rdi
+    call rec_row
+    movzx eax, byte [r14 + VO_INDEX]
+    lea rcx, [r14 + VF_PATH]
+    lea rdi, [fx_from]
+    SPRINTF rdi, "vol%u:%s", rax, rcx
+    xor edi, edi
+    lea rsi, [fx_from]
+    call rec_str
+    clc
 .out:
     pop r14
-    pop rbx
     ret
 
 ; print_text(RSI = text, RCX = bytes): line by line, control characters as
@@ -2515,116 +3827,17 @@ print_text:
     pop rax
     ret
 
-; write <file> <text>: the text and a newline become the file
-cmd_write:
-    push r14
-    call fat_vol
-    jc .out
-    mov rsi, [sh_args]
-    cmp byte [rsi], 0
-    je .usage
-    call arg_split
-    push rsi
-    mov rsi, rdi
-    lea rdi, [fat_file]
-    xor ecx, ecx
-.copy:
-    mov al, [rsi + rcx]
-    test al, al
-    jz .copied
-    mov [rdi + rcx], al
-    inc ecx
-    jmp .copy
-.copied:
-    test ecx, ecx
-    jz .empty
-    mov byte [rdi + rcx], 10
-    inc ecx
-.empty:
-    pop rsi
-    call fat_write_file
-    jc .out
-    KLOG "wrote %u bytes to %s", rcx, rsi
-    jmp .out
-.usage:
-    KLOG "usage: write <file> <text>"
-.out:
-    pop r14
-    ret
-
-; cp <from> <to>: files up to FAT_FILE_MAX
-cmd_cp:
-    push r12
-    push r14
-    call fat_vol
-    jc .out
-    mov rsi, [sh_args]
-    call arg_split
-    cmp byte [rsi], 0
-    je .usage
-    cmp byte [rdi], 0
-    je .usage
-    mov r12, rdi
-    lea rdi, [fat_file]
-    mov ecx, FAT_FILE_MAX
-    call fat_read_file
-    jc .out
-    cmp rdx, rax
-    ja .too_big
-    mov rcx, rax
-    mov rsi, r12
-    lea rdi, [fat_file]
-    call fat_write_file
-    jc .out
-    KLOG "copied %u bytes to %s", rcx, r12
-    jmp .out
-.too_big:
-    KLOG "cp moves files up to 64 KiB for now"
-    jmp .out
-.usage:
-    KLOG "usage: cp <from> <to>"
-.out:
-    pop r14
-    pop r12
-    ret
-
-cmd_mkdir:
-    push r14
-    call fat_vol
-    jc .out
-    mov rsi, [sh_args]
-    cmp byte [rsi], 0
-    je .usage
-    call fat_mkdir
-    jmp .out
-.usage:
-    KLOG "usage: mkdir <directory>"
-.out:
-    pop r14
-    ret
-
-cmd_rm:
-    push r14
-    call fat_vol
-    jc .out
-    mov rsi, [sh_args]
-    cmp byte [rsi], 0
-    je .usage
-    call fat_remove
-    jmp .out
-.usage:
-    KLOG "usage: rm <file or empty directory>"
-.out:
-    pop r14
-    ret
-
 section .rodata
 lfn_offsets:    db 1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30
 fat_bad_chars:  db '"*/:<>?\|', 0
 fat_short_specials: db '!#$%&', 0x27, '()-@^_`{}~', 0
-str_ls_dir:     db '<dir>', 0
-str_ls_slash:   db '/', 0
-str_ls_none:    db 0
+str_fx_file:    db 'file', 0
+str_fx_folder:  db 'folder', 0
+str_fx_slash:   db '/', 0
+str_fx_root:    db '/', 0
+str_fx_all:     db '*', 0
+str_fx_copied:  db 'copied', 0
+str_fx_moved:   db 'moved', 0
 
 section .bss
 alignb 8
@@ -2653,19 +3866,33 @@ lfn_sum:        resd 1
 lfn_first:      resd 1
 ent_idx:        resd 1
 ent_first:      resd 1
+rn_new:         resq 1                  ; fat_rename: the new path
+rn_count:       resd 1
+rn_ent:         resb 32                 ; its entry, as it was
+rn_first:       resb RN_ENTRIES         ; its entries' first bytes, to put back
 fat_basis:      resq 1
 fat_tail:       resq 1
 fat_sname:      resb 11
 fat_scase:      resb 1
 fat_ent:        resb 32
 fat_short:      resb 16
-ls_size:        resb 32
 fat_name:       resb 256
 fat_comp:       resb 256
 fat_path:       resb 256
 cat_line:       resb 1024
+alignb 8
+fx_end:         resq 1                  ; fx_paths: where the next goes,
+fx_utf8:        resq 1                  ; files show: utf8_step's state
+fx_count:       resd 1                  ; and how many there are
+fx_into:        resb 1                  ; copy, move: <to> is a folder
+fx_dir:         resb 256                ; fx_split: the folder part
+fx_to:          resb 256                ; fx_target: where a copy goes
+fx_from:        resb 320
+fx_line:        resb 1024               ; files show: a line
+fx_paths:       resb FX_PATHS           ; the paths an action works through
 alignb 4096
 fc_buf:         resb 4096
 sc_buf:         resb 4096
 fat_buf:        resb 64 * 1024
+fc_scan:        resb FC_SCAN
 fat_file:       resb FAT_FILE_MAX

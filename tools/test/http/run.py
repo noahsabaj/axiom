@@ -384,7 +384,7 @@ def main():
                "type httpd stop" + NL, "wait 0.5", "type poweroff" + NL, "ended"]
     fwd = f"user,hostfwd=tcp:127.0.0.1:{serve_port}-:8080"
     logs = boot_all(OUT, {"http": (script, ["--smp", "4", "--nic", "rtl8139", "--netdev", fwd,
-                                            "--stick", stick.relative_to(ROOT).as_posix()], 240)})
+                                            "--stick", stick.relative_to(ROOT).as_posix()], 240, 1)})
     log, err = logs["http"]
     result("AXIOM PANIC" not in log, "no panic")
     result("QEMU ended by itself" in err, "powered off")

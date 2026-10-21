@@ -4,6 +4,7 @@
 
 EFI_SUCCESS             equ 0
 EFI_LOAD_ERROR          equ 0x8000000000000001
+EFI_BUFFER_TOO_SMALL    equ 0x8000000000000005
 
 ; EFI_TABLE_HEADER
 HDR_REVISION            equ 8
@@ -29,6 +30,11 @@ BS_STALL                equ 248
 BS_SET_WATCHDOG         equ 256
 BS_LOCATE_PROTOCOL      equ 320
 
+; EFI_RUNTIME_SERVICES
+RT_GET_VARIABLE         equ 72
+RT_SET_VARIABLE         equ 88
+EFI_VAR_NV_BS_RT        equ 7           ; non-volatile, boot and runtime access
+
 ALLOCATE_ANY_PAGES      equ 0
 ALLOCATE_MAX_ADDRESS    equ 1
 EFI_LOADER_DATA         equ 2
@@ -40,9 +46,23 @@ BIO_MEDIA               equ 8
 BIO_READ_BLOCKS         equ 24
 BM_MEDIA_ID             equ 0
 BM_BLOCK_SIZE           equ 12
+; EFI_SIMPLE_FILE_SYSTEM_PROTOCOL, and EFI_FILE_PROTOCOL
+SFS_OPEN_VOLUME         equ 8
+FILE_OPEN               equ 8
+FILE_CLOSE              equ 16
+FILE_READ               equ 32
+FILE_SET_POSITION       equ 56
+EFI_FILE_MODE_READ      equ 1
 
 ; EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL
 CON_OUTPUT_STRING       equ 8
+
+; EFI_SIMPLE_FILE_SYSTEM_PROTOCOL and EFI_FILE_PROTOCOL
+SFS_OPEN_VOLUME         equ 8
+FP_OPEN                 equ 8
+FP_CLOSE                equ 16
+FP_READ                 equ 32
+EFI_FILE_MODE_READ      equ 1
 
 ; EFI_GRAPHICS_OUTPUT_PROTOCOL
 GOP_QUERY_MODE          equ 0

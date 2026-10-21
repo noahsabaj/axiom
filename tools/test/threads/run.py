@@ -4,8 +4,9 @@
     python tools/test/threads/run.py [--quick]
 
 Boots build/esp (build it first) and checks the serial log:
-  - 8 CPUs: 'threads' (each CPU, and the threads every boot has: main,
-    an idle thread and a job worker on each CPU), 'threads test' (2000
+  - 8 CPUs: 'threads cpus' (each CPU), 'threads' (the threads every boot
+    has: main, an idle thread and a job worker on each CPU), 'threads |
+    count' (as many after the tests as before), 'threads test' (2000
     threads started and joined; switches on one CPU and wake-ups across
     two; 1 ms sleeps; fairness between spinning threads, with the main
     thread answering on time and SIMD registers kept across switches;
@@ -15,6 +16,8 @@ Boots build/esp (build it first) and checks the serial log:
     looks on, and poweroff;
   - 'threads test' on one CPU, and (unless --quick) under TCG, QEMU's own
     CPU emulation, on four;
+  - the load average ('uptime'), on two CPUs: idle, after 2 threads spin
+    for 30 s (Unix's would be 0.79), and after 30 s idle again;
   - 'panic thread': a thread's stack overflow, named in the report.
 Outputs go to build/test/threads/.
 """
@@ -39,6 +42,7 @@ def result(ok, text):
 
 
 TEST = ["type threads test\\n", "until threads test: p", "wait 0.5"]
+COUNT = ["type threads | count | to json\\n", 'until "count"', "wait 0.3"]
 
 
 def check_test(log, cpus, label):
@@ -96,14 +100,22 @@ def jobs(opts):
     """Every boot, side by side."""
     jobs = {
         "eight": ([
-            "type threads\\n", "until ended since boot", "wait 0.5",
+            "type threads cpus\\n", "until handed", "wait 0.5",
+            "type threads\\n", "until moves", "wait 0.5",
+            *COUNT,
             *TEST,
             "type threads spin 16 any 2\\n", "until spin: 16", "wait 1",
-            "type threads\\n", "until ended since boot", "wait 2.5",
+            "type threads\\n", "until moves", "wait 0.5",
+            *COUNT, "wait 2",
             "type threads\\n", "wait 0.5",
+            *COUNT,
             "type poweroff\\n", "ended",
         ], ["--smp", "8"], 120),
         "one": ([*TEST, "type poweroff\\n", "ended"], ["--smp", "1"], 90),
+        "load": (["wait 12", "type uptime\\n", "until load", "wait 0.5",
+                  "type threads spin 2 any 30\\n", "wait 31", "type uptime\\n", "until load", "wait 30",
+                  "type uptime\\n", "until load", "wait 0.5", "type poweroff\\n", "ended"],
+                 ["--smp", "2"], 120),
         "panic_thread": (["type panic thread\\n", "until AXIOM PANIC", "wait 0.5"],
                          ["--smp", "1"], 30),
     }
@@ -116,9 +128,9 @@ def jobs(opts):
 def eight(logs):
     print("-- 8 CPUs")
     log, err = logs["eight"]
-    first = log[log.find("  CPU  kind"):]
-    rows = re.findall(r"^\s+(\d+)\s+\S+\s+\d+\s+\d+%", first.split("threads;")[0], re.M)
-    result(rows == [str(i) for i in range(8)], "'threads' lists 8 CPUs")
+    first = log[log.find("  cpu  kind"):]
+    rows = re.findall(r"^\s+(\d+)\s+\S+\s+\d+\s+\d+%", first.split("name")[0], re.M)
+    result(rows == [str(i) for i in range(8)], "'threads cpus' lists 8 CPUs")
     names = re.findall(r"^\s+\d+\s+(\S+)\s+(?:running|parked|ready)", first.split("threads test")[0],
                        re.M)
     want = {"main", "idle/0"} | {f"idle/{i}" for i in range(1, 8)} | \
@@ -133,7 +145,7 @@ def eight(logs):
     during = log[log.find("spin: 16 threads"):]
     result(re.search(r"^\s+\d+\s+spin\s+(?:running|ready)", during, re.M) is not None,
            "'threads' shows the spinners while they run")
-    counts = re.findall(r"(\d+) threads; \d+ ended since boot", log)
+    counts = re.findall(r'"count": (\d+)', log)
     result(len(counts) >= 3 and counts[0] == counts[-1],
            f"after them, {counts[-1] if counts else '?'} threads, as at boot")
     result("QEMU ended by itself" in err, "8 CPUs: powered off")
@@ -151,6 +163,22 @@ def small(opts, logs):
     result("smp: 4 of 4 threads online" in log, "TCG: 4 CPUs came up")
     check_test(log, 4, "TCG")
     result("QEMU ended by itself" in err, "TCG: powered off")
+
+
+def load(logs):
+    print("-- the load average")
+    log, err = logs["load"]
+    loads = [float(x) for x in re.findall(r"since power-on; load (\d+\.\d\d)", log)]
+    result(len(loads) == 3, f"'uptime' says the load, three times: {loads}")
+    if len(loads) != 3:
+        return
+    idle, busy, after = loads
+    result(idle < 0.15, f"idle: {idle}")
+    # 2 threads wanting a CPU for 30 s, on 2: 2 (1 - e^(-30/60)) = 0.79, less a
+    # sample's phase (5 s), more with the host's own interruptions
+    result(0.55 <= busy <= 1.0, f"2 spinning threads for 30 s: {busy} (Unix's would be 0.79)")
+    result(abs(after - busy * 0.61) <= 0.12, f"then 30 s idle: {after} (e^(-1/2) of it: "
+           f"{busy * 0.61:.2f})")
 
 
 def overflow(logs):
@@ -171,6 +199,7 @@ def main():
     logs = boot_all(OUT, jobs(opts))
     eight(logs)
     small(opts, logs)
+    load(logs)
     overflow(logs)
     print(f"{'all passed' if not FAILS else f'{FAILS} FAILED'}")
     return 1 if FAILS else 0

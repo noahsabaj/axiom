@@ -268,6 +268,9 @@ class Monitor:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--headless", action="store_true")
+    ap.add_argument("--demo", action="store_true", help="headless, start the Mandelbrot "
+                    "zoom at boot anyway (it keeps every CPU busy, so headless runs "
+                    "leave it off)")
     ap.add_argument("--smp", default="8")
     ap.add_argument("--mem", default="6G")
     ap.add_argument("--wait", type=float, help="seconds before keys/shot, instead of "
@@ -284,6 +287,9 @@ def main():
                     "serial port on the next two); 0 for free ones and firmware "
                     "variables of its own")
     ap.add_argument("--serial", default="serial.log", help="log name in build/")
+    ap.add_argument("--vars", help="the firmware's variables in this file, kept after "
+                    "the run (made from their first state if it is not there), so that "
+                    "boots one after another share them")
     ap.add_argument("--cpu", help="CPU model (default: max; max,-svm,-vmx on WHPX)")
     ap.add_argument("--no-iommu", action="store_true", help="leave out the emulated VT-d "
                     "unit (intel-iommu) every device's DMA otherwise goes through")
@@ -294,6 +300,11 @@ def main():
     ap.add_argument("--mac", help="the card's MAC address")
     ap.add_argument("--stick", help="boot from this USB stick image (tools/mkstick.py) "
                     "instead of build/esp")
+    ap.add_argument("--internal", action="store_true", help="--stick's image as the "
+                    "machine's own NVMe drive, not a USB stick (as hp-1 starts Axiom from "
+                    "its own disk's EFI partition)")
+    ap.add_argument("--esp", help="boot this folder instead of build/esp (a "
+                    "build kept aside, to compare with)")
     ap.add_argument("--trace", action="store_true", help="say how long each step of "
                     "--script took")
     ap.add_argument("--script", help="monitor commands after the keys, separated "
@@ -301,17 +312,25 @@ def main():
                     "the log after the last text typed, 'shot FILE' takes a screenshot, "
                     "'type TEXT' types down the serial port, 'press TEXT' on the "
                     "keyboard, 'abs X Y [button]' points (and clicks), 'drag X1 Y1 X2 Y2 "
-                    "[button]' drags, 'wheel X Y N' turns the wheel N notches)")
+                    "[button]' drags, 'glide X1 Y1 X2 Y2 STEPS MS [button]' moves it smoothly, 'wheel X Y N' turns the wheel N notches, 'key NAME "
+                    "down|up' presses or lets go of one key)")
     opts = ap.parse_args()
-    fresh = opts.port == 0
+    fresh = opts.port == 0 and not opts.vars
+    sys.path.insert(0, str(ROOT / "tools"))
+    import space
+    space.check()                       # stops before the disk fills
 
-    if opts.stick:
+    if opts.stick and opts.internal:
+        # the image as the machine's own disk: not removable; writes stay
+        boot = ["-drive", f"file={opts.stick},if=none,id=bootstick,format=raw",
+                "-device", "nvme,serial=axiom-boot,drive=bootstick,bootindex=0"]
+    elif opts.stick:
         # the loader on a USB stick image, as on real hardware; writes stay
         boot = ["-device", "qemu-xhci,id=bootx",
                 "-drive", f"file={opts.stick},if=none,id=bootstick,format=raw",
                 "-device", "usb-storage,bus=bootx.0,drive=bootstick,bootindex=0"]
     else:
-        boot = ["-drive", f"format=raw,file=fat:{BUILD / 'esp'},snapshot=on"]
+        boot = ["-drive", f"format=raw,file=fat:{opts.esp or BUILD / 'esp'},snapshot=on"]
     qemu = find_qemu()
     serial = BUILD / opts.serial
     accel = pick_accel(qemu, opts.accel)
@@ -319,10 +338,18 @@ def main():
     cpu = opts.cpu or ("max,-svm,-vmx" if accel == "whpx" else "max")
 
     def qemu_args():
-        MONITOR[1] = free_ports() if fresh else opts.port
+        MONITOR[1] = free_ports() if opts.port == 0 else opts.port
         # a stick boot leaves its own boot entries in the firmware's variables:
         # keep them apart from the usual ones
-        code, vars_fd = firmware(qemu, f"{MONITOR[1]}{'-stick' if opts.stick else ''}", fresh)
+        if opts.vars:
+            code = qemu.parent / "share" / "edk2-x86_64-code.fd"
+            vars_fd = pathlib.Path(opts.vars).resolve()
+            if not vars_fd.exists():
+                vars_fd.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(code.parent / "edk2-i386-vars.fd", vars_fd)
+        else:
+            code, vars_fd = firmware(qemu, f"{MONITOR[1]}{'-stick' if opts.stick else ''}",
+                                     fresh)
         args = [str(qemu), "-accel", accel, "-machine", "q35", "-cpu", cpu, "-smp", opts.smp,
                 "-m", opts.mem,
                 *([] if opts.no_iommu else ["-device", "intel-iommu,intremap=off"]),
@@ -332,6 +359,8 @@ def main():
                 "-no-reboot",
                 "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
                 *shlex.split(opts.extra)]
+        if opts.headless and not opts.demo:
+            args += ["-smbios", "type=11,value=axiom.demo=off"]
         if opts.nic:
             mac = f",mac={opts.mac}" if opts.mac else ""
             pcap = BUILD / f"net-{MONITOR[1]}.pcap"
@@ -405,6 +434,26 @@ def main():
                     qmp.abs(x1 + (x2 - x1) * i // 8, y1 + (y2 - y1) * i // 8)
                 time.sleep(0.1)
                 qmp.abs(x2, y2, [(b, False)])
+            elif line.startswith("glide "):
+                # glide X1 Y1 X2 Y2 STEPS MS [button]: the pointer from one
+                # point to the other in STEPS even steps over MS milliseconds,
+                # the button held all the way if one is named
+                qmp = qmp or Qmp(MONITOR[1] + 1)
+                parts = line.split()
+                x1, y1, x2, y2, steps, ms = (int(v) for v in parts[1:7])
+                held = [(parts[7], True)] if len(parts) > 7 else []
+                qmp.abs(x1, y1)
+                time.sleep(0.05)
+                if held:
+                    qmp.abs(x1, y1, held)
+                start = time.monotonic()
+                for i in range(1, steps + 1):
+                    due = start + ms / 1000 * i / steps
+                    time.sleep(max(0.0, due - time.monotonic()))
+                    qmp.abs(x1 + (x2 - x1) * i // steps, y1 + (y2 - y1) * i // steps)
+                if held:
+                    time.sleep(0.05)
+                    qmp.abs(x2, y2, [(parts[7], False)])
             elif line.startswith("wheel "):
                 # wheel X Y N: the pointer there, the wheel turned N notches
                 # (up positive)
@@ -429,6 +478,14 @@ def main():
                     qmp.abs(x, y, [(b, True)])
                     time.sleep(0.1)
                     qmp.abs(x, y, [(b, False)])
+            elif line.startswith("key "):
+                # key NAME down|up: one key (a QEMU qcode: a, up, ctrl...)
+                # pressed or let go, so a key can be held, or repeat
+                qmp = qmp or Qmp(MONITOR[1] + 1)
+                parts = line.split()
+                qmp.send({"execute": "input-send-event", "arguments": {"events": [
+                    {"type": "key", "data": {"down": parts[2] == "down",
+                                             "key": {"type": "qcode", "data": parts[1]}}}]}})
             elif line.startswith("wait "):
                 time.sleep(float(line[5:]))
             elif line == "ended":

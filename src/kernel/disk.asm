@@ -226,6 +226,7 @@ disk_write:
     push rcx
     mov ecx, DOP_WRITE
 disk_io:
+    inc qword [disk_ops]                ; (bench fat counts them)
     test dword [rbx + DK_FLAGS], DKF_GONE
     jnz .gone
     test edx, edx
@@ -919,6 +920,7 @@ mbr_types:                              ; type byte, name
 
 section .bss
 alignb 8
+disk_ops:       resq 1                  ; reads and writes asked of drivers
 disk_count:     resd 1
 vol_count:      resd 1
 vol_current:    resq 1

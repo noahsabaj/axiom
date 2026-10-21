@@ -19,6 +19,7 @@
 ; =============================================================================
 
 %include "axe.inc"
+WANTS AW_NET
 
 ECHO_MAX        equ 16
 GOT_MAX         equ 65536
@@ -917,13 +918,15 @@ m_test:
     EXPECT E_ARG
     CONNECT [ax_net], h_host, 70000, 0
     EXPECT E_ARG
-    CONNECT [ax_net], h_host, 7, 4
+    CONNECT [ax_net], h_host, 7, 8
     EXPECT E_ARG
     CONNECT [ax_net], h_host, 7, NETF_INSECURE
     EXPECT E_ARG
+    CONNECT [ax_net], h_host, 7, NETF_LOOKUP | NETF_TLS
+    EXPECT E_ARG
     mov edi, [ax_net]
     mov esi, RO_NET_LISTEN
-    xor ecx, ecx
+    mov ecx, 70000
     call simple
     EXPECT E_ARG
     mov edi, r12d
@@ -947,7 +950,7 @@ m_test:
     EXPECT 0
     mov edi, r15d
     call status
-    EXPECT SKS_FAILED | (NETW_BADNAME << 8)
+    EXPECT SKS_FAILED | (NETW_BADNAME << 8) | NS_RECV | NS_SEND
     mov edi, r15d
     mov edx, 16
     call recv_io
@@ -1035,7 +1038,7 @@ m_test:
     call wait_on
     mov edi, r15d
     call status
-    EXPECT SKS_FAILED | (NETW_RESET << 8)
+    EXPECT SKS_FAILED | (NETW_RESET << 8) | NS_RECV | NS_SEND
     CLOSE r15d
 .reset:
     CLOSE r14d

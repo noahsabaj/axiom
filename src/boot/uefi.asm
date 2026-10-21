@@ -4,7 +4,8 @@
 ;  A PE32+ image laid out byte by byte by NASM: no linker, no C, no libraries.
 ;  It asks the firmware for the display, the memory map and the ACPI/SMBIOS
 ;  tables, builds Axiom's page tables, leaves boot services and jumps into the
-;  kernel at KERNEL_BASE.
+;  kernel at KERNEL_BASE: the one built into it, or an update from the volume
+;  it came from (find_slot).
 ;
 ;  The firmware may load this image anywhere, so all code is RIP-relative.
 ;  Never write [label + reg] in this file: NASM would encode an absolute
@@ -122,6 +123,7 @@ entry:                                      ; RCX = ImageHandle, RDX = SystemTab
     mov rax, [rbx + ST_CONOUT]
     mov [con_out], rax
     mov rax, [rbx + ST_RUNTIME]
+    mov [runtime], rax
     mov [bootinfo + BI_RUNTIME], rax
 
     xor ecx, ecx                            ; SetWatchdogTimer(0, 0, 0, NULL)
@@ -139,11 +141,23 @@ entry:                                      ; RCX = ImageHandle, RDX = SystemTab
     jc .five_level
 
     call setup_display
+    rdtsc
+    mov [bootinfo + BI_TSC_DISPLAY], eax
+    mov [bootinfo + BI_TSC_DISPLAY + 4], edx
     call find_config_tables
     call find_boot_volume
+    call read_settings
     call calibrate_tsc
+    call find_test_run
+    call find_slot
+    rdtsc
+    mov [bootinfo + BI_TSC_CALIB], eax
+    mov [bootinfo + BI_TSC_CALIB + 4], edx
     call load_kernel
     call build_page_tables
+    rdtsc
+    mov [bootinfo + BI_TSC_TABLES], eax
+    mov [bootinfo + BI_TSC_TABLES + 4], edx
     lea rdx, [msg_launch]
     call print
     call leave_boot_services
@@ -400,6 +414,7 @@ find_boot_volume:
     jnz .out
     mov rax, [boot_proto]
     mov rcx, [rax + LI_DEVICE_HANDLE]
+    mov [boot_device], rcx                  ; (find_slot reads files from it)
     lea rdx, [block_io_guid]
     lea r8, [boot_proto]
     mov rax, [boot_services]
@@ -460,24 +475,573 @@ find_boot_volume:
     ret
 
 ; -----------------------------------------------------------------------------
-;  calibrate_tsc - let the firmware's own timer measure our TSC
+;  read_settings - \SETTINGS.TXT from the volume this loader came from, for
+;  the kernel to take its settings from before it draws anything (the text
+;  size, the look). Read only. Never fatal: without it, the defaults.
+; -----------------------------------------------------------------------------
+SETTINGS_PAGES  equ 2                       ; the kernel keeps at most 8 KiB of it
+
+read_settings:
+    sub rsp, 40                             ; shadow space + a fifth argument
+    mov rcx, [image_handle]
+    lea rdx, [loaded_image_guid]
+    lea r8, [boot_proto]
+    mov rax, [boot_services]
+    call [rax + BS_HANDLE_PROTOCOL]
+    test rax, rax
+    jnz .out
+    mov rax, [boot_proto]
+    mov rcx, [rax + LI_DEVICE_HANDLE]
+    lea rdx, [simple_fs_guid]
+    lea r8, [boot_proto]
+    mov rax, [boot_services]
+    call [rax + BS_HANDLE_PROTOCOL]
+    test rax, rax
+    jnz .out
+    mov rcx, [boot_proto]                   ; OpenVolume(This, &root)
+    lea rdx, [settings_root]
+    call [rcx + SFS_OPEN_VOLUME]
+    test rax, rax
+    jnz .out
+    mov rcx, [settings_root]                ; Open(root, &file, name, read, 0)
+    lea rdx, [settings_file]
+    lea r8, [settings_name]
+    mov r9d, EFI_FILE_MODE_READ
+    mov qword [rsp + 32], 0
+    call [rcx + FP_OPEN]
+    test rax, rax
+    jnz .root
+    mov ecx, ALLOCATE_ANY_PAGES
+    mov edx, EFI_LOADER_DATA
+    mov r8d, SETTINGS_PAGES
+    lea r9, [settings_buf]
+    mov rax, [boot_services]
+    call [rax + BS_ALLOCATE_PAGES]
+    test rax, rax
+    jnz .file
+    mov qword [settings_size], SETTINGS_PAGES * 4096
+    mov rcx, [settings_file]                ; Read(file, &size, buffer)
+    lea rdx, [settings_size]
+    mov r8, [settings_buf]
+    call [rcx + FP_READ]
+    test rax, rax
+    jnz .file
+    mov rax, [settings_buf]
+    mov [bootinfo + BI_SETTINGS], rax
+    mov rax, [settings_size]
+    mov [bootinfo + BI_SETTINGS_LEN], rax
+.file:
+    mov rcx, [settings_file]
+    call [rcx + FP_CLOSE]
+.root:
+    mov rcx, [settings_root]
+    call [rcx + FP_CLOSE]
+.out:
+    add rsp, 40
+    ret
+
+; -----------------------------------------------------------------------------
+;  calibrate_tsc - the TSC's rate: from CPUID leaf 0x15 (the crystal and
+;  the ratio, exact) when the CPU gives all of it and a 5 ms Stall agrees
+;  within a factor of two; else measured over a 50 ms Stall
 ; -----------------------------------------------------------------------------
 calibrate_tsc:
     sub rsp, 40
+    mov [saved_rbx], rbx
+    mov qword [tsc_cpuid], 0
+    xor eax, eax
+    cpuid
+    cmp eax, 0x15
+    jb .measure
+    mov eax, 0x15
+    xor ecx, ecx
+    cpuid
+    test eax, eax
+    jz .measure
+    test ebx, ebx
+    jz .measure
+    test ecx, ecx
+    jz .measure
+    mov r8d, eax
+    mov eax, ecx                            ; crystal Hz * numerator / denominator
+    mul rbx
+    div r8
+    mov [tsc_cpuid], rax
+    mov ecx, 5000                           ; Stall(5 ms), to check it
+    call stall_ticks
+    imul rax, rax, 200
+    mov rcx, [tsc_cpuid]
+    shr rcx, 1
+    cmp rax, rcx                            ; under half: not this TSC
+    jb .measure
+    shl rcx, 2
+    cmp rax, rcx                            ; over twice
+    ja .measure
+    mov rax, [tsc_cpuid]
+    jmp .set
+.measure:
+    mov ecx, 50000                          ; Stall(50 ms)
+    call stall_ticks
+    imul rax, rax, 20
+.set:
+    mov [bootinfo + BI_TSC_HZ], rax
+    mov rbx, [saved_rbx]
+    add rsp, 40
+    ret
+
+; stall_ticks(ECX = microseconds) -> RAX = TSC ticks the firmware's Stall took
+stall_ticks:
+    sub rsp, 40
+    mov [stall_us], rcx
     rdtsc
     shl rdx, 32
     or rax, rdx
     mov [tsc_mark], rax
-    mov ecx, 50000                          ; Stall(50 ms)
+    mov rcx, [stall_us]
     mov rax, [boot_services]
     call [rax + BS_STALL]
     rdtsc
     shl rdx, 32
     or rax, rdx
     sub rax, [tsc_mark]
-    imul rax, rax, 20
-    mov [bootinfo + BI_TSC_HZ], rax
     add rsp, 40
+    ret
+
+; -----------------------------------------------------------------------------
+;  find_test_run - a test run, as tools/hw/hp1.py asks for one: its script in
+;  the UEFI variable AxiomRun, read into pages of its own for the kernel and
+;  deleted, so that it runs once; and the chipset's TCO watchdog started, so
+;  that a run that hangs ends in a reset all the same. Never fatal.
+; -----------------------------------------------------------------------------
+find_test_run:
+    sub rsp, 40                             ; shadow space + a fifth argument
+    mov qword [run_size], 0                ; GetVariable(name, guid, NULL, &0, buf):
+    lea rcx, [name_axiom_run]               ; how big, if it is there
+    lea rdx, [axiom_guid]
+    xor r8d, r8d
+    lea r9, [run_size]
+    lea rax, [run_probe]
+    mov [rsp + 32], rax
+    mov rax, [runtime]
+    call [rax + RT_GET_VARIABLE]
+    mov rcx, EFI_BUFFER_TOO_SMALL
+    cmp rax, rcx
+    jne .out                                ; no test run
+    mov rax, [run_size]
+    mov ecx, RUN_MAX
+    cmp rax, rcx
+    cmova eax, ecx                          ; (too big: still a run, of nothing)
+    mov [bootinfo + BI_RUN_SIZE], eax
+    cmp qword [run_size], RUN_MAX - 1
+    ja .delete
+    mov ecx, RUN_MAX / 4096
+    xor edx, edx
+    call alloc_pages                        ; zeroed, and kept for the kernel
+    mov [run_buf], rax
+    mov qword [run_size], RUN_MAX - 1       ; (a NUL after it)
+    lea rcx, [name_axiom_run]
+    lea rdx, [axiom_guid]
+    xor r8d, r8d
+    lea r9, [run_size]
+    mov rax, [run_buf]
+    mov [rsp + 32], rax
+    mov rax, [runtime]
+    call [rax + RT_GET_VARIABLE]
+    test rax, rax
+    jnz .delete
+    mov rax, [run_buf]
+    mov [bootinfo + BI_RUN], rax
+    mov eax, [run_size]
+    mov [bootinfo + BI_RUN_SIZE], eax
+.delete:
+    lea rcx, [name_axiom_run]               ; SetVariable(name, guid, 0, 0, NULL): gone
+    lea rdx, [axiom_guid]
+    xor r8d, r8d
+    xor r9d, r9d
+    mov qword [rsp + 32], 0
+    mov rax, [runtime]
+    call [rax + RT_SET_VARIABLE]
+    call tco_start
+.out:
+    add rsp, 40
+    ret
+
+; -----------------------------------------------------------------------------
+;  find_slot - which kernel starts (A/B updates, src/kernel/update.asm). The
+;  one the UEFI variable AxiomTry names, on trial: the variable is marked
+;  tried first (its letter made small), so that the trial happens once, and
+;  the TCO watchdog is started for it. Else, or if its file cannot be used,
+;  the one AxiomSlot names, kept after a trial. Else the kernel built into
+;  this loader (load_kernel). A slot is the file \EFI\AXIOM\KERNEL.A or .B
+;  on the volume this loader came from; its variable holds the file's size
+;  and hash. BI_SLOT and those after it say what happened. Never fatal.
+; -----------------------------------------------------------------------------
+find_slot:
+    sub rsp, 40                             ; shadow space + a fifth argument
+    lea rcx, [name_axiom_try]
+    lea rdi, [slot_try]
+    call slot_variable
+    jc .kept
+    cmp al, 'A'
+    je .trial
+    cmp al, 'B'
+    jne .kept                               ; tried already (small), or not ours
+.trial:
+    mov [bootinfo + BI_SLOT_TRY], al
+    or byte [slot_try + UV_SLOT], 0x20      ; marked tried, before it starts
+    lea rcx, [name_axiom_try]
+    lea rdx, [axiom_guid]
+    mov r8d, EFI_VAR_NV_BS_RT
+    mov r9d, UV_BYTES
+    lea rax, [slot_try]
+    mov [rsp + 32], rax
+    mov rax, [runtime]
+    call [rax + RT_SET_VARIABLE]
+    test rax, rax
+    jz .marked
+    mov byte [bootinfo + BI_SLOT_ERR], SLOT_UNMARKED
+    jmp .kept                               ; (no trial that might happen again)
+.marked:
+    lea rbx, [slot_try]
+    call load_slot
+    jc .try_failed
+    mov byte [bootinfo + BI_TRIAL], 1
+    mov ax, [slot_try + UV_TRIAL]
+    mov [bootinfo + BI_TRIAL_S], ax
+    call tco_start                          ; a hang ends in a restart all the same
+    jmp .out
+.try_failed:
+    mov [bootinfo + BI_SLOT_ERR], al
+.kept:
+    lea rcx, [name_axiom_slot]
+    lea rdi, [slot_kept]
+    call slot_variable
+    jc .out
+    cmp al, 'A'
+    je .load_kept
+    cmp al, 'B'
+    jne .out
+.load_kept:
+    lea rbx, [slot_kept]
+    call load_slot
+    jnc .out
+    shl al, 4
+    or [bootinfo + BI_SLOT_ERR], al
+.out:
+    add rsp, 40
+    ret
+
+; slot_variable(RCX = UTF-16 name, RDI = UV_BYTES for it) -> AL = the slot
+; it names; CF if it is not there, or not UV_BYTES
+slot_variable:
+    sub rsp, 40
+    mov [slot_buf], rdi
+    mov qword [slot_n], UV_BYTES
+    lea rdx, [axiom_guid]                   ; GetVariable(name, guid, NULL, &size, buf)
+    xor r8d, r8d
+    lea r9, [slot_n]
+    mov [rsp + 32], rdi
+    mov rax, [runtime]
+    call [rax + RT_GET_VARIABLE]
+    test rax, rax
+    jnz .none
+    cmp qword [slot_n], UV_BYTES
+    jne .none
+    mov rdi, [slot_buf]
+    mov al, [rdi + UV_SLOT]
+    clc
+    jmp .out
+.none:
+    stc
+.out:
+    lea rsp, [rsp + 40]                     ; (the flags kept)
+    ret
+
+; load_slot(RBX = a slot's variable) -> the kernel in its file, in pages of
+; its own (kernel_phys, kernel_pages, kernel_entry) and BI_SLOT; CF and
+; AL = SLOT_MISSING or SLOT_DAMAGED if not
+load_slot:
+    sub rsp, 40                             ; shadow space + a fifth argument
+    mov [slot_var], rbx
+    movzx eax, byte [rbx + UV_SLOT]
+    and eax, ~0x20                          ; (a trial's is small by now)
+    lea rdi, [slot_path]
+    mov [rdi + SLOT_LETTER], ax
+    mov qword [slot_root], 0
+    mov qword [slot_file], 0
+    mov byte [slot_err], SLOT_MISSING
+    mov rcx, [boot_device]                  ; HandleProtocol(device, &SFS, &sfs)
+    test rcx, rcx
+    jz .close
+    lea rdx, [sfs_guid]
+    lea r8, [slot_sfs]
+    mov rax, [boot_services]
+    call [rax + BS_HANDLE_PROTOCOL]
+    test rax, rax
+    jnz .close
+    mov rcx, [slot_sfs]                     ; OpenVolume(sfs, &root)
+    lea rdx, [slot_root]
+    call [rcx + SFS_OPEN_VOLUME]
+    test rax, rax
+    jnz .no_root
+    mov rcx, [slot_root]                    ; Open(root, &file, path, read, 0)
+    lea rdx, [slot_file]
+    lea r8, [slot_path]
+    mov r9d, EFI_FILE_MODE_READ
+    mov qword [rsp + 32], 0
+    call [rcx + FILE_OPEN]
+    test rax, rax
+    jnz .no_file
+    mov byte [slot_err], SLOT_DAMAGED
+    mov qword [slot_n], 32                  ; its header
+    mov rcx, [slot_file]
+    lea rdx, [slot_n]
+    lea r8, [slot_head]
+    call [rcx + FILE_READ]
+    test rax, rax
+    jnz .close
+    cmp qword [slot_n], 32
+    jne .close
+    mov rax, [slot_head + KH_MAGIC]
+    mov rdx, 'AXIOMKRN'
+    cmp rax, rdx
+    jne .close
+    mov rbx, [slot_var]
+    mov eax, [rbx + UV_SIZE]                ; the size the variable says,
+    cmp rax, [slot_head + KH_FILE_SIZE]     ; the header's
+    jne .close
+    cmp rax, 32
+    jb .close
+    cmp rax, SLOT_MAX
+    ja .close
+    mov rcx, [slot_head + KH_MEM_SIZE]
+    cmp rcx, rax
+    jb .close
+    cmp rcx, SLOT_MEM_MAX
+    ja .close
+    mov rdx, [slot_head + KH_ENTRY]         ; its entry within it
+    mov r8, KERNEL_BASE
+    sub rdx, r8
+    jb .close
+    cmp rdx, rcx
+    jae .close
+    add rcx, 0xFFF
+    shr rcx, 12
+    mov [kernel_pages], rcx
+    xor edx, edx
+    call alloc_pages
+    mov [kernel_phys], rax
+    mov rcx, [slot_file]                    ; SetPosition(file, 0)
+    xor edx, edx
+    call [rcx + FILE_SET_POSITION]
+    test rax, rax
+    jnz .unload
+    mov rbx, [slot_var]
+    mov eax, [rbx + UV_SIZE]
+    mov [slot_n], rax
+    mov rcx, [slot_file]                    ; Read(file, &size, its pages)
+    lea rdx, [slot_n]
+    mov r8, [kernel_phys]
+    call [rcx + FILE_READ]
+    test rax, rax
+    jnz .unload
+    mov rbx, [slot_var]
+    mov ecx, [rbx + UV_SIZE]
+    cmp [slot_n], rcx
+    jne .unload
+    mov rsi, [kernel_phys]
+    call fnv64
+    mov rbx, [slot_var]
+    cmp rax, [rbx + UV_HASH]
+    jne .unload
+    mov rax, [slot_head + KH_ENTRY]
+    mov [kernel_entry], rax
+    movzx eax, byte [rbx + UV_SLOT]
+    and eax, ~0x20
+    mov [bootinfo + BI_SLOT], al
+    mov byte [slot_err], SLOT_OK
+    jmp .close
+.unload:
+    mov rcx, [kernel_phys]                  ; given back, and not kept for the kernel
+    mov rdx, [kernel_pages]
+    mov rax, [boot_services]
+    call [rax + BS_FREE_PAGES]
+    dec dword [bootinfo + BI_RESV_COUNT]    ; (alloc_pages recorded it last)
+    mov qword [kernel_phys], 0
+    jmp .close
+.no_file:
+    mov qword [slot_file], 0
+    jmp .close
+.no_root:
+    mov qword [slot_root], 0
+.close:
+    mov rcx, [slot_file]
+    test rcx, rcx
+    jz .root
+    call [rcx + FILE_CLOSE]
+.root:
+    mov rcx, [slot_root]
+    test rcx, rcx
+    jz .done
+    call [rcx + FILE_CLOSE]
+.done:
+    movzx eax, byte [slot_err]
+    cmp al, 1
+    cmc                                     ; CF unless SLOT_OK
+    lea rsp, [rsp + 40]
+    ret
+
+; fnv64(RSI = bytes, RCX = how many) -> RAX = their FNV-1a hash (64-bit)
+fnv64:
+    mov rax, FNV_BASIS
+    mov rdx, FNV_PRIME
+    test rcx, rcx
+    jz .out
+.byte:
+    xor al, [rsi]
+    imul rax, rdx
+    inc rsi
+    dec rcx
+    jnz .byte
+.out:
+    ret
+
+; -----------------------------------------------------------------------------
+;  tco_start -the chipset's TCO watchdog, counting: it resets the machine
+;  unless the kernel reloads it (harness.asm) in time. Two chipsets so far:
+;  Tiger Lake's (and later ones, where NO_REBOOT is in TCO1_CNT, Linux's
+;  iTCO version 6), and QEMU's ICH9 (version 2: NO_REBOOT in the chipset
+;  registers at RCBA). Anything else has none. BI_TCO says where it is.
+; -----------------------------------------------------------------------------
+TCO_RLD         equ 0x00                    ; written: the count starts again
+TCO1_STS        equ 0x04
+TCO2_STS        equ 0x06
+TCO1_CNT        equ 0x08
+TCO_TMR         equ 0x12                    ; the count: ticks of 0.6 s
+TCO_TICKS       equ 100                     ; counted twice: a reset 2 minutes on
+TCO_TMR_HLT     equ 0x0800
+TCO_NO_REBOOT   equ 0x0001                  ; TCO1_CNT's, on version 6
+PWRM_ACPI_TMR_CTL equ 0xFE0018FC            ; Tiger Lake's PMC (PWRMBASE 0xFE000000)
+
+tco_start:
+    cmp byte [tco_tried], 0                 ; once: for a test run, a trial, or both
+    jne .none
+    mov byte [tco_tried], 1
+    mov byte [tco_v6], 0
+    mov eax, 0x8000FC00                     ; 0:31.4, the SMBus controller
+    call cfg_read
+    lea rsi, [tco_v6_ids]
+.v6_next:
+    mov ecx, [rsi]
+    test ecx, ecx
+    jz .ich9
+    add rsi, 4
+    cmp eax, ecx
+    jne .v6_next
+    mov eax, 0x8000FC54                     ; TCOCTL: TCO_BASE_EN
+    call cfg_read
+    test eax, 0x100
+    jz .none
+    mov eax, 0x8000FC50                     ; TCOBASE
+    call cfg_read
+    and eax, 0xFFE0
+    jz .none
+    mov [tco_base], ax
+    mov byte [tco_v6], 1
+    mov edx, PWRM_ACPI_TMR_CTL              ; Tiger Lake counts the TCO's ticks
+    mov eax, [rdx]                          ; only while its ACPI timer runs,
+    cmp eax, -1                             ; and hp-1's firmware turns that
+    je .found                               ; off (ACPI_TIM_DIS): on
+    and eax, ~2
+    mov [rdx], eax
+    jmp .found
+.ich9:
+    mov eax, 0x8000F800                     ; 0:31.0, the LPC bridge
+    call cfg_read
+    cmp eax, 0x29188086                     ; ICH9
+    jne .none
+    mov eax, 0x8000F840                     ; PMBASE; the TCO's 0x60 above it
+    call cfg_read
+    and eax, 0xFF80
+    jz .none
+    add eax, 0x60
+    mov [tco_base], ax
+    mov eax, 0x8000F8F0                     ; RCBA, where GCS is
+    call cfg_read
+    test eax, 1
+    jnz .rcba
+    mov eax, 0x8000F8F0                     ; not there yet: where firmware puts it
+    mov ecx, 0xFED1C001
+    call cfg_write
+    mov eax, 0xFED1C001
+.rcba:
+    and eax, 0xFFFFC000
+    mov ecx, [rax + 0x3410]                 ; GCS: NO_REBOOT is bit 5
+    and ecx, ~0x20
+    mov [rax + 0x3410], ecx
+    mov ecx, [rax + 0x3410]
+    test ecx, 0x20
+    jnz .locked                             ; strapped on
+.found:
+    movzx edx, word [tco_base]              ; what it says of the last reset,
+    add edx, TCO2_STS
+    in ax, dx
+    or [bootinfo + BI_TCO_STS], ax
+    mov ax, 0x0006                          ; then cleared: SECOND_TO_STS, BOOT_STS
+    out dx, ax
+    sub edx, TCO2_STS - TCO1_STS
+    mov ax, 0x0008                          ; TIMEOUT
+    out dx, ax
+    add edx, TCO_TMR - TCO1_STS
+    in ax, dx
+    and ax, 0xFC00
+    or ax, TCO_TICKS
+    out dx, ax
+    sub edx, TCO_TMR - TCO_RLD
+    mov ax, 1
+    out dx, ax                              ; from the top
+    add edx, TCO1_CNT - TCO_RLD
+    in ax, dx
+    and ax, ~TCO_TMR_HLT                    ; counting,
+    cmp byte [tco_v6], 0
+    je .count
+    and ax, ~TCO_NO_REBOOT                  ; and allowed to reset the machine
+.count:
+    out dx, ax
+    in ax, dx
+    test ax, TCO_TMR_HLT
+    jnz .none                               ; locked halted
+    cmp byte [tco_v6], 0
+    je .armed
+    test ax, TCO_NO_REBOOT
+    jz .armed
+    or ax, TCO_TMR_HLT                      ; it would count for nothing: stopped
+    out dx, ax
+.locked:
+    or word [bootinfo + BI_TCO_STS], 0x8000
+    jmp .none
+.armed:
+    mov ax, [tco_base]
+    mov [bootinfo + BI_TCO], ax
+.none:
+    ret
+
+; cfg_read(EAX = 0x80000000 | bus << 16 | device << 11 | function << 8 |
+; register) -> EAX = that dword of PCI configuration space
+cfg_read:
+    mov dx, 0xCF8
+    out dx, eax
+    mov dx, 0xCFC
+    in eax, dx
+    ret
+
+; cfg_write(EAX = the same address, ECX = the dword)
+cfg_write:
+    mov dx, 0xCF8
+    out dx, eax
+    mov dx, 0xCFC
+    mov eax, ecx
+    out dx, eax
     ret
 
 ; -----------------------------------------------------------------------------
@@ -525,10 +1089,13 @@ alloc_pages:
     jmp fatal
 
 ; -----------------------------------------------------------------------------
-;  load_kernel - copy the embedded kernel image into its own pages
+;  load_kernel - copy the embedded kernel image into its own pages, unless
+;  find_slot loaded one from a slot
 ; -----------------------------------------------------------------------------
 load_kernel:
     sub rsp, 40
+    cmp qword [kernel_phys], 0
+    jne .stack
     lea rsi, [kernel_image]
     mov rax, [rsi + KH_MAGIC]
     mov rdx, 'AXIOMKRN'
@@ -548,6 +1115,7 @@ load_kernel:
     mov rcx, [rsi + KH_FILE_SIZE]
     rep movsb
 
+.stack:
     mov ecx, BOOT_STACK_SIZE / 4096
     xor edx, edx
     call alloc_pages
@@ -821,6 +1389,7 @@ enter_kernel:
     mov [bootinfo + BI_PHYS_TOP], rax
     mov rax, 'AXIOMBI1'
     mov [bootinfo + BI_MAGIC], rax
+    mov word [bootinfo + BI_EXT], BI_SIZE  ; the fields past 512 bytes are this loader's
 
     mov rdi, [bootinfo_page]                ; the loader image becomes free memory
     lea rsi, [bootinfo]
@@ -859,11 +1428,18 @@ gop:                dq 0
 info_size:          dq 0
 info_ptr:           dq 0
 tsc_mark:           dq 0
+tsc_cpuid:          dq 0
+stall_us:           dq 0
+saved_rbx:          dq 0
 alloc_count:        dq 0
 alloc_addr:         dq 0
 kernel_entry:       dq 0
 boot_proto:         dq 0
 boot_sector:        dq 0
+settings_root:      dq 0
+settings_file:      dq 0
+settings_buf:       dq 0
+settings_size:      dq 0
 kernel_phys:        dq 0
 kernel_pages:       dq 0
 stack_phys:         dq 0
@@ -887,6 +1463,10 @@ pd_kernel:          dq 0
 pd_fb:              dq 0
 pt_kernel:          dq 0
 pt_fb:              dq 0
+runtime:            dq 0
+run_size:           dq 0
+run_buf:            dq 0
+run_probe:          dq 0
 gop_max_mode:       dd 0
 mode_iter:          dd 0
 best_mode:          dd 0
@@ -894,6 +1474,34 @@ best_w:             dd 0
 best_h:             dd 0
 exit_tries:         dd 0
 boot_block:         dd 0
+tco_base:           dw 0
+tco_v6:             db 0
+tco_tried:          db 0
+slot_err:           db 0
+align 8
+boot_device:        dq 0                ; the handle of the volume this loader came from
+slot_var:           dq 0                ; find_slot's: the variable being loaded,
+slot_buf:           dq 0
+slot_n:             dq 0
+slot_sfs:           dq 0                ; the volume's EFI_SIMPLE_FILE_SYSTEM_PROTOCOL,
+slot_root:          dq 0                ; its root,
+slot_file:          dq 0                ; the slot's file,
+slot_head:          times 4 dq 0        ; its first 32 bytes
+slot_try:           times 2 dq 0        ; AxiomTry
+slot_kept:          times 2 dq 0        ; AxiomSlot
+
+align 4
+tco_v6_ids:     dd 0xA0A38086                   ; Tiger Lake-LP's SMBus controller
+                dd 0x43A38086                   ; Tiger Lake-H's
+                dd 0
+name_axiom_run: dw __utf16__('AxiomRun'), 0     ; (aligned: UTF-16)
+name_axiom_try: dw __utf16__('AxiomTry'), 0
+name_axiom_slot: dw __utf16__('AxiomSlot'), 0
+slot_path:      dw __utf16__('\EFI\AXIOM\KERNEL.A'), 0
+SLOT_LETTER     equ 18 * 2                      ; where in slot_path the A is
+
+align 8
+axiom_guid:     AXIOM_VENDOR_GUID
 
 align 8
 gop_guid:       dd 0x9042A9DE
@@ -915,11 +1523,16 @@ loaded_image_guid:
 block_io_guid:  dd 0x964E5B21
                 dw 0x6459, 0x11D2
                 db 0x8E, 0x39, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B
+sfs_guid:
+simple_fs_guid: dd 0x964E5B22
+                dw 0x6459, 0x11D2
+                db 0x8E, 0x39, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B
 smbios2_guid:   dd 0xEB9D2D31
                 dw 0x2D88, 0x11D3
                 db 0x9A, 0x16, 0x00, 0x90, 0x27, 0x3F, 0xC1, 0x4D
 
 msg_banner:     dw __utf16__(`Axiom loader\r\n`), 0
+settings_name:  dw __utf16__(`\\SETTINGS.TXT`), 0
 msg_launch:     dw __utf16__(`Entering the kernel.\r\n`), 0
 msg_fatal:      dw __utf16__(`\r\nAxiom cannot start: `), 0
 msg_no_gop:     dw __utf16__(`no graphics output protocol.\r\n`), 0

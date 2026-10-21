@@ -60,6 +60,8 @@ smbios_init:
     je .board
     cmp eax, 17
     je .memory
+    cmp eax, 11
+    je .oem
 .skip:
     mov rsi, rbx                        ; find the double NUL
 .skip_scan:
@@ -94,6 +96,9 @@ smbios_init:
     call smbios_copy_string
     jmp .skip
 .board:
+    mov al, [r12 + 4]
+    lea rdi, [sm_board_vendor]
+    call smbios_copy_string
     mov al, [r12 + 5]
     lea rdi, [sm_board_product]
     call smbios_copy_string
@@ -145,6 +150,25 @@ smbios_init:
     lea rdi, [sm_mem_part]
     call smbios_copy_string
     jmp .skip
+.oem:                                   ; OEM strings: what QEMU's -smbios type=11 says
+    mov rsi, rbx
+.oem_string:
+    cmp rsi, r13
+    jae .done
+    cmp byte [rsi], 0                   ; the end of the set
+    je .skip
+    lea rdi, [str_sm_no_demo]
+    call streq
+    test eax, eax
+    jz .oem_next
+    mov byte [sm_no_demo], 1
+.oem_next:
+    cmp rsi, r13
+    jae .done
+    lodsb
+    test al, al
+    jnz .oem_next
+    jmp .oem_string
 .done:
     pop r13
     pop r12
@@ -215,6 +239,7 @@ str_ddr5:   db 'DDR5', 0
 str_lpddr4: db 'LPDDR4', 0
 str_lpddr5: db 'LPDDR5', 0
 str_ram:    db 'RAM', 0
+str_sm_no_demo: db 'axiom.demo=off', 0  ; tools/run.py --headless: no zoom at boot
 
 section .bss
 alignb 8
@@ -224,12 +249,14 @@ sm_mem_module_mb: resd 1
 sm_mem_type:      resd 1
 sm_mem_speed:     resd 1
 smbios_major:     resd 1
+sm_no_demo:       resb 1              ; 1: the demo is not started at boot
 smbios_minor:     resd 1
 sm_bios_vendor:   resb 64
 sm_bios_version:  resb 64
 sm_bios_date:     resb 64
 sm_sys_vendor:    resb 64
 sm_sys_product:   resb 64
+sm_board_vendor:  resb 64
 sm_board_product: resb 64
 sm_mem_vendor:    resb 64
 sm_mem_part:      resb 64

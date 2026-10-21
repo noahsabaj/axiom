@@ -48,9 +48,13 @@ TW_NEXT         equ 88                  ; every terminal
 TW_SCREEN       equ 96                  ; the screen's first line (a clear starts a new one)
 TW_SH_LEN       equ 104                 ; dword: the line being typed: its length
 TW_SH_WAIT      equ 108                 ; byte: a command runs on; the prompt waits
+                                        ; (2: it is done, the rest of its line is next)
+TW_SH_RLINK     equ 109                 ; byte: how the rest is joined to it (SL_*)
+TW_SH_FAILED    equ 110                 ; byte: and it failed (a program's exit code not 0)
 TW_SH_LINE      equ 112                 ; LINE_MAX + 8
 TW_SH_HIST      equ TW_SH_LINE + LINE_MAX + 8
-TW_END          equ TW_SH_HIST + LINE_MAX + 8   ; the newest line
+TW_SH_REST      equ TW_SH_HIST + LINE_MAX + 8   ; what is left of the line, for then
+TW_END          equ TW_SH_REST + LINE_MAX + 8   ; the newest line
 TW_FLOOR        equ TW_END + 8          ; the oldest line the wheel reaches (CSI 3 J)
 TW_TTY          equ TW_FLOOR + 8        ; the terminal programs have here (lxtty.asm), or 0
 TW_VT           equ TW_TTY + 8          ; vt.asm's: what a program's output said so far
@@ -84,7 +88,10 @@ TW_VP           equ TW_VT + 120         ; VT_PARAMS dwords
 TW_VOSC         equ TW_VP + VT_PARAMS * 4
 TW_VREPLY       equ TW_VOSC + VT_OSC
 TW_VTITLE       equ TW_VREPLY + VT_REPLY
-TW_SIZE         equ TW_VTITLE + WN_TITLE_MAX
+TW_AHEAD_N      equ TW_VTITLE + WN_TITLE_MAX    ; dword: keys typed while a command ran,
+TW_AHEAD        equ TW_AHEAD_N + 4      ; TW_AHEAD_MAX of them, for the prompt (shell.asm)
+TW_SIZE         equ TW_AHEAD + TW_AHEAD_MAX
+TW_AHEAD_MAX    equ 252
 VT_PARAMS       equ 16
 VT_OSC          equ 256
 VT_REPLY        equ 128
@@ -148,6 +155,7 @@ term_open:
     mov r8, r12
     mov r9, r13
     mov r10d, WF_CLOSE | WF_RESIZE
+    lea r11, [str_app_terminal]
     mov [term_making], rbx              ; for its first paint
     call win_new
     mov qword [term_making], 0
@@ -508,7 +516,7 @@ term_draw:
     xor edi, edi
     mov rdx, [rbx + WN_W]
     mov rcx, [rbx + WN_H]
-    mov r8d, COL_PANEL
+    mov r8d, [th_c + TC_WINDOW]
     call gfx_fill
     mov [r12 + TW_SHOWN], r15
     mov r13, r15
@@ -622,7 +630,7 @@ term_line:
     mov rsi, r15
     mov rdx, [rbx + WN_W]
     mov rcx, [font_ch]
-    mov r8d, COL_PANEL
+    mov r8d, [th_c + TC_WINDOW]
     call gfx_fill
     cmp r13, [r12 + TW_END]             ; written yet?
     jg .out
@@ -673,7 +681,7 @@ term_line:
     add rcx, rcx
     sub rsi, rcx
     mov rdx, [font_cw]
-    mov r8d, COL_ACCENT
+    mov r8d, [th_accent]
     call gfx_fill
 .out:
     pop r15
@@ -699,7 +707,14 @@ term_cell:
     jz .bg
     mov rsi, rbx
     shr rsi, CELL_BG
+    and esi, 0xFFFFFF
 .bg:
+    mov eax, edi                        ; as this theme draws them
+    call theme_color
+    mov edi, eax
+    mov eax, esi
+    call theme_color
+    mov esi, eax
     test bh, CA_INVERSE
     jz .not_inverse
     xchg edi, esi
@@ -737,7 +752,7 @@ term_cell:
     call gfx_glyph
     jmp .lines
 .no_glyph:
-    cmp esi, COL_PANEL                  ; no glyph: just its background
+    cmp esi, [th_c + TC_WINDOW]         ; no glyph: just its background
     je .lines
     mov r8d, esi
     mov rdi, r12
@@ -852,7 +867,7 @@ con_forget:
     call net_forget
     pop rdi
     call lx_forget                      ; (preserves RDI)
-    jmp user_forget
+    jmp user_close                      ; every program run there
 
 ; con_write(RDI = string). Under print_lock. Preserves all.
 con_write:

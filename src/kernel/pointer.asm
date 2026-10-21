@@ -49,6 +49,7 @@ pointer_pending:
 
 ; pointer_service: apply queued events (main loop)
 pointer_service:
+    call ptr_mode
     mov al, [ptr_tail]
     cmp al, [ptr_head]
     jne .work
@@ -81,18 +82,38 @@ pointer_service:
     mov eax, r12d                       ; absolute: scale to the screen
     imul rax, [scr_w]
     shr rax, 16
+    mov ecx, r13d
+    imul rcx, [scr_h]
+    shr rcx, 16
+    cmp byte [ptr_abs], 0               ; how far, in pixels, from where it
+    je .first_abs                       ; last was
+    mov rdx, rax
+    sub rdx, [ptr_ax]
+    add [ptr_dx], edx
+    mov rdx, rcx
+    sub rdx, [ptr_ay]
+    add [ptr_dy], edx
+.first_abs:
+    mov byte [ptr_abs], 1
+    mov [ptr_ax], rax
+    mov [ptr_ay], rcx
+    cmp qword [grab_win], 0             ; held: it stays
+    jne .moved
     mov [ptr_x], rax
-    mov eax, r13d
-    imul rax, [scr_h]
-    shr rax, 16
-    mov [ptr_y], rax
+    mov [ptr_y], rcx
     jmp .moved
 .relative:
+    add [ptr_dx], r12d                  ; how far, as the mouse counts it
+    add [ptr_dy], r13d
+    cmp qword [grab_win], 0             ; held: it stays
+    jne .moved
     mov eax, r12d
     call pointer_accel
+    call cfg_pointer                    ; pointer.speed
     add [ptr_x], rax
     mov eax, r13d
     call pointer_accel
+    call cfg_pointer
     add [ptr_y], rax
 .moved:
     call pointer_clamp
@@ -105,6 +126,7 @@ pointer_service:
     push rcx
     call desk_motion                    ; where it went first
     mov byte [ptr_moved], 0
+    mov qword [ptr_dx], 0
     pop rcx
     pop rax
     mov [ptr_buttons], ecx
@@ -135,6 +157,7 @@ pointer_service:
     movsx edx, r14w
     test edx, edx
     jz .next
+    call cfg_wheel                      ; pointer.natural-scrolling
     call desk_wheel
     jmp .next
 .drained:
@@ -143,6 +166,7 @@ pointer_service:
     je .still
     mov byte [ptr_moved], 0
     call desk_motion
+    mov qword [ptr_dx], 0
 .still:
     call cursor_move
     pop r14
@@ -179,6 +203,93 @@ pointer_accel:
     pop rcx
     ret
 
+; ptr_mode: the pointer as the windows ask for it (RO_WIN_POINTER, WO_PTRM):
+; held by the one with the keys if it grabs it (moved to its middle first;
+; not while ctrl+alt has let it go), and not drawn while held, nor over a
+; window that draws its own. Main loop.
+ptr_mode:
+    push rbx
+    xor ebx, ebx                        ; RBX: the window to hold it
+    mov rax, [desk_focus]
+    test rax, rax
+    jz .grab
+    test dword [rax + WN_FLAGS], WF_PROGRAM
+    jz .grab
+    mov rcx, [rax + WN_DATA]
+    test rcx, rcx
+    jz .grab
+    cmp dword [rcx + WO_PTRM], PTRM_GRAB
+    jne .grab
+    cmp byte [grab_off], 0
+    jne .grab
+    mov rbx, rax
+.grab:
+    cmp rbx, [grab_win]
+    je .hide
+    mov [grab_win], rbx
+    test rbx, rbx
+    jz .hide
+    mov rdi, rbx                        ; held in its middle
+    call win_client
+    shr rdx, 1
+    add rdi, rdx
+    shr rcx, 1
+    add rsi, rcx
+    mov [ptr_x], rdi
+    mov [ptr_y], rsi
+    call pointer_clamp
+    call desk_motion                    ; over it now
+    mov qword [ptr_dx], 0
+.hide:
+    mov eax, 1                          ; not drawn: held,
+    test rbx, rbx
+    jnz .set
+    mov rcx, [ptr_over]                 ; or over one that draws its own
+    test rcx, rcx
+    jz .shown
+    test dword [rcx + WN_FLAGS], WF_PROGRAM
+    jz .shown
+    mov rcx, [rcx + WN_DATA]
+    test rcx, rcx
+    jz .shown
+    cmp dword [rcx + WO_PTRM], PTRM_HIDDEN
+    je .set
+.shown:
+    xor eax, eax
+.set:
+    cmp al, [cursor_off]
+    je .out
+    mov [cursor_off], al
+    call cursor_move                    ; drawn, or taken away
+.out:
+    pop rbx
+    ret
+
+; ptr_delta -> ESI = how far the pointer moved since the desk last heard, dx
+; | dy << 16, 16 bits signed each (as far as they go). Preserves others.
+ptr_delta:
+    push rax
+    mov eax, [ptr_dy]
+    call .fit
+    shl eax, 16
+    mov esi, eax
+    mov eax, [ptr_dx]
+    call .fit
+    movzx eax, ax
+    or esi, eax
+    pop rax
+    ret
+.fit:
+    cmp eax, 32767
+    jle .high
+    mov eax, 32767
+.high:
+    cmp eax, -32768
+    jge .low
+    mov eax, -32768
+.low:
+    ret
+
 pointer_clamp:
     mov rax, [ptr_x]
     test rax, rax
@@ -208,28 +319,51 @@ pointer_clamp:
 
 ; cursor_move: show the cursor where the pointer is now
 cursor_move:
+    push rax
     push rdi
     push rsi
     push rdx
     push rcx
-    mov rdi, [cur_x]                    ; where it was
-    mov rsi, [cur_y]
+    call cursor_rect                    ; where it was
     mov rax, [ptr_x]
     mov [cur_x], rax
     mov rax, [ptr_y]
     mov [cur_y], rax
     cmp byte [cursor_shown], 0
     je .first
-    call cursor_size
+    call gfx_clip_screen_signed
+    jz .first
     call gfx_blit_raw                   ; uncover the old spot
 .first:
+    mov byte [cursor_shown], 0
+    cmp byte [cursor_off], 0            ; a window would have none
+    jne .hidden
     mov byte [cursor_shown], 1
     call cursor_paint
+.hidden:
     pop rcx
     pop rdx
     pop rsi
     pop rdi
+    pop rax
     ret
+
+; cursor_rect -> RDI x, RSI y, RDX w, RCX h of the cursor drawn (it may
+; start off the screen). Preserves others but RAX.
+cursor_rect:
+    cmp qword [cursor_sf + SF_PTR], 0
+    je .art
+    mov rdi, [cur_x]
+    sub rdi, [cursor_hot_x]
+    mov rsi, [cur_y]
+    sub rsi, [cursor_hot_y]
+    mov rdx, [cursor_sf + SF_W]
+    mov rcx, [cursor_sf + SF_H]
+    ret
+.art:
+    mov rdi, [cur_x]
+    mov rsi, [cur_y]
+    jmp cursor_size
 
 ; cursor_size -> RDX = width, RCX = height in pixels
 cursor_size:
@@ -253,33 +387,133 @@ cursor_overlay:
     cmp byte [cursor_shown], 0
     je .out
     push rax
+    push rdi
+    push rsi
     push rdx
     push rcx
-    lea rax, [rdi + rdx]                ; rect right > cursor left?
-    cmp rax, [cur_x]
-    jbe .no
-    lea rax, [rsi + rcx]
-    cmp rax, [cur_y]
-    jbe .no
-    call cursor_size
-    mov rax, [cur_x]
-    add rax, rdx
-    cmp rdi, rax                        ; rect left < cursor right?
-    jae .no
-    mov rax, [cur_y]
-    add rax, rcx
-    cmp rsi, rax
-    jae .no
+    push r8
+    push r9
+    lea r8, [rdi + rdx]                 ; its right and bottom
+    lea r9, [rsi + rcx]
+    push rdi
+    push rsi
+    call cursor_rect
+    pop rax                             ; its top
+    cmp rsi, r9                         ; cursor top < its bottom,
+    jge .no_left
+    lea rsi, [rsi + rcx]
+    cmp rsi, rax                        ; cursor bottom > its top,
+    jle .no_left
+    pop rax                             ; its left
+    cmp rdi, r8                         ; cursor left < its right,
+    jge .no
+    add rdi, rdx
+    cmp rdi, rax                        ; cursor right > its left
+    jle .no
     call cursor_paint
+    jmp .no
+.no_left:
+    pop rax
 .no:
+    pop r9
+    pop r8
     pop rcx
     pop rdx
+    pop rsi
+    pop rdi
     pop rax
 .out:
     ret
 
+; cursor_blend: the cursor's picture over what the back buffer has there,
+; onto the framebuffer. Preserves all.
+cursor_blend:
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    call cursor_rect
+    mov r12, rdi                        ; the picture's top left on the screen
+    mov r13, rsi
+    call gfx_clip_screen_signed
+    jz .out
+    mov rax, rsi                        ; the picture's first pixel
+    sub rax, r13
+    imul rax, [cursor_sf + SF_PITCH]
+    mov r8, rdi
+    sub r8, r12
+    lea r8, [rax + r8 * 4]
+    add r8, [cursor_sf + SF_PTR]
+    mov rax, rsi                        ; the screen's
+    imul rax, [scr_pitch]
+    lea r9, [rax + rdi * 4]
+    mov r10, rcx                        ; rows
+.row:
+    mov rsi, r8
+    mov rbx, r9
+    mov rcx, rdx
+.px:
+    lodsd
+    test eax, eax
+    jz .next
+    mov r11, [bb_ptr]
+    mov r11d, [r11 + rbx]
+    mov r12d, eax                       ; what is left of what is under it
+    shr r12d, 24
+    mov r13d, r12d
+    shr r13d, 7
+    add r12d, r13d
+    neg r12d
+    add r12d, 256
+    SCALE r11d, r12d, r13d
+    add eax, r11d
+    and eax, 0x00FFFFFF
+    cmp byte [fb_swap], 0
+    je .put
+    mov r11d, eax                       ; 00RRGGBB -> 00BBGGRR
+    bswap eax
+    shr eax, 8
+    and r11d, 0x0000FF00
+    and eax, 0x00FF00FF
+    or eax, r11d
+.put:
+    mov r11, [fb_ptr]
+    mov [r11 + rbx], eax
+.next:
+    add rbx, 4
+    dec rcx
+    jnz .px
+    add r8, [cursor_sf + SF_PITCH]
+    add r9, [scr_pitch]
+    dec r10
+    jnz .row
+.out:
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+    ret
+
 ; cursor_paint: draw the arrow straight onto the framebuffer. Preserves all.
 cursor_paint:
+    cmp qword [cursor_sf + SF_PTR], 0   ; the desktop's picture, once made
+    jne cursor_blend
     push rax
     push rbx
     push rcx
@@ -386,6 +620,9 @@ cursor_art:
 
 section .data
 cursor_shown:   db 0
+cursor_off:     db 0                    ; not drawn (ptr_mode)
+grab_off:       db 0                    ; ctrl+alt let a held pointer go
+ptr_abs:        db 0                    ; an absolute position came (ptr_ax)
 ptr_moved:      db 0                    ; since the desk last heard
 
 section .bss
@@ -395,6 +632,12 @@ ptr_y:          resq 1
 cur_x:          resq 1
 cur_y:          resq 1
 ptr_buttons:    resd 1
+ptr_dx:         resd 1                  ; how far it moved since the desk last
+ptr_dy:         resd 1                  ; heard (ptr_delta), cleared as a qword
+ptr_ax:         resq 1                  ; where a tablet last put it
+ptr_ay:         resq 1
+ptr_over:       resq 1                  ; the window it is over (desk_motion)
+grab_win:       resq 1                  ; the window holding it (ptr_mode)
 ptr_head:       resb 1
 ptr_tail:       resb 1
 alignb 16

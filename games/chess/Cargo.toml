@@ -1,0 +1,44 @@
+[package]
+name = "chess"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+hearth = { git = "https://github.com/noahsabaj/hearth", branch = "main", default-features = false, features = ["2d_soft"] }
+ab_glyph = "0.2"
+
+# Axiom's target, x86_64-axiom.json, has the vendor `axiom`, which rustc doesn't know of.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_vendor, values("axiom"))'] }
+
+[features]
+default = ["remote"]
+# Lets the `hearth` CLI inspect and drive the app while it runs, over the Hearth Remote Protocol.
+# Leave it out of releases you ship with `--no-default-features`.
+remote = ["hearth/hearth_remote"]
+
+# Compile your code with some optimization, so the game runs smoothly while you work on it.
+[profile.dev]
+opt-level = 1
+
+# Compile dependencies, including the engine, with full optimization. They rarely change, so this
+# costs time only on the first build. Keeping only line tables in their debug info still gives
+# backtraces with file and line, and makes every link, and so every rebuild, about 3x faster.
+[profile.dev.package."*"]
+opt-level = 3
+debug = "line-tables-only"
+
+# Releases: one unit, linked whole.
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+
+# Builds for Axiom (`--profile axiom`): an .AXE holds 16 MiB at most, so the engine is optimized
+# for size, and the game, whose computer player wants speed, for speed.
+[profile.axiom]
+inherits = "release"
+opt-level = "s"
+
+[profile.axiom.package.chess]
+opt-level = 3

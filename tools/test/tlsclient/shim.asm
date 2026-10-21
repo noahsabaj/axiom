@@ -20,7 +20,7 @@ section .rodata rdata align=64
 section .data data align=64
 section .bss bss align=64
 
-global tls_start, tls_input, tls_write, tls_close, tls_abort, tls_error_text
+global tls_start, tls_accept, tls_input, tls_write, tls_close, tls_abort, tls_error_text
 global x509_extra, tls_layout
 global kc, host_send, host_ops, tl_text
 extern c_send, c_ready, c_data, c_closed, c_fail

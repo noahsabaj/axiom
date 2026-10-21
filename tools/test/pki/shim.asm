@@ -1,6 +1,7 @@
 ; =============================================================================
 ;  shim.asm - host test shim for what checks certificates (nasm -f win64):
-;  src/kernel/sha256.asm, sha512.asm, bignum.asm, pubkey.asm and x509.asm
+;  src/kernel/sha256.asm, sha512.asm, rand.asm, bignum.asm, pubkey.asm and
+;  x509.asm
 ;  (with gen/roots.asm), included unchanged, linked into a DLL with host.c.
 ;  Exports:
 ;    kc      u64 kc(void *target, const u64 args[6], int *cf): RDI, RSI,
@@ -23,11 +24,13 @@ section .bss bss align=64
 
 global kc, kcheck, x5_text
 global sha384, sha512, mont_setup, mont_mul, mont_in, mont_out, mont_add, mont_sub
-global mont_exp, bn_load, bn_store, sig_verify, x509_chain, x509_leaf, x509_parse
+global mont_exp, bn_load, bn_store, sig_verify, sig_sign, ec_public
+global x509_chain, x509_leaf, x509_parse
 global x509_unix, x509_extra, x509_anchor, x509_depth, x509_key, x509_roots
 
 %include "sha256.asm"
 %include "sha512.asm"
+%include "rand.asm"
 %include "bignum.asm"
 %include "pubkey.asm"
 %include "x509.asm"

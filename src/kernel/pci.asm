@@ -16,6 +16,7 @@ PE_CLASS        equ 8
 PE_SUBCLASS     equ 9
 PE_PROGIF       equ 10
 PE_REV          equ 11
+PE_SEG          equ 12                  ; 1: behind a VMD (vmd.asm)
 
 section .text
 
@@ -24,6 +25,8 @@ section .text
 pci_read32:
     push rcx
     push rdx
+    test edi, VMD_SEG
+    jnz .vmd
     cmp byte [pci_use_ecam], 0
     je .legacy
     mov eax, edi
@@ -43,6 +46,14 @@ pci_read32:
     out dx, eax
     mov dx, 0xCFC
     in eax, dx
+    jmp .out
+.vmd:
+    call vmd_cfg
+    jc .nothing
+    mov eax, [rax]
+    jmp .out
+.nothing:
+    mov eax, -1                         ; as an absent function answers
 .out:
     pop rdx
     pop rcx
@@ -53,6 +64,8 @@ pci_write32:
     push rax
     push rcx
     push rdx
+    test edi, VMD_SEG
+    jnz .vmd
     cmp byte [pci_use_ecam], 0
     je .legacy
     mov eax, edi
@@ -74,6 +87,11 @@ pci_write32:
     mov dx, 0xCFC
     mov eax, ecx
     out dx, eax
+    jmp .out
+.vmd:
+    call vmd_cfg
+    jc .out
+    mov [rax], edx
 .out:
     pop rdx
     pop rcx
@@ -195,9 +213,12 @@ pci_find_class:
     xor eax, eax
     ret
 
-; pci_bdf(RDI = entry) -> EAX = bus << 8 | dev << 3 | fn. Preserves others.
+; pci_bdf(RDI = entry) -> EAX = bus << 8 | dev << 3 | fn, and VMD_SEG for
+; a function behind a VMD. Preserves others.
 pci_bdf:
-    movzx eax, byte [rdi + PE_BUS]
+    movzx eax, byte [rdi + PE_SEG]
+    shl eax, 8
+    or al, [rdi + PE_BUS]
     shl eax, 5
     or al, [rdi + PE_DEV]
     shl eax, 3
@@ -260,6 +281,33 @@ pci_power_on:
     mov edi, 10000                      ; D3hot -> D0 takes 10 ms
     call delay_us
     pop rdi
+.out:
+    pop rsi
+    pop rdx
+    pop rax
+    ret
+
+; pci_power_d3hot(EDI = bdf): bus mastering off, then D3hot, as Linux
+; leaves a function before a restart (a driver's shutdown), if it has the
+; power-management capability. Preserves all.
+pci_power_d3hot:
+    push rax
+    push rdx
+    push rsi
+    mov esi, 0x04
+    call pci_read32
+    mov edx, eax
+    and edx, 0xFFFF & ~(1 << 2)         ; the command, without Bus Master
+    call pci_write32                    ;   (the status half written as 0)
+    mov esi, 0x01
+    call pci_find_cap
+    jc .out
+    add esi, 4                          ; PMCSR
+    call pci_read32
+    mov edx, eax
+    and edx, ~(3 | (1 << 15))           ; (PME status kept)
+    or edx, 3                           ; D3hot
+    call pci_write32
 .out:
     pop rsi
     pop rdx

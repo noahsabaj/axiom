@@ -7,6 +7,7 @@
 ; =============================================================================
 
 %include "axe.inc"
+WANTS nothing
 
 ADDS            equ 100000              ; each adder's increments
 ADDERS          equ 4

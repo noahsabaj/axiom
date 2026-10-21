@@ -167,6 +167,11 @@ cmd_claude:
     KLOG "claude: '%s' is not a model name", rsi
     jmp .out
 .model_ok:
+    push rsi                            ; claude.model, kept on the stick
+    mov edi, CFG_MODEL
+    mov rdx, rsi
+    call cfg_change
+    pop rsi
     lea rdi, [cl_model]
     call strcpy
     lea rax, [cl_model]

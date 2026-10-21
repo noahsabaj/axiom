@@ -7,6 +7,7 @@
 ; =============================================================================
 
 %include "axe.inc"
+WANTS nothing
 
 THREAD_STACK    equ 16384
 SPIN_MAX        equ 64

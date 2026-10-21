@@ -110,7 +110,7 @@ def eight(logs):
     first = log[log.find("  type       live"):log.find("objects test")]
     types = dict(re.findall(r"^\s+(task|thread|event|memory)\s+(\d+)\s+\d+$", first, re.M))
     result(set(types) == {"task", "thread", "event", "memory"} and types["task"] == "1"
-           and types["event"] == "0" and types["memory"] == "0",
+           and types["event"] == "0" and types["memory"] == "1",   # the desktop's look
            f"'objects' lists each type: {types}")
     m = re.search(r"^\s+1\s+kernel\s+0\s+(\d+)\s+0\s+\d+\s+\d+$", first, re.M)
     result(m and m.group(1) == types.get("thread"),

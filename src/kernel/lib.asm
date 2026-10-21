@@ -479,9 +479,20 @@ kprint:
     call format
     call serial_write
     call log_append
+    cmp byte [rec_capturing], 0         ; a command piped: its lines become a
+    jne .capture                        ; table (records.asm)
+.screen:
     cmp byte [log_to_screen], 0
     je .unlock
     call con_write
+    jmp .unlock
+.capture:
+    push rax
+    mov rax, [gs:PC_CURRENT]            ; (only what the shell's thread says)
+    cmp rax, [main_thread]
+    pop rax
+    jne .screen
+    call rec_capture
 .unlock:
     lea rdi, [print_lock]
     call spin_unlock
