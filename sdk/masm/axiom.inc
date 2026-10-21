@@ -14,6 +14,7 @@ OT_NET          EQU 9  ; the network, to some hosts and ports (socket.asm)
 OT_SOCKET       EQU 10  ; a connection, or a port listened on (socket.asm)
 OT_DESK         EQU 11  ; the desktop: windows can be opened on it (window.asm)
 OT_WINDOW       EQU 12  ; a program's window (window.asm)
+OT_SETTINGS     EQU 13  ; the machine's settings (settings.asm)
 OT_FILES        EQU 14  ; files on FAT volumes, or in a folder (fscap.asm)
 OT_SOUND        EQU 15  ; the speakers: streams can be opened on them (sound.asm)
 OT_STREAM       EQU 16  ; a stream of sound, playing (sound.asm)
@@ -52,6 +53,8 @@ RT_FS_WRITE     EQU 1 SHL 9  ; write, make, rename, remove
 RT_FS_KERNEL    EQU 1 SHL 10  ; every volume: a new kernel (RO_FS_UPDATE)
 RT_SOUND_PLAY   EQU 1 SHL 8  ; the speakers: open streams on them
 RT_STREAM_PLAY  EQU 1 SHL 8  ; a stream: play it, wait on it
+RT_SET_READ     EQU 1 SHL 8  ; the settings: read them, wait for a change
+RT_SET_CHANGE   EQU 1 SHL 9  ; change them
 RT_ALL          EQU 0FFFFh
 E_BADH          EQU - 1  ; no such handle
 E_TYPE          EQU - 2  ; the wrong type of object
@@ -136,6 +139,8 @@ RO_NET_SHUT     EQU 28  ; handle = a socket: a FIN once what was
 RO_NET_SUB      EQU 29  ; handle = the network, handle2 + a0: a
 RO_WIN_SHOW     EQU 30  ; handle = a window, a0 = x, a1 = y, a2 =
 RO_WIN_TITLE    EQU 31  ; handle, handle2 + a0: a1 bytes of UTF-8, its title
+RO_SET_LIST     EQU 32  ; handle = the settings, into handle2 + a0,
+RO_SET_CHANGE   EQU 33  ; handle, a0 = which (its record's place),
 RO_DESK_LOOK    EQU 34  ; handle = the desktop -> a handle to the
 RO_FS_VOLUMES   EQU 35  ; handle, into handle2 + a0, a1 bytes at
 RO_FS_LIST      EQU 36  ; handle, handle2 + a0: a folder; into
@@ -167,7 +172,7 @@ FV_FREE         EQU 64  ; bytes free on it
 FV_SIZE         EQU 72
 FVF_WRITABLE    EQU 1  ; 'vol <n> rw' was said
 FVF_REMOVABLE   EQU 2  ; a stick, a card
-FVF_BOOT        EQU 4  ; the stick Axiom started from
+FVF_BOOT        EQU 4  ; the volume Axiom started from
 FE_LEN          EQU 0  ; a thing in a folder (RO_FS_LIST): dword, the record's bytes
 FE_ATTR         EQU 4  ; dword FEA_*
 FE_SIZE         EQU 8  ; bytes, 0 for a folder
@@ -182,6 +187,20 @@ FEA_DIR         EQU 1
 FEA_RO          EQU 2
 FEA_HIDDEN      EQU 4
 FEA_SYSTEM      EQU 8
+SI_NAME         EQU 0  ; 32 bytes, NUL-ended: display.theme ...
+SI_KIND         EQU 32  ; dword SK_*
+SI_FLAGS        EQU 36  ; dword SIF_*
+SI_VALUE        EQU 40  ; a choice's place, 0 or 1, a number,
+SI_DEFAULT      EQU 48
+SI_MIN          EQU 56  ; a number's or a zone's least,
+SI_MAX          EQU 64  ; most (a choice: how many there are),
+SI_STEP         EQU 72  ; and step
+SI_TEXT         EQU 80  ; 64 bytes: the value as the shell shows it
+SI_UNIT         EQU 144  ; 16 bytes: a number's unit (ms, ...)
+SI_CHOICES      EQU 160  ; 128 bytes: a choice's, or a colour's
+SI_SWATCHES     EQU 288  ; 16 dwords: a colour's swatches, 0xRRGGBB
+SI_ABOUT        EQU 352  ; 128 bytes: what it is
+SI_SIZE         EQU 512
 NETF_TLS        EQU 1
 NETF_INSECURE   EQU 2  ; with NETF_TLS: the certificate not checked
 NETF_LOOKUP     EQU 4  ; alone: the host only looked up; the socket
@@ -236,10 +255,11 @@ AXE_HDR         EQU 56
 AW_NET          EQU 1  ; the network (SB_NET)
 AW_STORE        EQU 2  ; its own names in the store (SB_STORE)
 AW_DESK         EQU 4  ; the desktop, to open windows on (SB_DESK)
+AW_SETTINGS     EQU 8  ; the settings, to read and change (SB_SETTINGS)
 AW_FILES        EQU 16  ; the files on every volume (SB_FILES)
 AW_SOUND        EQU 32  ; the speakers (SB_SOUND)
 AW_UPDATE       EQU 64  ; with AW_FILES: a new kernel (RT_FS_KERNEL)
-AW_ALL          EQU 7 OR AW_FILES OR AW_SOUND OR AW_UPDATE
+AW_ALL          EQU 15 OR AW_FILES OR AW_SOUND OR AW_UPDATE
 SB_RING         EQU 0  ; dword: a handle to the task's ring
 SB_RING_MEM     EQU 4  ; dword: to the ring's memory
 SB_CONSOLE      EQU 8  ; dword: to the console
@@ -250,6 +270,7 @@ SB_ARGS_LEN     EQU 32  ; dword
 SB_STORE        EQU 36  ; dword: to the store under "name/", or 0
 SB_NET          EQU 40  ; dword: to the network, or 0
 SB_DESK         EQU 44  ; dword: to the desktop, or 0
+SB_SETTINGS     EQU 48  ; dword: to the settings, or 0
 SB_FILES        EQU 52  ; dword: to the files, or 0
 SB_GIFT2        EQU 56  ; dword: a second thing it was given, or 0
 SB_SOUND        EQU 60  ; dword: to the speakers, or 0
