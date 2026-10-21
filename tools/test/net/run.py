@@ -166,11 +166,12 @@ ECHO, TLS_ECHO, ANSWER, TLS_ANSWER, RESET, SERVE = (free_port() for _ in range(6
 served = []
 
 
-def serve_clients(log_count):
+def serve_clients(log_after):
     """Three clients for the guest's 'net serve', one after another."""
     deadline = time.time() + 200
-    # 'net test' listens on 7777 first, and says so too: wait for 'net serve'
-    while log_count("listens on port 7777") < 2 and time.time() < deadline:
+    # 'net test' listens on 7777 too, and closes it before the kernel may
+    # have said so: wait for a listen said after 'net test' has exited
+    while "listens on port 7777" not in log_after("run: NET exited") and time.time() < deadline:
         time.sleep(0.3)
     for i in range(3):
         data = random.Random(i).randbytes([1000, 100_000, 300_000][i])
@@ -213,14 +214,17 @@ def main():
     log_path = OUT / "net.log"
     started = time.time()
 
-    def log_count(text):
+    def log_after(text):
+        """the log after text's first appearance, or nothing"""
         try:
             if log_path.stat().st_mtime < started:
-                return 0
-            return log_path.read_text(errors="replace").count(text)
+                return ""
+            log = log_path.read_text(errors="replace")
         except OSError:
-            return 0
-    threading.Thread(target=serve_clients, args=(log_count,), daemon=True).start()
+            return ""
+        i = log.find(text)
+        return "" if i < 0 else log[i + len(text):]
+    threading.Thread(target=serve_clients, args=(log_after,), daemon=True).start()
 
     run = lambda args: ["type run net " + args + NL, "until exited with", "wait 0.3"]
     stick = OUT / "stick.img"
