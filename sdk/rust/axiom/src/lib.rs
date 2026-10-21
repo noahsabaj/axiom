@@ -53,7 +53,7 @@ pub use rt::{Args, Termination, args, args_line, wants};
 pub use sound::Stream;
 pub use sys::{Error, Handle, Result, exit};
 pub use time::Instant;
-pub use window::{Button, Event, Frame, Key, Look, Mods, Pointer, Window};
+pub use window::{Button, Event, Frame, Key, Look, Mods, Pointer, Window, Zoom};
 
 /// For a program without std: a panic said on the console, and the program
 /// ended (101).

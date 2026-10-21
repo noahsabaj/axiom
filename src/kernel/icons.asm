@@ -47,6 +47,29 @@ icons_make:
     mov dword [sh_icon + SH_A], 110
     lea rdi, [sh_icon]
     call shadow_build
+    mov rax, [m_icon_big]               ; and theirs magnified: 1.6 times
+    imul rax, rax, 1000 - 2 * ICON_INSET
+    xor edx, edx
+    mov ecx, 1000
+    div rcx
+    imul rax, rax, ICON_RADIUS
+    xor edx, edx
+    div rcx
+    mov [sh_icon_big + SH_R], rax
+    mov rax, [sh_icon + SH_M]
+    imul rax, rax, 8
+    xor edx, edx
+    mov ecx, 5
+    div rcx
+    mov [sh_icon_big + SH_M], rax
+    mov rax, [sh_icon + SH_OY]
+    imul rax, rax, 8
+    xor edx, edx
+    div rcx
+    mov [sh_icon_big + SH_OY], rax
+    mov dword [sh_icon_big + SH_A], 110
+    lea rdi, [sh_icon_big]
+    call shadow_build
     xor ebx, ebx
 .each:
     cmp ebx, DOCK_APPS
@@ -57,7 +80,15 @@ icons_make:
     imul rax, rbx, DA_SIZE
     lea rsi, [dock_apps]
     mov rsi, [rsi + rax + DA_ICON]
+    push rsi
     call icon_render
+    pop rsi
+    imul rdi, rbx, SF_SIZE              ; the big one
+    lea rax, [app_icons_big]
+    add rdi, rax
+    mov rdx, [m_icon_big]
+    lea r8, [sh_icon_big]
+    call icon_render_at
     inc ebx
     jmp .each
 .out:
@@ -130,25 +161,34 @@ icon_for:
 ; icon_render(RDI = a surface, RSI = an icon program): the icon, at the
 ; dock's size, into the surface. Preserves RBX, RBP, R12-R15.
 icon_render:
+    mov rdx, [m_icon]
+    lea r8, [sh_icon]
+
+; icon_render_at(RDI = a surface, RSI = an icon program, RDX = its side,
+; R8 = its shadow): the icon at that size. Preserves RBX, RBP, R12-R15.
+icon_render_at:
     push rbx
     push r12
     push r13
     push r14
     push r15
+    push rbp
     mov r12, rdi
     mov r13, rsi
-    mov rsi, [m_icon]
-    mov rdx, rsi
+    mov rbp, rdx                        ; RBP: its side
+    mov rbx, r8                         ; RBX: its shadow
+    mov rsi, rbp
+    mov rdx, rbp
     call img_new
     jc .out
-    mov rax, [m_icon]                   ; the body: its side and place
+    mov rax, rbp                        ; the body: its side and place
     imul rax, rax, ICON_INSET
     add rax, 500
     xor edx, edx
     mov ecx, 1000
     div rcx
     mov r15, rax                        ; inset
-    mov r14, [m_icon]
+    mov r14, rbp
     sub r14, r15
     sub r14, r15                        ; side
     lea rdi, [icon_tmp]
@@ -173,14 +213,14 @@ icon_render:
     call gfx_target
     mov rdi, r15
     mov rsi, r15
-    mov rax, [sh_icon + SH_OY]          ; a little above the middle: room
+    mov rax, [rbx + SH_OY]              ; a little above the middle: room
     shr rax, 1                          ; for the shadow under it
     sub rsi, rax
     mov rdx, r14
     mov rcx, r14
     push rdi
     push rsi
-    lea r8, [sh_icon]
+    mov r8, rbx
     call gfx_shadow
     pop rsi
     pop rdi
@@ -188,7 +228,7 @@ icon_render:
     mov [span_sf], rax
     mov [span_x], rdi
     mov [span_y], rsi
-    mov r10, [sh_icon + SH_R]
+    mov r10, [rbx + SH_R]
     mov r11d, RC_ALL
     push rbx
     lea rbx, [span_copy]
@@ -196,6 +236,7 @@ icon_render:
     pop rbx
     call gfx_target_back
 .out:
+    pop rbp
     pop r15
     pop r14
     pop r13
@@ -526,6 +567,20 @@ icon_system:
     dd IP_RRECT, 580, 230, 100, 550, 24, 0xFF64D2FF, 256
     dd IP_RRECT, 720, 400, 100, 380, 24, 0xFF30D158, 256
     dd IP_END
+icon_mandel:
+    dd IP_GRAD, 0xFF2456C8, 0xFF0B1A4A
+    dd IP_CIRCLE, 90, 140, 760, 0xFF5AB8FF, 60
+    dd IP_CIRCLE, 150, 200, 640, 0xFF8FD3FF, 70
+    dd IP_RRECT, 60, 494, 160, 12, 6, 0xFF8FD3FF, 220
+    dd IP_CIRCLE, 140, 465, 70, 0xFF050510, 256
+    dd IP_CIRCLE, 200, 390, 220, 0xFF050510, 256
+    dd IP_CIRCLE, 370, 250, 500, 0xFF050510, 256
+    dd IP_CIRCLE, 520, 160, 130, 0xFF050510, 256
+    dd IP_CIRCLE, 520, 710, 130, 0xFF050510, 256
+    dd IP_CIRCLE, 760, 330, 90, 0xFF050510, 256
+    dd IP_CIRCLE, 760, 580, 90, 0xFF050510, 256
+    dd IP_POLY, 3, 0xFF2A5BC0, 256, 880, 440, 880, 560, 800, 500
+    dd IP_END
 
 ; the pointer: its edge and its fill, hundredths of a point from the tip
 cursor_edge:
@@ -543,6 +598,8 @@ cur_shadow_at:
 section .bss
 alignb 8
 sh_icon:        resb SH_SIZE            ; an icon's shadow
+sh_icon_big:    resb SH_SIZE            ; and magnified
+app_icons_big:  resb DOCK_APPS * SF_SIZE ; the dock's apps, magnified the most
 icon_tmp:       resb SF_SIZE            ; its body, being drawn
 cursor_sf:      resb SF_SIZE            ; the pointer's picture
 cursor_hot_x:   resq 1                  ; its tip, in it

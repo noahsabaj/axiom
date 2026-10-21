@@ -24,6 +24,36 @@ OUT = ROOT / "build" / "esp" / "EFI" / "AXIOM"
 TARGET = SDK / "x86_64-axiom.json"
 
 
+def nightly():
+    """The nightly toolchain's sysroot, if it is there with its rust-src;
+    None, having said what is missing, if not."""
+    try:
+        sysroot = subprocess.run(["rustc", "+nightly", "--print", "sysroot"], check=True,
+                                 capture_output=True, text=True).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        print("rust: no nightly toolchain (rustup toolchain install nightly, with rust-src)")
+        return None
+    if not (vendor(sysroot)).is_dir():
+        print("rust: nightly has no rust-src (rustup component add rust-src --toolchain nightly)")
+        return None
+    return pathlib.Path(sysroot)
+
+
+def vendor(sysroot):
+    return pathlib.Path(sysroot) / "lib" / "rustlib" / "src" / "rust" / "library" / "vendor"
+
+
+def cargo_build(sysroot, target, target_dir, std):
+    """cargo build for a JSON target, the crates in STD built from rust-src
+    and those they use from its vendored copies, offline."""
+    return ["cargo", "+nightly", "build", "--offline",
+            f"-Zbuild-std={std}", "-Zbuild-std-features=compiler-builtins-mem",
+            "-Zjson-target-spec",
+            "--target", str(target), "--target-dir", str(target_dir),
+            "--config", 'source.crates-io.replace-with="rust-src"',
+            "--config", f'source.rust-src.directory="{vendor(sysroot).as_posix()}"']
+
+
 def programs():
     """{bin name: its package} for the workspace's programs."""
     ws = tomllib.loads((SDK / "Cargo.toml").read_text(encoding="utf-8"))
@@ -48,23 +78,11 @@ def main():
     for n in names:
         if len(n) > 8:
             sys.exit(f"rust: {n}: a program's name is 8 letters at most (NAME.AXE)")
-    try:
-        sysroot = subprocess.run(["rustc", "+nightly", "--print", "sysroot"], check=True,
-                                 capture_output=True, text=True).stdout.strip()
-    except (OSError, subprocess.CalledProcessError):
-        print("rust: no nightly toolchain (rustup toolchain install nightly, with rust-src)")
-        sys.exit(3)
-    vendor = pathlib.Path(sysroot) / "lib" / "rustlib" / "src" / "rust" / "library" / "vendor"
-    if not vendor.is_dir():
-        print("rust: nightly has no rust-src (rustup component add rust-src --toolchain nightly)")
+    sysroot = nightly()
+    if not sysroot:
         sys.exit(3)
     profile = "debug" if opts.debug else "release"
-    cmd = ["cargo", "+nightly", "build", "--offline",
-           "-Zbuild-std=std,panic_abort", "-Zbuild-std-features=compiler-builtins-mem",
-           "-Zjson-target-spec",
-           "--target", str(TARGET), "--target-dir", str(ROOT / "build" / "rust"),
-           "--config", 'source.crates-io.replace-with="rust-src"',
-           "--config", f"source.rust-src.directory={str(vendor.as_posix())!r}".replace("'", '"')]
+    cmd = cargo_build(sysroot, TARGET, ROOT / "build" / "rust", "std,panic_abort")
     if not opts.debug:
         cmd.append("--release")
     for n in names:                     # one at a time: each its own features

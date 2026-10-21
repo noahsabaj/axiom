@@ -8,6 +8,9 @@ docs/protocol.md, sections 1 to 4 and 7) over TLS, through a forwarded port.
 A stick holds /Home/fleet as `fleet add NAME --self-managed` makes it: its
 node.json (a client's token's SHA-256, the network it comes from), a P-256
 cert.pem and key.pem. Two boots, one after the other, on that stick:
+the first from it as a USB stick, the second from it as the machine's own
+NVMe drive (as hp-1, axiom-1, starts from its own EFI partition: /Home
+and fleet's home on a volume not removable):
 
   - the first: `fleet`; the hello (a wrong token refused, a protocol not
     spoken refused, then the reply: its node, version, code, protocol,
@@ -21,9 +24,12 @@ cert.pem and key.pem. Two boots, one after the other, on that stick:
     admin, --cwd and a word with a space refused; spin past its
     --timeout (failed, why); spin stopped; a program pushed into the project
     and run from there; one left running;
-  - the second: `fleet` again: a new `since`; the job left running is lost,
-    the others as they ended, their logs still there; the push's files
-    still need nothing.
+  - the second: `battery simulate` and `heat simulate`, then `fleet` again:
+    a new `since`; info with the battery, {percent: 90, plugged: true}, as
+    fleet's own laptops report theirs, and temp_c 47.0 (the first boot's:
+    null and null, QEMU has neither); the job left
+    running is lost, the others as they ended, their logs still there; the
+    push's files still need nothing.
 Skipped (passing) if there is no nightly toolchain. Outputs go to
 build/test/fleet/.
 """
@@ -275,6 +281,7 @@ def client_two(log_path, started, pin):
     try:
         c = Conn(pin)
         r["hello"] = c.hello
+        r["info"] = c.ask("info")[0]
         r["jobs"] = c.ask("jobs", ids=["forever", "j1", "slow"])[0]
         r["j1 log"] = c.log("j1")
         r["manifest"] = c.ask("manifest", project="demo", files=entries(FILES))[0]
@@ -284,8 +291,10 @@ def client_two(log_path, started, pin):
         r["error"] = repr(e)
 
 
-def script(last):
-    return ["until log: kept in", "until dhcp: address", "wait 0.5",
+def script(last, simulated=False):
+    simulate = ["type battery simulate\\n", "until battery: simulated from now on",
+                "type heat simulate\\n", "until heat: simulated from now on"] if simulated else []
+    return ["until log: kept in", "until dhcp: address", "wait 0.5", *simulate,
             "type fleet\\n", f"until fleet: node {NAME} listening", f"until fleet: job {last} ended", "wait 1"]
 
 
@@ -309,7 +318,9 @@ def check(log1, log2):
     i = r.get("info", {})
     result(i.get("os") == "axiom" and i.get("threads") == 2 and i.get("ram_gb", 0) > 0.5
            and 0 < i.get("disk_free_gb", 0) <= i.get("disk_total_gb", 0) and i.get("gpus") == []
-           and i.get("admin") is False and i.get("battery") is None and i.get("jobs_running") == 0
+           and i.get("admin") is False and i.get("battery") is None and i.get("temp_c") is None
+           and isinstance(i.get("load"), float) and 0 <= i["load"] < 4
+           and i.get("jobs_running") == 0
            and i.get("projects_running") == [] and i.get("uptime_s", 0) > 0,
            f"info: {json.dumps(i)[:400]}")
     result(r.get("unknown") == {"id": 3, "error": "unknown operation 'frobnicate'"} and
@@ -404,6 +415,12 @@ def check(log1, log2):
     result("error" not in r, f"the second boot's client: {r.get('error', 'no exceptions')}")
     result(r.get("hello", {}).get("since", 0) > first.get("hello", {}).get("since", 0),
            f"since: a new start ({r.get('hello', {}).get('since')})")
+    battery = r.get("info", {}).get("battery")
+    result(has(log2, "battery: simulated from now on") and battery == {"percent": 90, "plugged": True},
+           f"a battery (simulated): in info, as fleet's own nodes report one: {battery}")
+    temp = r.get("info", {}).get("temp_c")
+    result(has(log2, "heat: simulated from now on") and temp == 47.0 and isinstance(temp, float),
+           f"the CPU's temperature (a simulated sensor): in info as temp_c: {temp!r}")
     j = by_id(r.get("jobs", {}).get("jobs", []))
     result(j.get("forever", {}).get("state") == "lost" and j.get("j1", {}).get("state") == "done"
            and j.get("slow", {}).get("state") == "failed", f"after a restart: {j}")
@@ -437,13 +454,15 @@ def main():
     fwd = f"user,hostfwd=tcp:127.0.0.1:{FORWARD}-:{PORT}"
     args = ["--smp", "2", "--nic", "rtl8139", "--netdev", fwd, "--stick", stick.relative_to(ROOT).as_posix()]
     logs = []
-    for client, last in ((client_one, "last"), (client_two, "last2")):
+    for client, last, simulated in ((client_one, "last", False), (client_two, "last2", True)):
+        internal = ["--internal"] if simulated else []
         name = f"fleet-{len(logs) + 1}"
         (OUT / f"{name}.log").unlink(missing_ok=True)    # (the last run's would do for this one's)
         started = time.time()
         t = threading.Thread(target=client, args=(OUT / f"{name}.log", started, pin), daemon=True)
         t.start()
-        log, _, took = boot(OUT, name, script(last), *args, timeout=150, slots=1)
+        log, _, took = boot(OUT, name, script(last, simulated), *args, *internal, timeout=150,
+                            slots=1)
         print(f"      ({name} {took:.0f} s)")
         t.join(5)
         logs.append(log)

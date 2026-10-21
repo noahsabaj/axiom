@@ -3,7 +3,8 @@
 ;  that no other entry in the directory has. One cached FAT sector (written
 ;  to every copy of the FAT) and one cached directory sector, both flushed
 ;  at the end of each operation, after which the drive is told to flush.
-;  File data goes straight to its clusters.
+;  File data goes straight to its clusters: those that follow one another on
+;  the disk in one command, up to FAT_RUN bytes.
 ;
 ;  Registers by convention: R14 = volume. Writes need 'vol <n> rw'.
 ; =============================================================================
@@ -29,6 +30,8 @@ VF_FREE_OK      equ VO_FAT + 328        ; byte: they were (fat_free_count)
 
 FAT_EOC         equ 0x0FFFFFFF
 FAT_FILE_MAX    equ 64 * 1024           ; what cat and the shell move at once
+FAT_RUN         equ 1024 * 1024         ; file data read or written at once, at most
+FC_SCAN         equ 64 * 1024           ; the FAT read at once, to count what is free
 
 section .text
 
@@ -331,6 +334,69 @@ clus_ok:
     stc
     ret
 
+; clus_run(R14, EAX = a cluster, EDX = how many are wanted, 1 or more) ->
+; ECX = how many from it follow one another both in its chain and on the
+; disk (1 to EDX), EAX = the cluster after them in the chain; CF on a disk
+; error. Preserves others.
+clus_run:
+    push rsi
+    mov esi, eax
+    xor ecx, ecx
+.grow:
+    inc ecx
+    call fat_get                        ; the next in the chain
+    jc .out
+    cmp ecx, edx
+    jae .end
+    cmp eax, [r14 + VF_MAXCL]
+    ja .end
+    push rcx
+    add ecx, esi                        ; and the next on the disk
+    cmp eax, ecx
+    pop rcx
+    je .grow
+.end:
+    clc
+.out:
+    pop rsi
+    ret
+
+; run_write(R14, ESI = a run's first cluster, ECX = its clusters, 0 for
+; none, R10 = the data just past it) -> CF: the run, whole clusters that
+; follow one another on the disk, written at once. Preserves all.
+run_write:
+    test ecx, ecx
+    jz .none
+    push rax
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    mov eax, esi
+    call clus_block
+    mov rsi, rax                        ; its first block
+    mov edx, ecx
+    mov ecx, [r14 + VF_CSHIFT]
+    shl edx, cl                         ; its blocks
+    mov ecx, [r14 + VF_SSHIFT]
+    mov rdi, rdx
+    shl rdi, cl
+    neg rdi
+    add rdi, r10                        ; its data
+    call vol_write
+    jc .out
+    mov byte [fat_dirtied], 1
+.out:
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rax
+    ret
+.none:
+    clc
+    ret
+
 ; clus_block(R14, EAX = cluster) -> RAX = its first block in the volume.
 ; Preserves others.
 clus_block:
@@ -400,39 +466,81 @@ fat_alloc:
     ret
 
 ; fat_free_count(R14) -> EAX = its free clusters; CF on a disk error. The
-; FAT is read through once, the first time; fat_set keeps the count after.
-; Preserves others.
+; FAT is read through once, the first time, FC_SCAN bytes at a time;
+; fat_set keeps the count after. Preserves others.
 fat_free_count:
     cmp byte [r14 + VF_FREE_OK], 0
     jne .known
+    push rbx
     push rcx
     push rdx
-    xor edx, edx
-    mov ecx, 2
-.each:
-    cmp ecx, [r14 + VF_MAXCL]
-    ja .counted
-    mov eax, ecx
-    call fat_get
+    push rsi
+    push rdi
+    push r8
+    push r9
+    call fat_flush_cache                ; what is cached, on the disk first
     jc .failed
-    test eax, eax
-    jnz .used
-    inc edx
-.used:
-    inc ecx
-    jmp .each
+    xor r8d, r8d                        ; free clusters
+    xor ebx, ebx                        ; the FAT's sector,
+    xor r9d, r9d                        ; the entry its first
+.piece:
+    cmp r9d, [r14 + VF_MAXCL]
+    ja .counted
+    mov eax, [r14 + VF_FATSZ]
+    sub eax, ebx
+    jbe .counted                        ; (the FAT ends sooner)
+    mov ecx, [r14 + VF_SSHIFT]
+    mov edx, FC_SCAN
+    shr edx, cl                         ; sectors at once
+    cmp edx, eax
+    jbe .sized
+    mov edx, eax
+.sized:
+    mov esi, [r14 + VF_FAT]
+    add esi, ebx
+    lea rdi, [fc_scan]
+    call vol_read
+    jc .failed
+    add ebx, edx
+    shl edx, cl
+    shr edx, 2                          ; its entries
+    lea rsi, [fc_scan]
+.entry:
+    cmp r9d, 2                          ; (0 and 1 are not clusters)
+    jb .next
+    cmp r9d, [r14 + VF_MAXCL]
+    ja .counted
+    test dword [rsi], 0x0FFFFFFF
+    jnz .next
+    inc r8d
+.next:
+    add rsi, 4
+    inc r9d
+    dec edx
+    jnz .entry
+    jmp .piece
 .counted:
-    mov [r14 + VF_FREE], edx
+    mov [r14 + VF_FREE], r8d
     mov byte [r14 + VF_FREE_OK], 1
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
     pop rdx
     pop rcx
+    pop rbx
 .known:
     mov eax, [r14 + VF_FREE]
     clc
     ret
 .failed:
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
     pop rdx
     pop rcx
+    pop rbx
     stc
     ret
 
@@ -1971,6 +2079,7 @@ fat_read_file:
     push rdi
     push r8
     push r9
+    push r10
     mov r8, rdi
     mov r9, rcx
     call fat_resolve
@@ -1984,13 +2093,43 @@ fat_read_file:
 .sized:
     push rdx
     xor ebx, ebx                        ; bytes so far
-    mov ecx, [r14 + VF_MAXCL]
 .cluster:
     cmp rbx, r9
     jae .done
     call clus_ok
     jc .done                            ; the chain is shorter than the size
+    mov ecx, [r14 + VF_CSHIFT]
+    add ecx, [r14 + VF_SSHIFT]
+    mov rdx, r9
+    sub rdx, rbx
+    shr rdx, cl                         ; the whole clusters still wanted
+    jz .part
+    mov r10d, FAT_RUN
+    shr r10d, cl                        ; at most this many at once
+    cmp rdx, r10
+    jbe .run
+    mov rdx, r10
+.run:
+    mov r10d, eax                       ; a run from this cluster: ECX of
+    call clus_run                       ; them, EAX the one after
+    jc .io
     push rax
+    mov eax, r10d
+    call clus_block
+    mov rsi, rax
+    mov edx, ecx
+    mov ecx, [r14 + VF_CSHIFT]
+    shl edx, cl                         ; its blocks
+    lea rdi, [r8 + rbx]                 ; straight into the buffer
+    call vol_read
+    pop rax
+    jc .io
+    mov ecx, [r14 + VF_SSHIFT]
+    shl rdx, cl
+    add rbx, rdx
+    jmp .cluster
+.part:
+    push rax                            ; a part of the last, through fat_buf
     call clus_block
     mov rsi, rax
     mov edx, [r14 + VF_SPC]
@@ -1998,23 +2137,12 @@ fat_read_file:
     call vol_read
     pop rax
     jc .io
-    push rcx
-    mov ecx, [r14 + VF_CBYTES]
-    mov rdx, r9
-    sub rdx, rbx
-    cmp rdx, rcx
-    jae .whole
-    mov ecx, edx
-.whole:
+    mov rcx, r9
+    sub rcx, rbx
     lea rsi, [fat_buf]
     lea rdi, [r8 + rbx]
     add rbx, rcx
     rep movsb
-    pop rcx
-    call fat_get
-    jc .io
-    dec ecx
-    jnz .cluster
 .done:
     pop rdx
     mov rax, rbx
@@ -2029,6 +2157,7 @@ fat_read_file:
     KLOG "that is a folder"
     stc
 .out:
+    pop r10
     pop r9
     pop r8
     pop rdi
@@ -2048,6 +2177,7 @@ fat_write_file:
     push r8
     push r9
     push r10
+    push r11
     push r12
     push r13
     push r15
@@ -2099,11 +2229,16 @@ fat_write_file:
     call sec_drop
     xor r8d, r8d                        ; first cluster
     xor edx, edx                        ; the one before
-    mov r10, r12
+    mov r10, r12                        ; the data not yet given a cluster
     mov r9, r13
+    mov ecx, [r14 + VF_CSHIFT]
+    add ecx, [r14 + VF_SSHIFT]
+    mov r11d, FAT_RUN
+    shr r11d, cl                        ; clusters written at once, at most
+    xor ecx, ecx                        ; given, not yet written: from ESI
 .cluster:
     test r9, r9
-    jz .entry
+    jz .written
     call fat_alloc
     jc .undo
     test r8d, r8d
@@ -2111,9 +2246,38 @@ fat_write_file:
     mov r8d, eax
 .linked:
     mov edx, eax
-    call clus_write
+    mov edi, [r14 + VF_CBYTES]
+    cmp r9, rdi
+    jb .last                            ; a part of one is left
+    test ecx, ecx
+    jz .run
+    cmp ecx, r11d
+    jae .flush
+    lea edi, [esi + ecx]
+    cmp eax, edi                        ; the next on the disk: onto the run
+    jne .flush
+    inc ecx
+    jmp .advance
+.flush:
+    call run_write
     jc .undo
+.run:
+    mov esi, eax
+    mov ecx, 1
+.advance:
+    mov edi, [r14 + VF_CBYTES]
+    add r10, rdi
+    sub r9, rdi
     jmp .cluster
+.last:
+    call run_write
+    jc .undo
+    xor ecx, ecx
+    call clus_write                     ; through fat_buf, with zeros after
+    jc .undo
+.written:
+    call run_write
+    jc .undo
 .entry:
     mov edi, r15d
     mov esi, ebx
@@ -2161,6 +2325,7 @@ fat_write_file:
     pop r15
     pop r13
     pop r12
+    pop r11
     pop r10
     pop r9
     pop r8
@@ -3729,4 +3894,5 @@ alignb 4096
 fc_buf:         resb 4096
 sc_buf:         resb 4096
 fat_buf:        resb 64 * 1024
+fc_scan:        resb FC_SCAN
 fat_file:       resb FAT_FILE_MAX

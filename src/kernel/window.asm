@@ -15,10 +15,14 @@
 ;    RO_WIN_TITLE (a window, handle2 + a0: a1 bytes of UTF-8): its title
 ;    RO_WIN_POINTER (a window, a0 = PTRM_*): the arrow over it, none, or
 ;      none and the pointer held (ptr_mode)
+;    RO_WIN_ZOOM (a window that may be resized, a0 = WZ_*): full screen,
+;      zoomed or neither (win_set_zoom; WE_ZOOM says which it is now,
+;      whoever changed it)
 ;  Its size is the program's, unless it lets the user resize it (WNF_RESIZE,
-;  WNF_FULL: WE_RESIZED says how much shows). The close button only asks
-;  (WE_CLOSE); the window goes when its last handle does, and so when the
-;  program ends, is killed (ctrl+C), or the shell it was run in closes.
+;  WNF_FULL, WNF_SCREEN: WE_RESIZED says how much shows). The close button
+;  only asks (WE_CLOSE); the window goes when its last handle does, and so
+;  when the program ends, is killed (ctrl+C), or the shell it was run in
+;  closes.
 ;
 ;  The program's side runs on any CPU and never touches the desktop: what it
 ;  asks for is noted in the object (WO_FLAGS) and done by the main loop
@@ -39,11 +43,13 @@ WO_TITLE        equ 112
 WO_PROG         equ WO_TITLE + WN_TITLE_MAX ; the program's name (the dock's)
 WO_PROG_MAX     equ 32
 WO_PTRM         equ WO_PROG + WO_PROG_MAX ; dword PTRM_*: the pointer, as it asked
+WO_ZOOM         equ WO_PTRM + 4         ; dword WZ_*: full screen or not, as it asked
 WO_SIZE         equ WO_PTRM + 8
 
 WOF_OPEN        equ 1                   ; its window is to be opened
 WOF_TITLE       equ 2                   ; retitled
 WOF_GONE        equ 4                   ; and closed: no handle to it is left
+WOF_ZOOM        equ 8                   ; full screen, zoomed or neither (WO_ZOOM)
 
 %macro WIN_LOCK 0
     pushfq
@@ -106,11 +112,11 @@ sys_window_new:
     push r13
     push r14
     push r15
-    test r8d, WNF_FULL                  ; full is resizable, zoomed
+    test r8d, WNF_FULL | WNF_SCREEN     ; full and full screen are resizable
     jz .flags
     or r8d, WNF_RESIZE
 .flags:
-    and r8d, WNF_RESIZE | WNF_FULL | WNF_KEYS | WNF_HOVER
+    and r8d, WNF_RESIZE | WNF_FULL | WNF_KEYS | WNF_HOVER | WNF_SCREEN
     push r8                             ; [RSP]: WNF_*
     mov r12d, esi
     mov r13d, edx
@@ -331,6 +337,41 @@ h_win_pointer:
     pop rbx
     ret
 
+; h_win_zoom(EDI = a window, RSI = WZ_*) -> RAX = 0 (needs RT_WIN_DRAW;
+; E_ARG for one that may not be resized): full screen, zoomed or neither,
+; from the main loop's next turn (win_set_zoom)
+h_win_zoom:
+    push rbx
+    push r12
+    mov r12, rsi
+    mov esi, OT_WINDOW
+    mov edx, RT_WIN_DRAW
+    call handle_get
+    cmp rax, E_ANY
+    jae .out
+    mov rbx, rax
+    mov rax, E_ARG
+    cmp r12, WZ_SCREEN
+    ja .put
+    test dword [rbx + WO_WNF], WNF_RESIZE
+    jz .put
+    WIN_LOCK
+    mov [rbx + WO_ZOOM], r12d
+    or dword [rbx + WO_FLAGS], WOF_ZOOM
+    WIN_UNLOCK
+    call wo_kick
+    xor eax, eax
+.put:
+    push rax
+    mov rdi, rbx
+    call obj_put
+    pop rax
+.out:
+    call op_done
+    pop r12
+    pop rbx
+    ret
+
 ; h_win_title(EDI = a window, ESI = memory, RDX = where in it, RCX = bytes)
 ; -> RAX = 0 (needs RT_WIN_DRAW, and RT_MEM_READ)
 h_win_title:
@@ -486,13 +527,23 @@ wo_service:
     test r13d, WOF_OPEN
     jz .title
     call wo_open
-    jmp .put
+    jmp .zoom
 .title:
+    test r13d, WOF_TITLE
+    jz .zoom
     mov rdi, [rbx + WO_WIN]             ; (only the main loop changes it)
     test rdi, rdi
-    jz .put
+    jz .zoom
     mov rsi, rsp
     call win_title
+.zoom:
+    test r13d, WOF_ZOOM
+    jz .put
+    mov rdi, [rbx + WO_WIN]
+    test rdi, rdi
+    jz .put                             ; (no room for it)
+    mov esi, [rbx + WO_ZOOM]
+    call win_set_zoom
     jmp .put
 .gone:
     mov rdi, [rbx + WO_WIN]
@@ -512,7 +563,7 @@ wo_service:
     ret
 
 ; wo_open(RBX = a window, [RSP + 8] = its title): on the desktop, on top,
-; with the keys
+; with the keys (WNF_FULL: zoomed; WNF_SCREEN: full screen)
 wo_open:
     lea rdi, [prog_ops]
     lea rsi, [rsp + 8]
@@ -557,8 +608,10 @@ wo_open:
     push rdi
     call win_zoom                       ; filling the screen, to begin with
     pop rdi
-    jmp .focus                          ; (and told its size, if not the same)
+    jmp .screen                         ; (and told its size, if not the same)
 .sized:
+    test dword [rbx + WO_WNF], WNF_SCREEN
+    jnz .screen                         ; (told its size there)
     test dword [rbx + WO_WNF], WNF_RESIZE
     jz .focus
     push rbx                            ; the size it was given, if the
@@ -567,8 +620,17 @@ wo_open:
     call prog_resized
     pop rdi
     pop rbx
+.screen:
+    test dword [rbx + WO_WNF], WNF_SCREEN
+    jz .focus
+    call win_screen                     ; all of the screen, to begin with
 .focus:
-    jmp win_focus
+    push rdi
+    call win_focus                      ; with the keys, and said (a test
+    pop rdi                             ; types into it from here)
+    lea rax, [rdi + WN_TITLE]
+    KLOG "desk: '%s' opens", rax
+    ret
 .full:
     lea rax, [rsp + 8]
     KLOG "desk: no room for '%s'", rax
@@ -735,6 +797,18 @@ prog_focus:
     cmp qword [rbx + WN_DATA], 0
     je .out
     mov edi, WE_FOCUS
+    xor edx, edx
+    xor ecx, ecx
+    jmp wo_post
+.out:
+    ret
+
+; prog_zoom(RBX = its window, ESI = WZ_*): full screen, zoomed or neither
+; now (zoom_tell)
+prog_zoom:
+    cmp qword [rbx + WN_DATA], 0
+    je .out
+    mov edi, WE_ZOOM
     xor edx, edx
     xor ecx, ecx
     jmp wo_post

@@ -20,6 +20,13 @@ screen.
     went) and leaving it; the pointer held (g: Pointer::Grab): hidden, in
     the window's middle, only how far it moved changing; ctrl+alt lets it
     go, a click holds it again;
+  - rdemo --screen: full screen from the start (the keys, then Event::Zoom,
+    then its size, the screen's), drawn where the bar and the dock were; f
+    (Window::set_zoom) back and full screen again, and ctrl+meta+F the same,
+    each said (Zoom) before its size; a second window it opens (one that
+    can't be resized: set_zoom is Error::ARG there) takes the keys, and so
+    it is told Focus(false), Zoom(Normal), then its size, in that order; q
+    there ends it;
   - rdemo --full: filling the screen between the bar and the dock, drawn
     there; q ends it;
   - the keys down and up again from a USB keyboard (hid.asm, where the first
@@ -76,6 +83,7 @@ FAILS = 0
 SCR_W, SCR_H = 2560, 1600
 PT = 2
 TITLE = 28 * PT
+BAR = 24 * PT                           # the menu bar
 TABLET = "-device qemu-xhci,id=ux -device usb-tablet,bus=ux.0"
 USB_KBD = " -device usb-kbd,bus=ux.0"    # the keys go to it, not to PS/2
 CX, CY = 472, 448                       # rdemo's window, where the desktop puts it
@@ -105,7 +113,7 @@ def script(tag):
     return [
         "until log: kept in", "wait 1.5",
         'type rhello one "two words"\\n', "until run: RHELLO exited", "wait 0.3",
-        "type rdemo\\n", "until rdemo: first frame", "wait 0.5",
+        "type rdemo\\n", "until rdemo: first frame", "until ' opens", "wait 0.5",
         f"shot build/test/rust/{tag}open.png",
         "type x", "wait 0.2", "sendkey ctrl-a", "wait 0.2", "sendkey f5", "wait 0.5",
         f"drag {win(*FROM)} {win(*TO)}", "wait 0.8",
@@ -127,7 +135,18 @@ def script(tag):
         "type g", "until rdemo: pointer Arrow", "wait 0.3",
         f"abs {at(CX + 14 * PT, CY - TITLE // 2)} left",   # its close button
         "until run: RDEMO exited", "wait 0.3",
-        "type rdemo --full\\n", "until rdemo: first frame", "wait 0.5",
+        # full screen: f asks (set_zoom), ctrl+meta+F is the desk's (a key
+        # typed first, for 'until' to look past), o opens another window
+        "type rdemo --screen\\n", "until rdemo: first frame", "until ' opens", "wait 0.8",
+        f"shot build/test/rust/{tag}screen.png",
+        "type f", "until rdemo: zoom Normal", "wait 0.3",
+        "type f", "until rdemo: zoom Screen", "wait 0.3",
+        "type z", "wait 0.2", "sendkey ctrl-meta_l-f", "until rdemo: zoom Normal", "wait 0.3",
+        "type z", "wait 0.2", "sendkey ctrl-meta_l-f", "until rdemo: zoom Screen", "wait 0.3",
+        "type o", "until rdemo: a second window", "until ' opens", "wait 0.8",
+        f"shot build/test/rust/{tag}unscreened.png",
+        "type q", "until run: RDEMO exited", "wait 0.3",
+        "type rdemo --full\\n", "until rdemo: first frame", "until ' opens", "wait 0.5",
         f"shot build/test/rust/{tag}full.png",
         "type q", "until run: RDEMO exited", "wait 0.3",
     ]
@@ -136,7 +155,7 @@ def script(tag):
 def script_usb():
     return [
         "until log: kept in", "wait 1.5",
-        "type rdemo\\n", "until rdemo: first frame", "wait 0.5",
+        "type rdemo\\n", "until rdemo: first frame", "until ' opens", "wait 0.5",
         "sendkey ctrl-a", "wait 0.3", "sendkey f5", "wait 0.3", "sendkey up", "wait 0.3",
         "key w down", "wait 0.1", "key w down", "wait 0.1", "key w down", "wait 0.1",
         "key w up", "wait 0.4",
@@ -475,9 +494,11 @@ def check_std(log):
         ("rstd: spawn a name that is not there Err(", "a program that is not there"),
         ("rstd: spawn info ram ", "SYS_INFO's memory"),
         ("free some true, uptime some true", "SYS_INFO's free memory and uptime"),
-        ("rstd: spawn the boot volume 62 MiB, free some true", "a volume's free space (FV_FREE)"),
     ]:
         result(has(line), f"rstd spawn: {what}")
+    # the stick is 64 MiB, or as large as its files need (mkstick.py)
+    m = re.search(r"rstd: spawn the boot volume (\d+) MiB, free some true", log)
+    result(m is not None and int(m.group(1)) >= 62, "rstd spawn: a volume's free space (FV_FREE)")
     panics = log.count("panicked")
     result(panics == 1, f"rstd: no panic but the one asked for ({panics})")
     for line in log.splitlines():
@@ -550,7 +571,27 @@ def check(log, err):
     result(w == SCR_W and SCR_H // 2 < h < SCR_H, f"rdemo --full: zoomed, the screen's width ({w}x{h})")
     p = pixel("full.png", SCR_W // 2, SCR_H // 2)
     result(p == GROUND, f"rdemo --full: drawn there ({p})")
-    result(log.count("run: RDEMO exited with 0") == 2, "rdemo --full: q ends it, 0")
+    result(log.count("run: RDEMO exited with 0") == 3, "rdemo --full: q ends it, 0")
+    runs = log.split("rdemo: std says hello")
+    seg = runs[2] if len(runs) > 3 else ""              # rdemo --screen's
+    said = re.findall(r"rdemo: (focus \w+|zoom \w+|resized \d+x\d+)", seg)
+    big, small = f"resized {SCR_W}x{SCR_H}", "resized 640x400"
+    want = ["focus true", "zoom Screen", big,
+            "zoom Normal", small, "zoom Screen", big,     # f, f
+            "zoom Normal", small, "zoom Screen", big,     # ctrl+meta+F, twice
+            "focus false", "zoom Normal", small]          # another window has the keys
+    result(said == want, f"rdemo --screen: full screen, said before its size each time ({said})")
+    result("rdemo: asked Normal, Ok(())" in seg and "rdemo: asked Screen, Ok(())" in seg,
+           "rdemo --screen: set_zoom, both ways")
+    m = re.search(r"rdemo: a second window, full screen (.*)", seg)
+    result(bool(m) and m.group(1).startswith("Err(Error(-10:"),
+           f"rdemo --screen: set_zoom on one that can't be resized, E_ARG ({m.group(1) if m else 'no line'})")
+    for what, (x, y) in (("the bar", (SCR_W // 2, BAR // 2)), ("the dock", (SCR_W // 2, SCR_H - 15))):
+        p = pixel("screen.png", x, y)
+        result(p == GROUND, f"rdemo --screen: drawn where {what} was ({p})")
+    p = pixel("unscreened.png", SCR_W // 2, BAR // 2)
+    result(p is not None and p != GROUND, f"rdemo --screen: the bar there again ({p})")
+    result("run: RDEMO exited with 0" in seg, "rdemo --screen: q in its second window ends it, 0")
     p = pixel("open.png", CX + 10, CY + 200)
     result(p == GROUND, f"rdemo: its ground on the screen ({p})")
     p = pixel("open.png", CX + 100, CY + 100)

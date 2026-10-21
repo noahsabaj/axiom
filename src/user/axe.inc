@@ -30,16 +30,18 @@
 ;  the task that started it gave it, 0 if nothing; ax_gift2 a second), ax_store (its names in
 ;  the store, under "name/", if there is a store), ax_net (the network, all
 ;  of it), ax_desk (the desktop, to open windows on), ax_files (the files on
-;  every volume, FAT's; written only where 'vol <n> rw' was said): each 0 unless it was
-;  run from the shell and wanted it, or the shell granted it for that run;
-;  ax_sound (the speakers, to open streams of sound on) likewise.
+;  every volume, FAT's; written only where 'vol <n> rw' was said),
+;  ax_settings (the machine's settings: RO_SET_LIST, RO_SET_CHANGE, RO_WAIT
+;  for a change), ax_sound (the speakers, to open streams of sound on):
+;  each 0 unless it was run from the shell and wanted it, or the shell
+;  granted it for that run.
 ;  Each preserves RBX, RBP, R12-R15, as the kernel's functions do.
 ;
 ;  A program says what it needs, once, anywhere in it:
-;    WANTS AW_DESK | AW_NET      (AW_NET, AW_STORE, AW_DESK, AW_FILES, AW_SOUND;
-;                                 or nothing)
-;  The shell gives it that and no more; '+net', '+store', '+desk', '+files', '+sound' before
-;  its name give more, for that run.
+;    WANTS AW_DESK | AW_NET      (AW_NET, AW_STORE, AW_DESK, AW_FILES,
+;                                 AW_SETTINGS, AW_SOUND; or WANTS nothing)
+;  The shell gives it that and no more; '+net', '+store', '+desk', '+files',
+;  '+settings' and '+sound' before its name give more, for that run.
 ; =============================================================================
 
 %include "defs.inc"
@@ -98,6 +100,8 @@ ax_start:
     mov [ax_files], eax
     mov eax, [rdi + SB_SOUND]
     mov [ax_sound], eax
+    mov eax, [rdi + SB_SETTINGS]
+    mov [ax_settings], eax
     mov edi, 4096                       ; a page to write from
     mov eax, SYS_MEM_NEW
     syscall
@@ -470,6 +474,7 @@ ax_net:         resd 1
 ax_desk:        resd 1
 ax_files:       resd 1
 ax_sound:       resd 1
+ax_settings:    resd 1
 ax_rx:          resd 1
 ax_len:         resd 1
 ax_digits:      resb 24

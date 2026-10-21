@@ -16,6 +16,8 @@ Boots build/esp (build it first) and checks the serial log:
     looks on, and poweroff;
   - 'threads test' on one CPU, and (unless --quick) under TCG, QEMU's own
     CPU emulation, on four;
+  - the load average ('uptime'), on two CPUs: idle, after 2 threads spin
+    for 30 s (Unix's would be 0.79), and after 30 s idle again;
   - 'panic thread': a thread's stack overflow, named in the report.
 Outputs go to build/test/threads/.
 """
@@ -110,6 +112,10 @@ def jobs(opts):
             "type poweroff\\n", "ended",
         ], ["--smp", "8"], 120),
         "one": ([*TEST, "type poweroff\\n", "ended"], ["--smp", "1"], 90),
+        "load": (["wait 12", "type uptime\\n", "until load", "wait 0.5",
+                  "type threads spin 2 any 30\\n", "wait 31", "type uptime\\n", "until load", "wait 30",
+                  "type uptime\\n", "until load", "wait 0.5", "type poweroff\\n", "ended"],
+                 ["--smp", "2"], 120),
         "panic_thread": (["type panic thread\\n", "until AXIOM PANIC", "wait 0.5"],
                          ["--smp", "1"], 30),
     }
@@ -159,6 +165,22 @@ def small(opts, logs):
     result("QEMU ended by itself" in err, "TCG: powered off")
 
 
+def load(logs):
+    print("-- the load average")
+    log, err = logs["load"]
+    loads = [float(x) for x in re.findall(r"since power-on; load (\d+\.\d\d)", log)]
+    result(len(loads) == 3, f"'uptime' says the load, three times: {loads}")
+    if len(loads) != 3:
+        return
+    idle, busy, after = loads
+    result(idle < 0.15, f"idle: {idle}")
+    # 2 threads wanting a CPU for 30 s, on 2: 2 (1 - e^(-30/60)) = 0.79, less a
+    # sample's phase (5 s), more with the host's own interruptions
+    result(0.55 <= busy <= 1.0, f"2 spinning threads for 30 s: {busy} (Unix's would be 0.79)")
+    result(abs(after - busy * 0.61) <= 0.12, f"then 30 s idle: {after} (e^(-1/2) of it: "
+           f"{busy * 0.61:.2f})")
+
+
 def overflow(logs):
     print("-- a thread's stack overflow")
     log, _ = logs["panic_thread"]
@@ -177,6 +199,7 @@ def main():
     logs = boot_all(OUT, jobs(opts))
     eight(logs)
     small(opts, logs)
+    load(logs)
     overflow(logs)
     print(f"{'all passed' if not FAILS else f'{FAILS} FAILED'}")
     return 1 if FAILS else 0

@@ -27,7 +27,7 @@ import sys
 USER_IMAGE = 0x400000
 USER_IMAGE_MAX = 16 << 20
 AXE_HDR = 56
-AW_ALL = 7 | 16 | 32
+AW_ALL = 7 | 16 | 32 | 64
 SHF_ALLOC, SHF_TLS = 0x2, 0x400
 SHT_NOBITS = 8
 TLS_SEGMENT = None                      # (vaddr, filesz, memsz, align) of PT_TLS

@@ -300,6 +300,11 @@ def main():
     ap.add_argument("--mac", help="the card's MAC address")
     ap.add_argument("--stick", help="boot from this USB stick image (tools/mkstick.py) "
                     "instead of build/esp")
+    ap.add_argument("--internal", action="store_true", help="--stick's image as the "
+                    "machine's own NVMe drive, not a USB stick (as hp-1 starts Axiom from "
+                    "its own disk's EFI partition)")
+    ap.add_argument("--esp", help="boot this folder instead of build/esp (a "
+                    "build kept aside, to compare with)")
     ap.add_argument("--trace", action="store_true", help="say how long each step of "
                     "--script took")
     ap.add_argument("--script", help="monitor commands after the keys, separated "
@@ -307,18 +312,25 @@ def main():
                     "the log after the last text typed, 'shot FILE' takes a screenshot, "
                     "'type TEXT' types down the serial port, 'press TEXT' on the "
                     "keyboard, 'abs X Y [button]' points (and clicks), 'drag X1 Y1 X2 Y2 "
-                    "[button]' drags, 'wheel X Y N' turns the wheel N notches, 'key NAME "
+                    "[button]' drags, 'glide X1 Y1 X2 Y2 STEPS MS [button]' moves it smoothly, 'wheel X Y N' turns the wheel N notches, 'key NAME "
                     "down|up' presses or lets go of one key)")
     opts = ap.parse_args()
     fresh = opts.port == 0 and not opts.vars
+    sys.path.insert(0, str(ROOT / "tools"))
+    import space
+    space.check()                       # stops before the disk fills
 
-    if opts.stick:
+    if opts.stick and opts.internal:
+        # the image as the machine's own disk: not removable; writes stay
+        boot = ["-drive", f"file={opts.stick},if=none,id=bootstick,format=raw",
+                "-device", "nvme,serial=axiom-boot,drive=bootstick,bootindex=0"]
+    elif opts.stick:
         # the loader on a USB stick image, as on real hardware; writes stay
         boot = ["-device", "qemu-xhci,id=bootx",
                 "-drive", f"file={opts.stick},if=none,id=bootstick,format=raw",
                 "-device", "usb-storage,bus=bootx.0,drive=bootstick,bootindex=0"]
     else:
-        boot = ["-drive", f"format=raw,file=fat:{BUILD / 'esp'},snapshot=on"]
+        boot = ["-drive", f"format=raw,file=fat:{opts.esp or BUILD / 'esp'},snapshot=on"]
     qemu = find_qemu()
     serial = BUILD / opts.serial
     accel = pick_accel(qemu, opts.accel)
@@ -422,6 +434,26 @@ def main():
                     qmp.abs(x1 + (x2 - x1) * i // 8, y1 + (y2 - y1) * i // 8)
                 time.sleep(0.1)
                 qmp.abs(x2, y2, [(b, False)])
+            elif line.startswith("glide "):
+                # glide X1 Y1 X2 Y2 STEPS MS [button]: the pointer from one
+                # point to the other in STEPS even steps over MS milliseconds,
+                # the button held all the way if one is named
+                qmp = qmp or Qmp(MONITOR[1] + 1)
+                parts = line.split()
+                x1, y1, x2, y2, steps, ms = (int(v) for v in parts[1:7])
+                held = [(parts[7], True)] if len(parts) > 7 else []
+                qmp.abs(x1, y1)
+                time.sleep(0.05)
+                if held:
+                    qmp.abs(x1, y1, held)
+                start = time.monotonic()
+                for i in range(1, steps + 1):
+                    due = start + ms / 1000 * i / steps
+                    time.sleep(max(0.0, due - time.monotonic()))
+                    qmp.abs(x1 + (x2 - x1) * i // steps, y1 + (y2 - y1) * i // steps)
+                if held:
+                    time.sleep(0.05)
+                    qmp.abs(x2, y2, [(parts[7], False)])
             elif line.startswith("wheel "):
                 # wheel X Y N: the pointer there, the wheel turned N notches
                 # (up positive)

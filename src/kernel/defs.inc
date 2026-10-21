@@ -27,6 +27,9 @@ PC_CORE         equ 112                 ; core number within its kind
 PC_THREAD       equ 120                 ; SMT thread within the core
 PC_TSS          equ 128                 ; 104-byte TSS
 PC_TLB_GEN      equ 232                 ; last TLB shootdown this CPU answered
+PC_TLB_LAZY     equ 240                 ; dword: 1 asleep in the idle HLT, 2 and it
+                                        ; owes a whole TLB flush when it wakes
+PC_TLB_WAKES    equ 248                 ; whole flushes it owed as it woke
 ; the scheduler's part (sched.asm)
 PC_CURRENT      equ 256                 ; the thread running here
 PC_IDLE_TH      equ 264                 ; this CPU's idle thread
@@ -37,6 +40,7 @@ PC_RQ_LEN       equ 292                 ; dword: threads on the run queue
 PC_BUSY         equ 296                 ; dword: 1 while a thread other than idle runs
 PC_RESCHED      equ 300                 ; byte: switch on the way out of the interrupt
 PC_SCHED_ON     equ 301                 ; byte: this CPU takes threads
+PC_POLLING      equ 302                 ; byte: idle, watching PC_RESCHED: no IPI needed
 PC_SKIND        equ 304                 ; the kind the scheduler goes by (CPU_KIND_*)
 PC_SIBLING      equ 312                 ; its SMT sibling's index, or -1
 PC_MIN_VR       equ 320                 ; the least virtual runtime here, never falls
@@ -91,7 +95,7 @@ OT_NET          equ 9                   ; the network, to some hosts and ports (
 OT_SOCKET       equ 10                  ; a connection, or a port listened on (socket.asm)
 OT_DESK         equ 11                  ; the desktop: windows can be opened on it (window.asm)
 OT_WINDOW       equ 12                  ; a program's window (window.asm)
-                                        ; (13: the settings, on its own branch)
+OT_SETTINGS     equ 13                  ; the machine's settings (settings.asm)
 OT_FILES        equ 14                  ; files on FAT volumes, or in a folder (fscap.asm)
 OT_SOUND        equ 15                  ; the speakers: streams can be opened on them (sound.asm)
 OT_STREAM       equ 16                  ; a stream of sound, playing (sound.asm)
@@ -129,8 +133,11 @@ RT_DESK_WINDOW  equ 1 << 8              ; the desktop: open windows on it
 RT_WIN_DRAW     equ 1 << 8              ; a window: show what was drawn, title it
 RT_FS_READ      equ 1 << 8              ; files: list folders, read files
 RT_FS_WRITE     equ 1 << 9              ; write, make, rename, remove
+RT_FS_KERNEL    equ 1 << 10             ; every volume: a new kernel (RO_FS_UPDATE)
 RT_SOUND_PLAY   equ 1 << 8              ; the speakers: open streams on them
 RT_STREAM_PLAY  equ 1 << 8              ; a stream: play it, wait on it
+RT_SET_READ     equ 1 << 8              ; the settings: read them, wait for a change
+RT_SET_CHANGE   equ 1 << 9              ; change them
 RT_ALL          equ 0xFFFF
 
 ; what handle operations return when they fail
@@ -468,7 +475,18 @@ RO_WIN_SHOW     equ 30                  ; handle = a window, a0 = x, a1 = y, a2 
                                         ; w | h << 32 (0: all of it): what was
                                         ; drawn there is shown
 RO_WIN_TITLE    equ 31                  ; handle, handle2 + a0: a1 bytes of UTF-8, its title
-                                        ; (32, 33: the settings', on their branch)
+RO_SET_LIST     equ 32                  ; handle = the settings, into handle2 + a0,
+                                        ; a1 bytes at most: a record (SI_*) for
+                                        ; each that fits -> how many there are;
+                                        ; what RO_WAIT on it waited for is seen
+RO_SET_CHANGE   equ 33                  ; handle, a0 = which (its record's place),
+                                        ; a1 = the value (SI_VALUE's form); or
+                                        ; with a2 > 0, the value as text, a2
+                                        ; bytes at handle2 + a1 -> 0, or E_ARG
+                                        ; (not one it takes), E_RANGE (no such
+                                        ; setting). RO_WAIT on the settings
+                                        ; waits until one changed since the last
+                                        ; RO_SET_LIST
 RO_DESK_LOOK    equ 34                  ; handle = the desktop -> a handle to the
                                         ; look, memory to map and read (LK_*)
 ; files (fscap.asm): handle = files, handle2 + a0: a path (an FS_PATH field,
@@ -495,7 +513,26 @@ RO_WIN_POINTER  equ 43                  ; handle = a window, a0 = PTRM_*: the
 RO_NET_ADDR     equ 44                  ; handle = a socket, into handle2 + a0:
                                         ; NA_SIZE bytes, its addresses -> 0;
                                         ; E_EMPTY while its host is looked up
-RO_COUNT        equ 45
+RO_FS_UPDATE    equ 45                  ; handle = files, to every volume, with
+                                        ; RT_FS_KERNEL; a1 = UPD_*: a new kernel,
+                                        ; as the shell's 'update' (update.asm)
+RO_WIN_ZOOM     equ 46                  ; handle = a window that may be resized,
+                                        ; a0 = WZ_*: full screen, zoomed or
+                                        ; neither (WE_ZOOM says so, once done)
+RO_COUNT        equ 47
+
+; a new kernel (RO_FS_UPDATE's a1)
+UPD_STATE       equ 0                   ; -> UPS_*
+UPD_TRY         equ 1                   ; handle2 + a0: a kernel.bin's path, a2 =
+                                        ; seconds to keep it in (0: 600) -> 0: in
+                                        ; the slot not kept, tried at the next start
+UPD_KEEP        equ 2                   ; on trial -> 0: kept, for every start
+UPD_RESTART     equ 3                   ; a2 = seconds, 1 to 60 -> 0: with a trial
+                                        ; to come, the machine restarts into it
+UPS_SLOT        equ 0xFF                ; the kernel running: 'A', 'B'; 0 built in
+UPS_TRIAL       equ 1 << 8              ; it is on trial, not kept yet
+UPS_KEPT_SHIFT  equ 16                  ; << the one kept: 'A', 'B'; 0 none
+UPS_NEXT_SHIFT  equ 24                  ; << the one the next start tries, or 0
 
 ; files (fscap.asm)
 FS_PATH         equ 256                 ; a path's field
@@ -507,7 +544,7 @@ FV_FREE         equ 64                  ; bytes free on it
 FV_SIZE         equ 72
 FVF_WRITABLE    equ 1                   ; 'vol <n> rw' was said
 FVF_REMOVABLE   equ 2                   ; a stick, a card
-FVF_BOOT        equ 4                   ; the stick Axiom started from
+FVF_BOOT        equ 4                   ; the volume Axiom started from
 FE_LEN          equ 0                   ; a thing in a folder (RO_FS_LIST): dword, the record's bytes
 FE_ATTR         equ 4                   ; dword FEA_*
 FE_SIZE         equ 8                   ; bytes, 0 for a folder
@@ -522,6 +559,32 @@ FEA_DIR         equ 1
 FEA_RO          equ 2
 FEA_HIDDEN      equ 4
 FEA_SYSTEM      equ 8
+
+; a setting, as RO_SET_LIST gives it
+SI_NAME         equ 0                   ; 32 bytes, NUL-ended: display.theme ...
+SI_KIND         equ 32                  ; dword SK_*
+SI_FLAGS        equ 36                  ; dword SIF_*
+SI_VALUE        equ 40                  ; a choice's place, 0 or 1, a number,
+                                        ; 0xRRGGBB, minutes from UTC; 0 for text
+SI_DEFAULT      equ 48
+SI_MIN          equ 56                  ; a number's or a zone's least,
+SI_MAX          equ 64                  ; most (a choice: how many there are),
+SI_STEP         equ 72                  ; and step
+SI_TEXT         equ 80                  ; 64 bytes: the value as the shell shows it
+SI_UNIT         equ 144                 ; 16 bytes: a number's unit (ms, ...)
+SI_CHOICES      equ 160                 ; 128 bytes: a choice's, or a colour's
+                                        ; swatches' names, each NUL-ended
+SI_SWATCHES     equ 288                 ; 16 dwords: a colour's swatches, 0xRRGGBB
+SI_ABOUT        equ 352                 ; 128 bytes: what it is
+SI_SIZE         equ 512
+SK_CHOICE       equ 1                   ; one of a few names
+SK_SWITCH       equ 2                   ; on or off
+SK_NUMBER       equ 3                   ; a whole number, from SI_MIN to SI_MAX
+SK_COLOUR       equ 4                   ; 0xRRGGBB
+SK_ZONE         equ 5                   ; minutes east of UTC
+SK_TEXT         equ 6                   ; a word
+SIF_RESTART     equ 1                   ; it takes effect at the next start
+SIF_CHANGED     equ 2                   ; it is not the default
 
 ; RO_NET_CONNECT's a2 (and RO_NET_LISTEN's: NETF_TLS)
 NETF_TLS        equ 1
@@ -614,6 +677,7 @@ SEL_TSS0        equ 0x28                ; CPU n uses SEL_TSS0 + 16 * n
 VEC_KBD         equ 0x21
 VEC_USB         equ 0x22
 VEC_NET         equ 0x23
+VEC_SERIAL      equ 0x24                ; COM1's bytes in, to the BSP
 VEC_TIMER       equ 0x30
 VEC_WAKE        equ 0x40
 VEC_TLB         equ 0x41
@@ -654,6 +718,7 @@ MSR_MPERF       equ 0xE7
 MSR_APERF       equ 0xE8
 MSR_THERM_STATUS equ 0x19C
 MSR_TEMP_TARGET equ 0x1A2
+MSR_PKG_THERM_STATUS equ 0x1B1
 MSR_RAPL_UNIT   equ 0x606
 MSR_PKG_ENERGY  equ 0x611
 MSR_PM_ENABLE   equ 0x770
@@ -699,14 +764,16 @@ AXE_WANTS       equ 48                  ; what it needs to be given (AW_*), and 
 AXE_HDR         equ 56
 
 ; what a program can be given when it is run from the shell: declared in its
-; header (WANTS, axe.inc), or granted for one run (+net, +store, +desk)
+; header (WANTS, axe.inc), or granted for one run (+net, +store, +desk,
+; +settings)
 AW_NET          equ 1                   ; the network (SB_NET)
 AW_STORE        equ 2                   ; its own names in the store (SB_STORE)
 AW_DESK         equ 4                   ; the desktop, to open windows on (SB_DESK)
-                                        ; (8: the settings, on their branch)
+AW_SETTINGS     equ 8                   ; the settings, to read and change (SB_SETTINGS)
 AW_FILES        equ 16                  ; the files on every volume (SB_FILES)
 AW_SOUND        equ 32                  ; the speakers (SB_SOUND)
-AW_ALL          equ 7 | AW_FILES | AW_SOUND
+AW_UPDATE       equ 64                  ; with AW_FILES: a new kernel (RT_FS_KERNEL)
+AW_ALL          equ 15 | AW_FILES | AW_SOUND | AW_UPDATE
 
 ; the start block, at USER_START; the first thread starts with RDI = it
 SB_RING         equ 0                   ; dword: a handle to the task's ring
@@ -719,11 +786,13 @@ SB_ARGS_LEN     equ 32                  ; dword
 SB_STORE        equ 36                  ; dword: to the store under "name/", or 0
 SB_NET          equ 40                  ; dword: to the network, or 0
 SB_DESK         equ 44                  ; dword: to the desktop, or 0
+SB_SETTINGS     equ 48                  ; dword: to the settings, or 0
 SB_FILES        equ 52                  ; dword: to the files, or 0
 SB_GIFT2        equ 56                  ; dword: a second thing it was given, or 0
                                         ; (each given handle to a desktop, files,
-                                        ; the speakers, the network or the store
-                                        ; is in its slot too, if that was empty)
+                                        ; the speakers, the network, the store or
+                                        ; the settings is in its slot too, if that
+                                        ; was empty)
 SB_SOUND        equ 60                  ; dword: to the speakers, or 0
 SB_ARGS         equ 64                  ; the arguments it was run with, NUL-ended
 SB_ARGS_MAX     equ 4096 - SB_ARGS - 1
@@ -752,8 +821,9 @@ SYS_WINDOW_NEW  equ 11                  ; (desktop, width, height, a channel's e
                                         ; while it is open, WNF_*) -> RAX =
                                         ; the window, RDX = its pixels: memory,
                                         ; B,G,R,x at width * 4 bytes a row (with
-                                        ; WNF_RESIZE or WNF_FULL: the screen's
-                                        ; width * 4 a row, its height of rows)
+                                        ; WNF_RESIZE, WNF_FULL or WNF_SCREEN: the
+                                        ; screen's width * 4 a row, its height
+                                        ; of rows)
 SYS_SOUND_NEW   equ 12                  ; (the speakers, frames) -> RAX = a stream
                                         ; playing, RDX = its memory (SN_*)
 SYS_TLS         equ 13                  ; (FS base): this thread's, for its
@@ -771,6 +841,13 @@ SI_CPUS         equ 1                   ; CPUs running
 SI_RAM          equ 2                   ; bytes of memory Axiom has
 SI_RAM_FREE     equ 3                   ; of those, bytes free
 SI_UPTIME       equ 4                   ; milliseconds since power-on
+SI_BATTERY      equ 5                   ; the battery as last read (each minute), or E_EMPTY
+SI_BAT_PERCENT  equ 0xFF                ; SI_BATTERY: its charge, in percent
+SI_BAT_PLUGGED  equ 1 << 8              ; on its charger
+SI_BAT_HELD     equ 1 << 9              ; kept between 75% and 80% ('battery hold')
+SI_BAT_MODE_SHIFT equ 16                ; bits 19:16: 0 charging as the firmware likes, 2 run from the battery, 5 not charging
+SI_TEMP         equ 6                   ; the CPU's temperature now, degrees C (its package's sensor), or E_EMPTY
+SI_LOAD         equ 7                   ; the load average over the last minute, in hundredths
 
 ; a stream's memory (SYS_SOUND_NEW): this header, then SN_FRAMES frames at
 ; SN_DATA, each a left and a right sample, 16 bits signed, SN_RATE a second.
@@ -819,6 +896,9 @@ WE_KEYUP        equ 11                  ; and came up (or one went down before i
                                         ; had the keys: losing them, WE_FOCUS 0,
                                         ; is every key up)
 WE_LEAVE        equ 12                  ; WNF_HOVER: the pointer left it
+WE_ZOOM         equ 13                  ; WE_CODE = WZ_*: full screen, zoomed or
+                                        ; neither now, however it came to be
+                                        ; (before the WE_RESIZED that follows)
 WM_SHIFT        equ 1                   ; WE_KEY's WE_X: the modifiers held
 WM_CTRL         equ 2
 WM_ALT          equ 4
@@ -828,12 +908,20 @@ WNF_FULL        equ 2                   ; as WNF_RESIZE, and zoomed to begin wit
                                         ; the screen between the bar and the dock
 WNF_KEYS        equ 4                   ; WE_KEYDOWN and WE_KEYUP too (games)
 WNF_HOVER       equ 8                   ; WE_MOVE without a button, and WE_LEAVE
+WNF_SCREEN      equ 16                  ; as WNF_RESIZE, and full screen to begin
+                                        ; with (WZ_SCREEN)
 PTRM_ARROW      equ 0                   ; RO_WIN_POINTER: the arrow, as anywhere
 PTRM_HIDDEN     equ 1                   ; none over it (it draws its own)
 PTRM_GRAB       equ 2                   ; none, and held in its middle while it
                                         ; has the keys: WE_MOVE (WNF_HOVER or
                                         ; not) says how far the mouse moved;
                                         ; ctrl+alt lets go until it is clicked
+WZ_NORMAL       equ 0                   ; RO_WIN_ZOOM, WE_ZOOM: where it was put
+WZ_ZOOMED       equ 1                   ; the screen between the bar and the dock
+WZ_SCREEN       equ 2                   ; the whole screen, over all else, with
+                                        ; the keys: no title bar, bar or dock
+                                        ; (another window taking the keys, or
+                                        ; ctrl+meta+F, ends it)
 WIN_MAX         equ 4096                ; a side, at most
 
 ; the desktop's themes (theme.asm), and the names of their colors

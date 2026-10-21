@@ -122,6 +122,32 @@ tco_pet:
     pop rax
     ret
 
+; tco_stop -> CF if the watchdog would not stop: its count halted
+; (TCO1_CNT's TMR_HLT), as after a trial is kept (update.asm). Preserves
+; all.
+tco_stop:
+    push rax
+    push rdx
+    movzx edx, word [tco_base]
+    test edx, edx
+    jz .stopped
+    add edx, 0x08                       ; TCO1_CNT
+    in ax, dx
+    or ax, 0x0800                       ; TMR_HLT
+    out dx, ax
+    in ax, dx
+    test ax, 0x0800
+    jz .running
+.stopped:
+    clc
+    jmp .out
+.running:
+    stc
+.out:
+    pop rdx
+    pop rax
+    ret
+
 ; tco_set(EDI = seconds): the reset that long after the last reload: ticks
 ; of 0.6 s, counted twice. Preserves all.
 tco_set:
@@ -218,16 +244,10 @@ harness_service:
 .seen:
     mov byte [harness_until], 0
 .ready:
-    mov rbx, [term_list]                ; the first terminal: the last in the list
-    test rbx, rbx
-    jz .out
-.first:
-    mov rax, [rbx + TW_NEXT]
-    test rax, rax
-    jz .found
-    mov rbx, rax
-    jmp .first
-.found:
+    cmp byte [start_on], 0              ; START.TXT's lines first (start.asm)
+    jne .out
+    call term_oldest
+    jc .out
     cmp byte [rbx + TW_SH_WAIT], 0
     jne .out                            ; its command runs on
     call harness_next
@@ -267,17 +287,56 @@ harness_crashed:
     call harness_save
     jmp power_reboot
 
+; term_oldest -> RBX = the first terminal (the last in the list); CF if there
+; is none yet. Preserves all but RAX.
+term_oldest:
+    mov rbx, [term_list]
+    test rbx, rbx
+    jz .none
+.next:
+    mov rax, [rbx + TW_NEXT]
+    test rax, rax
+    jz .found
+    mov rbx, rax
+    jmp .next
+.found:
+    clc
+    ret
+.none:
+    stc
+    ret
+
 ; harness_next -> harness_line = the script's next line, its blanks at either
 ; end gone; CF at the end of the script
 harness_next:
+    push rdx
+    push rsi
+    push rdi
+    lea rsi, [harness_script]
+    lea rdi, [harness_pos]
+    mov rdx, [harness_len]
+    call script_line
+    pop rdi
+    pop rsi
+    pop rdx
+    ret
+
+; script_line(RSI = a script, NUL after it, RDX = its bytes, RDI = where the
+; offset of its next line is kept) -> harness_line = that line, its blanks
+; at either end gone, and the offset past it; CF at the end. For test runs
+; and START.TXT (start.asm). Preserves all but RAX.
+script_line:
     push rcx
     push rsi
     push rdi
-    mov rsi, [harness_pos]
-    cmp rsi, [harness_len]
+    push r8
+    push r9
+    mov r8, rsi                         ; the script
+    mov r9, rdi                         ; where its offset is
+    mov rsi, [r9]
+    cmp rsi, rdx
     jae .end
-    lea rax, [harness_script]
-    add rsi, rax
+    add rsi, r8
     lea rdi, [harness_line]
     xor ecx, ecx
 .lead:
@@ -302,8 +361,7 @@ harness_next:
     inc ecx
     jmp .copy
 .nul:
-    lea rsi, [harness_script]           ; a NUL ends the script
-    add rsi, [harness_len]
+    lea rsi, [r8 + rdx]                 ; a NUL ends the script
 .trim:
     test ecx, ecx
     jz .cut
@@ -316,14 +374,15 @@ harness_next:
     jmp .trim
 .cut:
     mov byte [rdi + rcx], 0
-    lea rax, [harness_script]
-    sub rsi, rax
-    mov [harness_pos], rsi
+    sub rsi, r8
+    mov [r9], rsi
     clc
     jmp .out
 .end:
     stc
 .out:
+    pop r9
+    pop r8
     pop rdi
     pop rsi
     pop rcx
@@ -391,6 +450,7 @@ harness_directive:
     lea rdi, [str_hs_end]
     call harness_word
     jnc .end
+.shell:
     stc                                 ; a shell line
     jmp .out
 .sleep:
@@ -441,7 +501,7 @@ harness_directive:
     jmp .done
 .watchdog:
     call arg_uint
-    jc .bad
+    jc .shell                           ; 'watchdog on' and the like: the shell's
     mov edi, eax
     call tco_set
     KLOG "harness: watchdog %u s", rax

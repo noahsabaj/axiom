@@ -1,7 +1,7 @@
 # Axiom
 
-An operating system built from first principles, in assembly, for the machine in
-front of it and for the agents that will drive it.
+An operating system built from first principles, in assembly and Rust, for the
+machine in front of it and for the agents that will drive it.
 
 ## The wrongs
 
@@ -49,7 +49,9 @@ front of it and for the agents that will drive it.
 6. **The machine is the spec.** Axiom targets the hardware that is actually present:
    every core online, P-core/E-core aware scheduling, AVX2 in hot paths, per-core
    queues down to the NVMe. Frequency, temperature and power are first-class state.
-7. **Small enough to understand.** Written in assembly by humans and agents together,
+7. **Small enough to understand.** Written in assembly and Rust by humans and agents
+   together: assembly where the machine is (the start, interrupts, system calls,
+   switching threads, the hot loops), Rust for the logic, each piece behind the calls it had,
    readable top to bottom, and every subsystem tested automatically in an emulator.
    If you can't read it, you can't trust it.
 

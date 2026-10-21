@@ -96,6 +96,9 @@ smbios_init:
     call smbios_copy_string
     jmp .skip
 .board:
+    mov al, [r12 + 4]
+    lea rdi, [sm_board_vendor]
+    call smbios_copy_string
     mov al, [r12 + 5]
     lea rdi, [sm_board_product]
     call smbios_copy_string
@@ -253,6 +256,7 @@ sm_bios_version:  resb 64
 sm_bios_date:     resb 64
 sm_sys_vendor:    resb 64
 sm_sys_product:   resb 64
+sm_board_vendor:  resb 64
 sm_board_product: resb 64
 sm_mem_vendor:    resb 64
 sm_mem_part:      resb 64

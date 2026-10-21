@@ -1,8 +1,12 @@
 # Axiom
 
-An operating system written entirely in x86-64 assembly, booting straight from
-UEFI onto the hardware that is actually present. No C, no libc, no GRUB, no
-borrowed kernel: about seventy-three thousand lines of NASM, top to bottom.
+An operating system written in x86-64 assembly and Rust, booting straight
+from UEFI onto the hardware that is actually present. No C, no libc, no GRUB,
+no borrowed kernel: about seventy-three thousand lines of NASM, top to bottom,
+with the kernel moving to Rust piece by piece where Rust says it better
+(`src/rust`). What has to be assembly stays assembly: the start, interrupt
+and system call entry, switching threads, and the loops that are fast
+because of the instructions they use.
 
 Why it exists and where it is going: [docs/VISION.md](docs/VISION.md).
 How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
@@ -61,6 +65,31 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   links), back, forward, reload and an address bar, scrolled by the wheel,
   the keys or its scrollbar; links clicked, redirects followed, `#anchors`
   scrolled to. No CSS, images or scripts yet.
+- **An office program**, `compose [name]`: one document, three views of it.
+  Pages (rich text: headings, bold, italic, underline, lists, tables and
+  images, flowed onto pages), Slides (16:9, thumbnails, and F5 presents
+  them in a window of their own) and Grid (a spreadsheet: numbers, text and
+  formulas with references, ranges, `SUM`, `AVERAGE`, `MIN`, `MAX`, `IF`,
+  worked out again by what depends on what). A grid or a slide sits in a
+  page, and a page's blocks on a slide. Undo, copy and paste, its own
+  versioned file format (`docs/COMPOSE.md`) saved into the store, plain
+  text and CSV in and out. Drawn with the desktop's kit, at its scale, light
+  or dark as its theme is; F7 keeps the paper light in the dark.
+- **Settings**, one store of them in the kernel, typed and described: the
+  look (`display.theme` dark or light, `display.accent`, `display.scale`,
+  the wallpaper, the bar's clock), the text size, the keyboard's repeat and layout (US, Dvorak,
+  Colemak), the pointer's speed and natural scrolling, the time zone, the
+  machine's name (for DHCP and Linux), IPv4 by DHCP or by hand, what the
+  power button does, the log, and Claude's model. `settings` lists them as
+  records (`settings display`, `settings | where name ~ key*`), `settings
+  set <name> <value>` changes one now, and an error names what it takes;
+  `settings reset` puts them back. What is not a default is kept in
+  `SETTINGS.TXT` beside the log on the boot stick, and the loader hands it to
+  the kernel, so the look and the text size are there from the first frame.
+  `run settings` opens **the Settings window**: a sidebar of categories and
+  switches, choices, sliders, swatches, steppers and fields, in the look it
+  sets; it reaches the settings only through a capability, and follows a
+  change made anywhere else at once.
 - **USB** on every xHCI controller: hubs (nested, USB 2 and 3), hot-plug, and a
   HID report parser for keyboards (6-key and N-key rollover), mice and tablets.
   A mouse cursor: in the Mandelbrot's window, click to recentre it, wheel to
@@ -115,12 +144,12 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   `threads | where pinned = yes | count` mean what they say; text comes only
   at the end, on the screen or into a file (`> list.txt`, `>> list.txt`).
   Quotes, `*` and `?`, `$name` (from `set name value`), `;`, `&&` and `||`
-  work as written. `cpus`, `mem`, `threads` and `tasks` (`tasks stop <id>`)
-  are records too; the rest (`info objects rings run user win shell pci
-  acpi iommu usb disks nvme store vol date net ip ip6 dhcp ping host arp
-  http httpd ask claude tcp crypto log demo bench uptime echo clear panic
-  reboot poweroff`) print as before, and a `|` takes what they print as
-  lines.
+  work as written. `cpus`, `mem`, `threads`, `tasks` (`tasks stop <id>`)
+  and `bench` (what things cost: docs/PERFORMANCE.md) are records too; the
+  rest (`info objects rings run user win shell pci acpi iommu usb disks nvme
+  store vol date net ip ip6 dhcp ping host arp http httpd ask claude tcp
+  crypto log demo uptime echo clear panic reboot poweroff`) print as
+  before, and a `|` takes what they print as lines.
 - **A log on the boot stick**: everything Axiom prints, the commands typed
   and any panic report go into `AXIOM.LOG` on the USB stick it booted from,
   readable from Windows afterwards.
@@ -169,7 +198,7 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   killing one (ctrl+C, or a program killing its child) ends every program
   it started too. Several run at once (`&`, `tasks stop <program>`), and
   each gets only the capabilities it declares (the network, the store, the
-  desktop) or is granted for that run (`+net hello`). `hello`, `test`, `child`, `fault`, `spin`, `stash`, `paint`, `browse`, `notes`, `files`, `fstest` and `tone` come with it
+  desktop, the files, the settings, the speakers) or is granted for that run (`+net hello`). `hello`, `test`, `child`, `fault`, `spin`, `stash`, `paint`, `browse`, `notes`, `files`, `fstest`, `settings`, `tone` and `compose` come with it
   (`src/user/`); `user test` runs them all, with a fault of every kind.
 - **Linux programs, unchanged**: `linux <program> [arguments]` runs an
   x86-64 Linux program from a root on the boot stick (`tools/mkroot.py`
@@ -217,7 +246,9 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Build
 
-Needs [NASM](https://nasm.us) 2.15+ and Python 3 on the PATH.
+Needs [NASM](https://nasm.us) 2.15+ and Python 3 on the PATH, and rustup's
+nightly toolchain with its `rust-src` (`rustup toolchain install nightly
+--component rust-src`) for the kernel's Rust; nothing is downloaded.
 
 ```bash
 python tools/build.py
@@ -229,7 +260,11 @@ mode if you'd rather have bigger text. The kernel and the programs are
 assembled side by side, and only what changed (or includes a file that
 changed) is assembled again; `--all` assembles everything. The kernel's
 jumps are left long (`-O1`): sizing each (`-Ox`, `--small`) takes NASM
-some 200 passes, a minute, for a kernel 4% smaller.
+some 200 passes, a minute, for a kernel 4% smaller. The kernel is NASM's
+ELF object linked with its Rust (cargo builds it beside the assembly, core
+from `rust-src`, some 20 s the first time) by rust-lld, through
+`src/kernel/kernel.ld`; `build/kernel.bin` is the result's loaded bytes and
+`build/kernel.map` its symbols.
 
 The Rust programs (`sdk/rust`) are built apart, with rustup's nightly
 toolchain and its `rust-src`, nothing downloaded: `python tools/rust.py`
@@ -448,6 +483,30 @@ panic saves the log and restarts too; a hang ends in the watchdog's reset.
 `harness` in the shell shows a run and the variables; `tools/test/harness`
 runs the whole round in QEMU.
 
+### A new kernel, tried once
+
+A machine no one is at takes a new Axiom without risking the one it has.
+Besides the kernel built into the loader, two files on the volume Axiom
+started from may hold one: `/EFI/AXIOM/KERNEL.A` and `KERNEL.B`.
+
+```
+update try kernel.bin [seconds]   # into the slot not kept; tried at the next start
+reboot
+update keep                       # on trial: every start uses it from now on
+```
+
+`update try` names the slot in the UEFI variable `AxiomTry`. The loader
+marks that variable tried before it starts the kernel, so a trial happens
+once, and starts the TCO watchdog. Kept, the slot goes into `AxiomSlot`;
+not kept in time (600 s unless said), the trial ends in a restart, as a
+panic on trial does, and a hang in the watchdog's reset, and the loader
+starts the kept kernel again. Each variable holds its file's size and
+FNV-1a hash: a slot whose file is missing or damaged is passed over, for
+the kept one, then the built-in one. `update` says which kernel this is;
+`tools/test/update` runs every way a trial ends in QEMU. On hp-1,
+`python tools/hw/hp1.py try` writes build/kernel.bin into a slot and
+`AxiomTry` from Ubuntu, for the next `hp1.py run`.
+
 ### One of fleet's nodes
 
 Axiom can be one of fleet's nodes itself, a self-managed one (fleet's
@@ -479,18 +538,107 @@ already sends nothing. A job still running when `fleet` last ended is
 `tools/test/fleet` runs it in QEMU against a client speaking fleet's wire,
 over two boots.
 
+A machine no one is at runs it at every start with `fleet &` in
+`/EFI/AXIOM/START.TXT`: that file's lines are typed into the first
+terminal as Axiom starts (start.asm). It takes a new kernel over fleet too:
+
+```
+fleet run --on axiom-1 -- update kernel.bin [seconds]   # kernel.bin pushed with the project
+fleet info axiom-1                # after the restart: this keeps it
+```
+
+`update` is fleet's own job, no program: it puts the project's
+kernel.bin into the slot not kept (as `update try`; FLEET.AXE wants
+`UPDATE`, a right on its files handle) and restarts the machine 10 s
+later. On that trial the first client to reach the node keeps the kernel;
+with none in time (600 s unless said), the machine restarts into the
+kernel it ran before. A kernel that cannot bring up the network, TLS, the
+files or `fleet` is given up on its own. `tools/test/update-fleet` pushes
+a kernel, keeps it, and lets a second one lapse, in QEMU.
+
+On hp-1, the test before Ubuntu goes is one command from this PC:
+
+```
+python tools/hw/hp1.py axiom1 [--update]
+```
+
+It installs build/esp, makes `START.TXT` say `fleet &`, and starts
+`tools/hw/axiom1.txt` as a test run. While hp-1 runs Axiom, it reaches
+axiom-1 over fleet: a job, its info, then `hello axiom1-done`, which ends
+the run. With `--update`, `update kernel.bin` comes instead, and a second
+run is that kernel's trial, kept by the first job to reach it. Then the
+EFI partition is checked (`fsck.vfat -n`), `START.TXT` is removed and
+`AxiomSlot` forgotten (`--keep` keeps them), so later runs start what
+`install` put there. `tools/test/update-fleet` runs `axiom1.txt` the same
+way in QEMU.
+
+### A battery kept between 75% and 80%
+
+A laptop that lives on its charger wears its battery out kept full and
+warm, and the battery can swell. As fleet's battery-hold does under Linux,
+`battery hold` (a line `START.TXT` may hold) keeps it between 75% and 80%:
+
+```
+battery                           # the charge, the charger, how it charges
+battery hold [off]                # a tick each minute: stop or start charging
+battery mode normal|inhibit|discharge   # by hand, the hold off
+battery ec                        # the embedded controller's 256 registers
+battery test                      # the hold against a simulated EC
+battery simulate                  # no EC here (QEMU): a battery at 90% from now on
+```
+
+Wherever the charge can be read, it is read each minute, held or not, and
+programs see the last reading: `SYS_INFO`'s `SI_BATTERY` (the Rust SDK's
+`axiom::sys::battery()`). FLEET.AXE reports it in `info` as fleet's own
+laptops do, `battery: {percent, plugged}`, which fleet's placement uses (a
+laptop off its charger takes no job unless `--allow-battery`).
+
+The CPU's temperature goes in `info` too, as `temp_c`: `heat` reads it
+(heat.asm) from Intel's package thermal sensor, as Linux's `x86_pkg_temp`
+that fleet reads first, else the core's; programs get it with `SI_TEMP`
+(`axiom::sys::cpu_temp()`). QEMU has no sensor; `heat simulate` gives it
+one at 47 C. So does the load average, as `load`: Unix's, over the last
+minute (load.asm: every 5 s, the CPUs' busy time and the threads waiting
+for one), which `uptime` shows and programs get with `SI_LOAD`
+(`axiom::sys::load()`).
+
+On HP's boards the embedded controller (ec.asm: its two I/O ports, from the
+ECDT or the board table) takes a charge mode in one register: 0 charges as
+the firmware likes, 5 stops charging, 2 runs the laptop from the battery
+with the charger in. From 85% it runs down to 80%; at 80% charging stops;
+at 75% it charges again. Axiom runs no AML, so the board table in
+battery.asm says where the EC keeps what the firmware's `_BST` and `_PSR`
+would read: the charge left and when full, and the charger, as EC
+registers or through the smart battery on the EC's SMBus. No reading, a
+reading that makes no sense, or a run-down that lowers nothing in 10
+minutes puts it back to normal charging (or holds it where it is), as every
+restart and power-off does. A board not in the table is left alone.
+
+hp-1's board (HP 87FE) is in the table with its charge register (0x76,
+tried by fleet under Linux); where its charge is read is found with
+
+```
+python tools/hw/hp1.py battery    # its ACPI tables and EC registers, read under Ubuntu
+```
+
+which runs `tools/hw/ecmap.py` on them: the EC's fields, the code of
+`_BST`, `_BIF` and `_PSR` and the fields they reach, and which registers
+hold the numbers Linux reports at that moment.
+
 ## Layout
 
 ```
 src/boot/uefi.asm       the loader: a hand-built PE32+ UEFI application
 src/kernel/*.asm        the kernel, one flat image at 0xFFFFFFFF80000000
+src/kernel/kernel.ld    its link: the assembly first in each section, the Rust after
+src/rust/               the kernel's Rust (rust.asm: how the two call each other)
 src/user/               programs for ring 3 (axe.inc: their header and runtime)
 src/include/            structures shared by the two
 sdk/rust/               programs in Rust: the axiom crate, the target, five programs
 tools/rust.py           build them; tools/mkaxe.py turns each into an .AXE
 sdk/masm/               programs in MASM: axiom.inc (made from defs.inc), mhello
 tools/masm.py           build them with ml64 and link.exe, then tools/mkaxe.py
-tools/build.py          assemble everything
+tools/build.py          assemble everything, and link the kernel (tools/elf.py)
 tools/run.py            boot in QEMU; type keys, move the pointer, take screenshots
 tools/mkdisk.py         a GPT + FAT32 test disk (as an NVMe drive or a USB stick)
 tools/mkstick.py        a bootable stick image with build/esp on it (and,
@@ -525,7 +673,10 @@ tools/test/             host-side tests for self-contained modules (tls: the
                         client against servers on the host, and httpd
                         against clients there; ip6: IPv6 on QEMU's
                         network, and between two guests on a hub that is
-                        their router; linux: Linux programs from
+                        their router; settings: the shell's settings,
+                        the Settings window clicked, the look's pixels,
+                        SETTINGS.TXT across two boots, Dvorak and the
+                        power button; linux: Linux programs from
                         Ubuntu, and threads and signals in C, from a
                         stick with a root on it; rust: the Rust programs,
                         their heap, files, a window and its events, keys
@@ -535,18 +686,41 @@ tools/test/             host-side tests for self-contained modules (tls: the
                         streams, judged from the WAV file QEMU's codec
                         writes; harness: test runs as hp-1 has them,
                         across boots on one store of firmware variables,
-                        to the watchdog's reset; fleet: Axiom as one of
+                        to the watchdog's reset; update: a new kernel
+                        tried, kept, given up, and its file damaged,
+                        across boots; fleet: Axiom as one of
                         fleet's nodes, a client here pushing to it and
-                        running jobs, across two boots); all.py runs them
-                        all at once, and qemu.py boots side by side
+                        running jobs, across two boots; update-fleet: a
+                        new kernel over fleet, kept by the client's
+                        hello, or given up without one, and hp-1's
+                        axiom1.txt as test runs; battery: the hold
+                        against a simulated EC, hp-1's board with no EC,
+                        and ecmap.py on a DSDT made by hand); all.py runs
+                        them all at once, and qemu.py boots side by side
 tools/hw/hp1.py         test runs on hp-1, through fleet (hp1_node.py runs
                         there, as root)
+tools/hw/ecmap.py       a DSDT's embedded controller: its fields, and those
+                        the battery's _BST and the charger's _PSR read
 tools/mkfont.py         rasterize the console font into src/kernel/gen/
 tools/mkuifont.py       rasterize the desktop's font into src/kernel/gen/
 docs/                   vision, architecture, and the ABI programs see (ABI.md)
 ```
 
+## License
+
+Axiom is licensed under either of
+
+- the Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE)), or
+- the MIT license ([LICENSE-MIT](LICENSE-MIT)),
+
+at your option. Unless you explicitly state otherwise, any contribution
+intentionally submitted for inclusion in Axiom by you, as defined in the
+Apache-2.0 license, shall be dual licensed as above, without any additional
+terms or conditions.
+
 ## License notes
+
+What Axiom includes from others keeps its own license:
 
 The console font is rasterized from **Cascadia Mono**, © Microsoft Corporation,
 licensed under the [SIL Open Font License 1.1](https://openfontlicense.org).

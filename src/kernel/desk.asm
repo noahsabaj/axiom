@@ -10,19 +10,27 @@
 ;  edge, raises and takes the keys when clicked; a double click on its
 ;  title zooms it.
 ;
+;  One that may be resized may also go full screen (win_screen,
+;  desk_screen): its client all of the screen, with no frame, bar or dock,
+;  over all else and with the keys, until another window takes them or
+;  ctrl+meta+F brings it back. A program's is told which of the three it
+;  is (zoom_tell, WE_ZOOM) before it is told its new size.
+;
 ;  What changed on the screen is a list of rectangles; desk_update composes
 ;  each into the back buffer - the wallpaper, the windows bottom to top,
 ;  the dock, the menu bar - and copies it to the screen. The dock is frosted
-;  glass: what is behind it, blurred, so a rectangle that touches it is
-;  composed with all the dock and what the blur reads around it.
+;  glass: what is behind it, blurred (a pane, draw.asm), kept until what is
+;  behind it changes; then a rectangle that touches it is composed with all
+;  the dock and what the blur reads around it, and the blur made again.
 ;
 ;  The dock: the apps (DOCK_APPS of them, each launched or brought forward
 ;  by a click), then programs with windows that are not among them, then,
 ;  past a line, the windows minimised, each as a small picture of itself.
 ;  A dot under an app says it runs; the pointer over one names it.
 ;
-;  The menu bar: Axiom's mark, the name of the app in front, and at the
-;  right what the system is doing and the time.
+;  The menu bar: Axiom's mark, the name of the app in front and the menus,
+;  and at the right the battery, the network, the launcher and the time
+;  (menus.asm).
 ;
 ;  All of it runs on the main thread, but win_damage and desk_damage,
 ;  which any thread may call. Measures are points (theme.asm: pt).
@@ -53,7 +61,13 @@ WN_ZY           equ WN_ZX + 8
 WN_ZW           equ WN_ZX + 16
 WN_ZH           equ WN_ZX + 24
 WN_FOCUSED      equ WN_ZX + 32          ; when it last took the keys (a count)
-WN_SIZE         equ WN_ZX + 40
+WN_INKED        equ WN_ZX + 40          ; byte: its owner has drawn in it
+WN_SX           equ WN_ZX + 48          ; where it was before it went full screen
+WN_SY           equ WN_ZX + 56
+WN_SW           equ WN_ZX + 64
+WN_SH           equ WN_ZX + 72
+WN_ZTOLD        equ WN_ZX + 80          ; dword WZ_*: what its program was last told
+WN_SIZE         equ WN_ZX + 88
 
 WF_SHOWN        equ 1 << 0              ; not minimised
 WF_CLOSE        equ 1 << 1              ; it has a close button
@@ -61,6 +75,9 @@ WF_RESIZE       equ 1 << 2              ; it may be resized
 WF_CLOSING      equ 1 << 3              ; it goes at the next desk_service
 WF_PROGRAM      equ 1 << 4              ; a program's (its pixels are not ours)
 WF_ZOOMED       equ 1 << 5              ; it fills the screen (WN_Z* is where it was)
+WF_AWAY         equ 1 << 6              ; put away: not on the screen, not in the dock
+WF_ANIM         equ 1 << 7              ; moving: motion.asm draws it (or its place in the dock)
+WF_SCREEN       equ 1 << 8              ; full screen (desk_screen; WN_S* is where it was)
 
 OP_PAINT        equ 0                   ; RBX = window: draw the whole client
 OP_KEY          equ 8                   ; RBX, EAX = key code
@@ -93,7 +110,7 @@ DRAG_MOVE       equ 1
 DRAG_SIZE       equ 2
 
 ; the dock's items
-DOCK_APPS       equ 7
+DOCK_APPS       equ 8
 DOCK_MAX        equ DOCK_APPS + 2 * DESK_MAX
 DI_KIND         equ 0                   ; dword DK_*
 DI_APP          equ 4                   ; dword: which app (DK_APP)
@@ -102,15 +119,37 @@ DI_X            equ 16                  ; where it is
 DI_ICON         equ 24                  ; its picture: a surface
 DI_LABEL        equ 32
 DI_RUN          equ 40                  ; dword: it has windows
-DI_SIZE         equ 48
+DI_MX           equ 48                  ; magnified (motion.asm): its left,
+DI_MS           equ 56                  ; its side
+DI_SIZE         equ 64
 DK_APP          equ 0
 DK_EXTRA        equ 1                   ; a program's that is not one of the apps
 DK_MIN          equ 2                   ; a window minimised
 
 APP_TERMINAL    equ 0
+APP_FILES       equ 1
+APP_NOTES       equ 2
+APP_SETTINGS    equ 5
 APP_SYSTEM      equ 6
+APP_MANDEL      equ 7
 
 DOUBLE_MS       equ 400                 ; two clicks this close are a double click
+
+; how long composing takes, by part ('win speed')
+DS_WALL         equ 0                   ; the wallpaper and the widgets
+DS_WINS         equ 1                   ; the windows
+DS_DOCK         equ 2                   ; the dock and the name over it
+DS_BAR          equ 3                   ; the menu bar and an open menu
+DS_BLIT         equ 4                   ; to the screen
+DS_PARTS        equ 5
+
+; DS_LAP part: the time since the last lap is that part's. Preserves all.
+%macro DS_LAP 1
+    push rdi
+    mov edi, %1
+    call ds_lap
+    pop rdi
+%endmacro
 
 section .text
 
@@ -171,6 +210,7 @@ desk_metrics:
     PT m_bar_pad, 14
     PT m_gap, 16
     PT m_mark, 15
+    call mn_metrics
     mov rax, [m_blur]
     cmp rax, 64
     jbe .blur_ok
@@ -184,6 +224,46 @@ desk_metrics:
     sub rax, [m_dock_gap]
     sub rax, [m_dock_h]
     mov [m_dock_y], rax
+    push rcx
+    push rdx
+    mov rax, [m_icon]                   ; magnified, an icon is at most 1.6
+    imul rax, rax, 8                    ; times as big (even)
+    add rax, 9
+    xor edx, edx
+    mov ecx, 10
+    div rcx
+    add rax, rax
+    mov [m_icon_big], rax
+    mov rax, [m_icon]                   ; the magnifying reaches 2.5 places
+    add rax, [m_dock_space]
+    imul rax, rax, 5
+    shr rax, 1
+    mov [m_dock_reach], rax
+    shl rax, 3                          ; and the glass may grow each way:
+    xor edx, edx                        ; 0.6 (reach 8/15 + icon/2 + pad)
+    mov ecx, 15
+    div rcx
+    mov rcx, [m_icon]
+    shr rcx, 1
+    add rax, rcx
+    add rax, [m_dock_pad]
+    imul rax, rax, 3
+    xor edx, edx
+    mov ecx, 5
+    div rcx
+    add rax, 2
+    mov [m_dock_ext], rax
+    mov rax, [m_icon]                   ; an app starting: how high it bounces
+    shr rax, 1
+    mov [m_bounce], rax
+    mov rax, [m_dock_y]                 ; the top of all the dock draws, but
+    add rax, [m_dock_pad]               ; the names
+    add rax, [m_icon]
+    sub rax, [m_icon_big]
+    sub rax, [m_bounce]
+    mov [m_dock_top], rax
+    pop rdx
+    pop rcx
     mov edi, 6                          ; windows stop a little above it
     call pt
     mov rdi, [m_dock_y]
@@ -224,10 +304,11 @@ desk_metrics:
     ret
 
 ; desk_looks: what the theme makes: the wallpaper, the menu bar's glass,
-; the shadows, the icons, the pointer. Preserves RBX, RBP, R12-R15.
+; the widgets, the shadows, the icons, the pointer. Preserves RBX, RBP, R12-R15.
 desk_looks:
     call wall_make
     call bar_make
+    call wg_looks
     mov eax, [th_c + TC_SHADOW_A]
     mov [sh_focus + SH_A], eax
     mov eax, [th_c + TC_SHADOW2_A]
@@ -445,6 +526,7 @@ win_new:
 .seen:
     mov rdi, rbx
     call win_damage_whole
+    call mv_open                        ; growing into place
     call desk_bar_damage
     mov byte [dock_dirty], 1
     mov rax, rbx
@@ -509,8 +591,9 @@ win_title:
     jmp desk_bar_damage
 
 ; win_fit(RDI = window, RSI = width, RDX = height): the client that size, as
-; far as the screen and the window's least allow; the window kept on the
-; screen; then painted. Preserves RBX, RBP, R12-R15.
+; far as the screen and the window's least allow (full screen: the
+; screen's, whatever is asked); the window kept on the screen; then
+; painted. Preserves RBX, RBP, R12-R15.
 win_fit:
     push rbx
     push r12
@@ -518,6 +601,12 @@ win_fit:
     mov rbx, rdi
     mov r12, rsi
     mov r13, rdx
+    test dword [rbx + WN_FLAGS], WF_SCREEN
+    jz .least
+    mov r12, [scr_w]                    ; full screen: all of it
+    mov r13, [scr_h]
+    jmp .h_max
+.least:
     cmp r12, [rbx + WN_MIN_W]
     jge .w_min
     mov r12, [rbx + WN_MIN_W]
@@ -577,8 +666,11 @@ win_fit:
     ret
 
 ; win_place(RDI = window, RSI = x, RDX = y): the window there, as far as its
-; title bar stays reachable. Preserves all.
+; title bar stays reachable (full screen: its client at the screen's top
+; left, the title bar above it). Preserves all.
 win_place:
+    test dword [rdi + WN_FLAGS], WF_SCREEN
+    jnz .screen
     push rax
     push rcx
     push rdx
@@ -613,6 +705,14 @@ win_place:
     pop rsi
     pop rdx
     pop rcx
+    pop rax
+    ret
+.screen:
+    push rax
+    mov qword [rdi + WN_X], 0
+    mov rax, [fr_t]
+    neg rax
+    mov [rdi + WN_Y], rax
     pop rax
     ret
 
@@ -655,6 +755,7 @@ win_client:
 ; win_damage(RDI = window, RSI = x, RDX = y, RCX = w, R8 = h in the client):
 ; that part changed. Any thread. Preserves all.
 win_damage:
+    mov byte [rdi + WN_INKED], 1
     test dword [rdi + WN_FLAGS], WF_SHOWN
     jz .out
     push rdi
@@ -785,10 +886,28 @@ win_set_rect:
     ret
 
 ; win_zoom(RDI = window): to fill the screen between the bar and the dock,
-; or back to where it was. Preserves RBX, RBP, R12-R15.
+; or back to where it was (full screen: out of it, zoomed). Preserves RBX,
+; RBP, R12-R15.
 win_zoom:
     test dword [rdi + WN_FLAGS], WF_RESIZE
     jz .out
+    test dword [rdi + WN_FLAGS], WF_SCREEN
+    jz .zoom
+    mov esi, WZ_ZOOMED
+    jmp win_set_zoom
+.zoom:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    mov rbx, rdi
+    call win_outer                      ; R12..R15: the window where it was
+    mov r12, rdi
+    mov r13, rsi
+    mov r14, rdx
+    mov r15, rcx
+    mov rdi, rbx
     test dword [rdi + WN_FLAGS], WF_ZOOMED
     jnz .back
     mov rax, [rdi + WN_X]               ; where it was
@@ -800,20 +919,260 @@ win_zoom:
     mov rax, [rdi + WN_H]
     mov [rdi + WN_ZH], rax
     or dword [rdi + WN_FLAGS], WF_ZOOMED
+    call zoom_tell
+    call zoom_rect
+    jmp .set
+.back:
+    and dword [rdi + WN_FLAGS], ~WF_ZOOMED
+    call zoom_tell
+    mov rsi, [rdi + WN_ZX]
+    mov rdx, [rdi + WN_ZY]
+    mov rcx, [rdi + WN_ZW]
+    mov r8, [rdi + WN_ZH]
+.set:
+    call win_set_rect
+    mov rdi, rbx                        ; from there to here
+    mov rsi, r12
+    mov rdx, r13
+    mov rcx, r14
+    mov r8, r15
+    call mv_zoom
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+.out:
+    ret
+
+; zoom_rect -> RSI x, RDX y, RCX w, R8 h: a window zoomed, between the bar
+; and the dock. Preserves others.
+zoom_rect:
     xor esi, esi
     mov rdx, [m_bar_h]
     mov rcx, [scr_w]
     mov r8, [m_work_y1]
     sub r8, rdx
     sub r8, [fr_t]
-    jmp win_set_rect
-.back:
-    and dword [rdi + WN_FLAGS], ~WF_ZOOMED
-    mov rsi, [rdi + WN_ZX]
-    mov rdx, [rdi + WN_ZY]
-    mov rcx, [rdi + WN_ZW]
-    mov r8, [rdi + WN_ZH]
-    jmp win_set_rect
+    ret
+
+; win_set_zoom(RDI = window, ESI = WZ_*): full screen, zoomed or neither, as
+; asked (RO_WIN_ZOOM); only one that may be resized. From full screen it
+; goes straight there. Preserves RBX, RBP, R12-R15.
+win_set_zoom:
+    test dword [rdi + WN_FLAGS], WF_RESIZE
+    jz .out
+    cmp esi, WZ_SCREEN
+    je win_screen
+    test dword [rdi + WN_FLAGS], WF_SCREEN
+    jnz .screen
+    xor eax, eax                        ; zoomed now, or not
+    test dword [rdi + WN_FLAGS], WF_ZOOMED
+    setnz al
+    cmp eax, esi
+    jne win_zoom
+.out:
+    ret
+.screen:
+    cmp esi, WZ_ZOOMED
+    je .to_zoomed
+    test dword [rdi + WN_FLAGS], WF_ZOOMED
+    jz win_unscreen
+    and dword [rdi + WN_FLAGS], ~WF_ZOOMED ; to where it was before it zoomed
+    mov rax, [rdi + WN_ZX]
+    mov [rdi + WN_SX], rax
+    mov rax, [rdi + WN_ZY]
+    mov [rdi + WN_SY], rax
+    mov rax, [rdi + WN_ZW]
+    mov [rdi + WN_SW], rax
+    mov rax, [rdi + WN_ZH]
+    mov [rdi + WN_SH], rax
+    jmp win_unscreen
+.to_zoomed:
+    test dword [rdi + WN_FLAGS], WF_ZOOMED
+    jnz win_unscreen
+    or dword [rdi + WN_FLAGS], WF_ZOOMED ; zoomed, and from there back to
+    mov rax, [rdi + WN_SX]              ; where it was
+    mov [rdi + WN_ZX], rax
+    mov rax, [rdi + WN_SY]
+    mov [rdi + WN_ZY], rax
+    mov rax, [rdi + WN_SW]
+    mov [rdi + WN_ZW], rax
+    mov rax, [rdi + WN_SH]
+    mov [rdi + WN_ZH], rax
+    call zoom_rect
+    mov [rdi + WN_SX], rsi
+    mov [rdi + WN_SY], rdx
+    mov [rdi + WN_SW], rcx
+    mov [rdi + WN_SH], r8
+    jmp win_unscreen
+
+; win_screen(RDI = window): full screen: all of the screen its client, over
+; all else, with the keys; no frame, bar or dock (desk_screen). Only one
+; that may be resized; one full screen already leaves it first, as it
+; loses the keys. Preserves all.
+win_screen:
+    test dword [rdi + WN_FLAGS], WF_RESIZE
+    jz .out
+    test dword [rdi + WN_FLAGS], WF_SCREEN
+    jnz .out
+    push rax
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push rbx
+    mov rbx, rdi
+    call mv_forget                      ; at once: nothing of it moves on,
+    call mn_close                       ; no menu stays open, nothing is
+    mov byte [drag_mode], DRAG_NONE     ; dragged
+    mov qword [drag_win], 0
+    mov qword [dock_press], -1
+    test dword [rbx + WN_FLAGS], WF_SHOWN
+    jnz .shown
+    or dword [rbx + WN_FLAGS], WF_SHOWN ; out of the dock
+    and dword [rbx + WN_FLAGS], ~WF_AWAY
+    lea rdi, [rbx + WN_THUMB]
+    call sf_free
+    mov byte [dock_dirty], 1
+.shown:
+    mov rdi, rbx
+    call win_focus                      ; the keys, on top
+    mov rax, [rbx + WN_X]               ; where to come back to
+    mov [rbx + WN_SX], rax
+    mov rax, [rbx + WN_Y]
+    mov [rbx + WN_SY], rax
+    mov rax, [rbx + WN_W]
+    mov [rbx + WN_SW], rax
+    mov rax, [rbx + WN_H]
+    mov [rbx + WN_SH], rax
+    or dword [rbx + WN_FLAGS], WF_SCREEN
+    mov [desk_screen], rbx
+    lea rax, [rbx + WN_TITLE]
+    KLOG "desk: '%s' goes full screen", rax
+    call zoom_tell
+    mov rsi, [scr_w]
+    mov rdx, [scr_h]
+    call win_fit
+    mov qword [hover_win], 0            ; no frame's buttons, no dock's name
+    mov qword [dock_hover], -1
+    cmp rbx, [grab_win]
+    jne .held
+    mov qword [grab_win], 0             ; held in its middle now (ptr_mode)
+.held:
+    call desk_damage_screen
+    pop rbx
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rax
+.out:
+    ret
+
+; win_unscreen(RDI = window): out of full screen, back where it was; its
+; program told so (WE_ZOOM), then its size. Preserves all.
+win_unscreen:
+    test dword [rdi + WN_FLAGS], WF_SCREEN
+    jz .out
+    push rax
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push rbx
+    mov rbx, rdi
+    and dword [rbx + WN_FLAGS], ~WF_SCREEN
+    cmp rbx, [desk_screen]
+    jne .left
+    mov qword [desk_screen], 0
+.left:
+    mov rax, [rbx + WN_SX]
+    mov [rbx + WN_X], rax
+    mov rax, [rbx + WN_SY]
+    mov [rbx + WN_Y], rax
+    lea rax, [rbx + WN_TITLE]
+    KLOG "desk: '%s' leaves full screen", rax
+    call zoom_tell
+    mov rsi, [rbx + WN_SW]
+    mov rdx, [rbx + WN_SH]
+    call win_fit
+    cmp rbx, [grab_win]
+    jne .held
+    mov qword [grab_win], 0             ; held in its middle there (ptr_mode)
+.held:
+    call desk_damage_screen             ; the desk again, all of it
+    pop rbx
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rax
+.out:
+    ret
+
+; win_screen_flip(RDI = window): full screen, or out of it. Preserves all.
+win_screen_flip:
+    test dword [rdi + WN_FLAGS], WF_SCREEN
+    jnz win_unscreen
+    jmp win_screen
+
+; zoom_tell(RDI = window): a program's is told whether it is full screen,
+; zoomed or neither, if that is not what it was last told (WE_ZOOM).
+; Preserves all.
+zoom_tell:
+    test dword [rdi + WN_FLAGS], WF_PROGRAM
+    jz .out
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    mov rbx, rdi
+    mov esi, WZ_SCREEN
+    test dword [rbx + WN_FLAGS], WF_SCREEN
+    jnz .state
+    mov esi, WZ_ZOOMED
+    test dword [rbx + WN_FLAGS], WF_ZOOMED
+    jnz .state
+    mov esi, WZ_NORMAL
+.state:
+    cmp esi, [rbx + WN_ZTOLD]
+    je .told
+    mov [rbx + WN_ZTOLD], esi
+    call prog_zoom
+.told:
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
 .out:
     ret
 
@@ -866,8 +1225,9 @@ win_raise:
     pop rax
     ret
 
-; win_focus(RDI = window or 0): it is shown, raised and takes the keys.
-; Preserves all.
+; win_focus(RDI = window or 0): it is shown, raised and takes the keys; one
+; full screen that loses them leaves it (told WE_FOCUS 0 first). Preserves
+; all.
 win_focus:
     push rax
     push rdi
@@ -886,6 +1246,17 @@ win_focus:
 .same:
     pop rdi
 .old_done:
+    mov rax, [desk_screen]
+    test rax, rax
+    jz .screen_done
+    cmp rax, rdi
+    je .screen_done
+    push rdi
+    mov rdi, rax
+    call win_unscreen
+    pop rdi
+.screen_done:
+    mov rax, [desk_focus]
     cmp rdi, rax
     je .tell_done
     test rdi, rdi
@@ -903,7 +1274,15 @@ win_focus:
     mov [rdi + WN_FOCUSED], rax
     test dword [rdi + WN_FLAGS], WF_SHOWN
     jnz .shown
+    test dword [rdi + WN_FLAGS], WF_AWAY
+    jnz .appear
+    call mv_back                        ; out of its place in the dock
+    jmp .show
+.appear:
+    call mv_open                        ; or growing into place
+.show:
     or dword [rdi + WN_FLAGS], WF_SHOWN
+    and dword [rdi + WN_FLAGS], ~WF_AWAY
     push rdi
     lea rdi, [rdi + WN_THUMB]           ; out of the dock
     call sf_free
@@ -953,8 +1332,10 @@ focus_tell:
 win_minimise:
     test dword [rdi + WN_FLAGS], WF_SHOWN
     jz .out
+    call win_unscreen                   ; (out of full screen first)
     call win_damage_whole
     call win_thumb
+    call mv_minimise                    ; into its place there
     and dword [rdi + WN_FLAGS], ~WF_SHOWN
     mov byte [dock_dirty], 1
     cmp rdi, [desk_focus]
@@ -967,6 +1348,32 @@ win_minimise:
 .bar:
     call desk_bar_damage
 .out:
+    ret
+
+; win_put_away(RDI = window): off the screen and out of the dock, until its
+; app in the dock brings it back (win_focus). The built-in windows start so,
+; and their close buttons do it. Preserves all.
+win_put_away:
+    test dword [rdi + WN_FLAGS], WF_SHOWN
+    jz .away
+    call win_unscreen                   ; (out of full screen first)
+    call mv_close                       ; shrinking away
+    call win_damage_whole
+.away:
+    and dword [rdi + WN_FLAGS], ~WF_SHOWN
+    or dword [rdi + WN_FLAGS], WF_AWAY
+    mov byte [dock_dirty], 1
+    cmp rdi, [desk_focus]
+    jne .bar
+    push rax
+    push rdi
+    call desk_last_focused
+    mov rdi, rax
+    call win_focus
+    pop rdi
+    pop rax
+.bar:
+    call desk_bar_damage
     ret
 
 ; desk_top_shown -> RAX = the topmost window shown, or 0. Preserves others.
@@ -1083,6 +1490,17 @@ desk_service:
 
 ; win_destroy(RBX = window): its owner lets go, then it goes
 win_destroy:
+    mov rdi, rbx
+    cmp rbx, [desk_screen]              ; full screen: gone at once, and the
+    jne .shrink                         ; desk all there again
+    mov qword [desk_screen], 0
+    and dword [rbx + WN_FLAGS], ~WF_SCREEN
+    call desk_damage_screen
+    jmp .forget
+.shrink:
+    call mv_close                       ; shrinking away, from its picture now
+.forget:
+    call mv_forget                      ; (and nothing of it moves on)
     mov rax, [rbx + WN_OPS]
     mov rax, [rax + OP_CLOSE]
     test rax, rax
@@ -1366,6 +1784,34 @@ span_round:
 ; desk_damage(RDI x, RSI y, RDX w, RCX h on the screen): to be composed
 ; again. Any thread. Preserves all.
 desk_damage:
+    push r8
+    xor r8d, r8d
+    call desk_damage_own
+    pop r8
+    ret
+
+; desk_damage_screen: all of the screen, to be composed again. Any thread.
+; Preserves all.
+desk_damage_screen:
+    push rdi
+    push rsi
+    push rdx
+    push rcx
+    xor edi, edi
+    xor esi, esi
+    mov rdx, [scr_w]
+    mov rcx, [scr_h]
+    call desk_damage
+    pop rcx
+    pop rdx
+    pop rsi
+    pop rdi
+    ret
+
+; desk_damage_own(RDI x, RSI y, RDX w, RCX h, R8 = a pane of glass or 0):
+; as desk_damage, by the pane's own drawing: what is behind it is as it
+; was. Any thread. Preserves all.
+desk_damage_own:
     push rax
     push rdi
     push rsi
@@ -1380,6 +1826,16 @@ desk_damage:
     lea rdi, [dmg_lock]
     call spin_lock
     pop rdi
+    lea rax, [dock_gl]                  ; what is behind the glass changed
+    cmp rax, r8
+    je .dock
+    call gl_touch
+.dock:
+    lea rax, [mn_gl]
+    cmp rax, r8
+    je .menu
+    call gl_touch
+.menu:
     mov rax, [dmg_n]
     cmp rax, DMG_MAX
     jb .add
@@ -1510,6 +1966,9 @@ desk_update:
 .work:
     push rbx
     push r12
+    push r13
+    RDTSC64
+    mov r13, rax                        ; when it began
     sub rsp, DMG_MAX * 32
     pushfq                              ; take the list
     cli
@@ -1522,6 +1981,12 @@ desk_update:
     lea rdi, [rsp + 8]
     rep movsb
     mov qword [dmg_n], 0
+    mov al, [dock_gl + GL_STALE]        ; and what changed behind the glass
+    or [dock_gl + GL_TAKEN], al
+    mov byte [dock_gl + GL_STALE], 0
+    mov al, [mn_gl + GL_STALE]
+    or [mn_gl + GL_TAKEN], al
+    mov byte [mn_gl + GL_STALE], 0
     lea rdi, [dmg_lock]
     call spin_unlock
     popfq
@@ -1539,68 +2004,166 @@ desk_update:
     mov rcx, [rax + 24]
     sub rcx, rsi
     call desk_glass                     ; all the glass it touches, with it
+    mov rax, rdx                        ; its pixels, counted
+    imul rax, rcx
+    add [ds_px], rax
     call desk_compose
     inc rbx
     jmp .rect
 .done:
     add rsp, DMG_MAX * 32
+    RDTSC64                             ; how long it took
+    sub rax, r13
+    add [ds_cycles], rax
+    inc qword [ds_frames]
+    cmp rax, [ds_max]
+    jbe .longest
+    mov [ds_max], rax
+.longest:
+    pop r13
     pop r12
     pop rbx
     ret
 
-; desk_glass(RDI x, RSI y, RDX w, RCX h) -> the rectangle grown to hold all
-; of the dock and what its blur reads, if it touches that. Preserves others.
+; ds_lap(EDI = a part, DS_*): the time since the last lap is its. Preserves
+; all.
+ds_lap:
+    push rax
+    push rdx
+    RDTSC64
+    mov rdx, rax
+    sub rax, [ds_last]
+    mov [ds_last], rdx
+    lea rdx, [ds_parts]
+    add [rdx + rdi * 8], rax
+    pop rdx
+    pop rax
+    ret
+
+; ds_say: how fast the desk composed since it was last asked; then from 0
+ds_say:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    mov rax, [ds_cycles]                ; each frame's, in hundredths of a ms
+    mov ecx, 100
+    mul rcx
+    div qword [tsc_per_ms]
+    xor edx, edx
+    mov rcx, [ds_frames]
+    test rcx, rcx
+    jz .mean
+    div rcx
+.mean:
+    mov rbx, rax
+    mov rax, [ds_max]
+    mov ecx, 100
+    mul rcx
+    div qword [tsc_per_ms]
+    mov r12, rax
+    mov rax, [ds_px]                    ; pixels, in tenths of a million
+    xor edx, edx
+    mov ecx, 100000
+    div rcx
+    KLOG "desk: %u frames, %h ms each, the longest %h ms, %t Mpx composed", qword [ds_frames], rbx, r12, rax
+    xor ecx, ecx                        ; each part's share
+    xor ebx, ebx
+.sum:
+    lea rax, [ds_parts]
+    add rbx, [rax + rcx * 8]
+    inc ecx
+    cmp ecx, DS_PARTS
+    jb .sum
+    test rbx, rbx
+    jnz .shares
+    inc ebx
+.shares:
+    xor ecx, ecx
+    lea r8, [ds_share]
+.share:
+    lea rax, [ds_parts]
+    mov rax, [rax + rcx * 8]
+    mov edx, 100
+    mul rdx
+    div rbx
+    mov [r8 + rcx * 8], rax
+    inc ecx
+    cmp ecx, DS_PARTS
+    jb .share
+    KLOG "desk: wallpaper %u%%, windows %u%%, dock %u%%, bar and menus %u%%, to the screen %u%%", qword [ds_share], qword [ds_share + 8], qword [ds_share + 16], qword [ds_share + 24], qword [ds_share + 32]
+    lea rdi, [ds_frames]                ; from 0
+    xor eax, eax
+    mov ecx, DS_PARTS + 4
+    rep stosq
+    call ml_say                         ; and what held the main loop longest
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+; desk_glass(RDI x, RSI y, RDX w, RCX h) -> the rectangle grown to hold
+; all a pane of glass reads, if what is behind it changed and the rectangle
+; touches that (the pane is made again as it is composed). Full screen,
+; none shows: they wait. Preserves others.
 desk_glass:
-    push r8
-    push r9
-    push r10
-    push r11
-    mov rax, [m_blur]
-    imul rax, rax, 3
-    mov r8, [dock_x]                    ; the dock and its margin
-    sub r8, rax
-    mov r9, [m_dock_y]
-    sub r9, rax
-    mov r10, [dock_x]
-    add r10, [dock_w]
-    add r10, rax
-    mov r11, [scr_h]
-    cmp qword [dock_w], 0
-    je .out
-    lea rax, [rdi + rdx]                ; does it touch?
-    cmp rax, r8
-    jle .out
-    cmp rdi, r10
-    jge .out
-    lea rax, [rsi + rcx]
-    cmp rax, r9
-    jle .out
-    add rdx, rdi                        ; to edges, then the union
-    add rcx, rsi
-    cmp rdi, r8
-    jle .x0
-    mov rdi, r8
-.x0:
-    cmp rsi, r9
-    jle .y0
-    mov rsi, r9
-.y0:
-    cmp rdx, r10
-    jge .x1
-    mov rdx, r10
-.x1:
-    cmp rcx, r11
-    jge .y1
-    mov rcx, r11
-.y1:
-    sub rdx, rdi
-    sub rcx, rsi
-    call gfx_clip_screen_signed
+    cmp qword [desk_screen], 0
+    jne .out
+    push rax
+    lea rax, [dock_gl]
+    call gl_grow
+    lea rax, [mn_gl]
+    call gl_grow
+    lea rax, [dock_gl]                  ; (the menu's may reach the dock's)
+    call gl_grow
+    pop rax
 .out:
-    pop r11
-    pop r10
-    pop r9
-    pop r8
+    ret
+
+; dock_pane: the dock's pane of glass where the dock is; made again if that
+; changed. Preserves all.
+dock_pane:
+    push rax
+    push rcx
+    lea rax, [dock_gl]
+    mov rcx, [m_blur]
+    mov [rax + GL_B], rcx
+    lea rcx, [rcx + rcx * 2]
+    mov [rax + GL_M], rcx
+    mov rcx, [dock_x]                   ; as wide as it may grow, magnified
+    sub rcx, [m_dock_ext]
+    cmp rcx, [rax + GL_X]
+    jne .moved
+    mov rcx, [dock_w]
+    add rcx, [m_dock_ext]
+    add rcx, [m_dock_ext]
+    cmp rcx, [rax + GL_W]
+    jne .moved
+    mov rcx, [m_dock_y]
+    cmp rcx, [rax + GL_Y]
+    jne .moved
+    mov rcx, [m_dock_h]
+    cmp rcx, [rax + GL_H]
+    je .out
+.moved:
+    mov rcx, [dock_x]
+    sub rcx, [m_dock_ext]
+    mov [rax + GL_X], rcx
+    mov rcx, [dock_w]
+    add rcx, [m_dock_ext]
+    add rcx, [m_dock_ext]
+    mov [rax + GL_W], rcx
+    mov rcx, [m_dock_y]
+    mov [rax + GL_Y], rcx
+    mov rcx, [m_dock_h]
+    mov [rax + GL_H], rcx
+    mov byte [rax + GL_STALE], 1
+.out:
+    pop rcx
+    pop rax
     ret
 
 ; desk_compose(RDI x, RSI y, RDX w, RCX h): that part of the screen, again
@@ -1614,9 +2177,19 @@ desk_compose:
     mov r13, rsi
     mov r14, rdx
     mov r15, rcx
+    push rax
+    push rdx
+    RDTSC64
+    mov [ds_last], rax
+    pop rdx
+    pop rax
     call gfx_target_back
     call gfx_set_clip
+    mov rdi, [desk_screen]              ; one full screen: it alone
+    test rdi, rdi
+    jnz .screen
     call wall_draw                      ; the wallpaper
+    DS_LAP DS_WALL
     xor ebx, ebx                        ; windows, bottom to top
 .window:
     cmp rbx, [desk_zn]
@@ -1625,6 +2198,8 @@ desk_compose:
     mov rdi, [rax + rbx * 8]
     test dword [rdi + WN_FLAGS], WF_SHOWN
     jz .next
+    test dword [rdi + WN_FLAGS], WF_ANIM ; moving: drawn as it moves
+    jnz .next
     push rdi
     call win_extent                     ; does it reach the rectangle?
     lea rax, [rdi + rdx]
@@ -1648,15 +2223,30 @@ desk_compose:
     inc rbx
     jmp .window
 .dock:
+    mov edi, MVL_WINS                   ; what moves over the windows
+    call motion_paint
+    DS_LAP DS_WINS
     lea rax, [r13 + r15]                ; the dock, if it is in it
-    cmp rax, [m_dock_y]
+    cmp rax, [m_dock_top]
     jle .tip
     call dock_paint
 .tip:
     call tip_paint
+    mov edi, MVL_TOP                    ; what moves over the dock
+    call motion_paint
+    DS_LAP DS_DOCK
     cmp r13, [m_bar_h]                  ; the menu bar
-    jge .shown
+    jge .menu
     call bar_paint
+.menu:
+    call mn_paint                       ; an open menu, over all
+    mov edi, MVL_MENU                   ; and a menu fading
+    call motion_paint
+    DS_LAP DS_BAR
+    jmp .shown
+.screen:
+    call screen_paint
+    DS_LAP DS_WINS
 .shown:
     call gfx_target_back                ; the clip off again
     mov rdi, r12
@@ -1664,10 +2254,68 @@ desk_compose:
     mov rdx, r14
     mov rcx, r15
     call gfx_blit
+    DS_LAP DS_BLIT
     pop r15
     pop r14
     pop r13
     pop r12
+    pop rbx
+    ret
+
+; screen_paint(RDI = the window full screen): its client, all of the
+; screen, within the clip; black where its pixels do not reach. Preserves
+; RBX, RBP, R12-R15.
+screen_paint:
+    push rbx
+    mov rbx, rdi
+    mov rax, [rbx + WN_SF + SF_W]       ; RAX by RCX: its pixels, on the screen
+    mov rcx, [rbx + WN_SF + SF_H]
+    cmp qword [rbx + WN_SF + SF_PTR], 0
+    jne .some
+    xor eax, eax
+    xor ecx, ecx
+.some:
+    cmp rax, [scr_w]
+    jbe .w
+    mov rax, [scr_w]
+.w:
+    cmp rcx, [scr_h]
+    jbe .h
+    mov rcx, [scr_h]
+.h:
+    push rax
+    push rcx
+    xor r8d, r8d                        ; black beyond them: at the right,
+    mov rdi, rax
+    xor esi, esi
+    mov rdx, [scr_w]
+    sub rdx, rax
+    mov rcx, [scr_h]
+    call gfx_fill
+    mov rcx, [rsp]                      ; and below
+    xor edi, edi
+    mov rsi, rcx
+    mov rdx, [rsp + 8]
+    mov rcx, [scr_h]
+    sub rcx, rsi
+    call gfx_fill
+    pop rcx
+    pop rdx
+    test rdx, rdx
+    jz .out
+    test rcx, rcx
+    jz .out
+    lea rax, [rbx + WN_SF]              ; then them, square
+    mov [span_sf], rax
+    mov qword [span_x], 0
+    mov qword [span_y], 0
+    xor edi, edi
+    xor esi, esi
+    xor r10d, r10d
+    mov r11d, RC_ALL
+    lea rbx, [span_copy]
+    call rr_walk
+.out:
     pop rbx
     ret
 
@@ -1691,6 +2339,7 @@ wall_draw:
     je .plain
     lea r8, [wall_sf]
     call sf_copy_rows
+    call wg_show                        ; the widgets over it
     jmp .out
 .plain:
     mov r8d, COL_BG
@@ -2134,29 +2783,6 @@ desk_bar_damage:
     pop rdi
     ret
 
-; desk_status(RSI = text): at the right of the bar. Preserves all.
-desk_status:
-    push rax
-    push rcx
-    push rsi
-    push rdi
-    lea rdi, [bar_status]
-    mov ecx, 159
-.copy:
-    lodsb
-    test al, al
-    jz .end
-    stosb
-    dec ecx
-    jnz .copy
-.end:
-    mov byte [rdi], 0
-    pop rdi
-    pop rsi
-    pop rcx
-    pop rax
-    jmp desk_bar_damage
-
 ; bar_paint: the bar, within the clip
 bar_paint:
     push rbx
@@ -2186,43 +2812,17 @@ bar_paint:
     add rax, [m_bar_h]
     shr rax, 1
     mov r13, rax
-    call bar_mark                       ; the mark
-    mov rdi, [m_bar_pad]                ; then the app in front, its name
-    lea rdi, [rdi * 2]
-    add rdi, [m_mark]
-    call bar_app_name
-    mov rdx, rax
-    mov rsi, r13
-    mov ecx, [th_c + TC_TEXT]
-    mov r8d, [f_title]
-    call uf_text
-    ; at the right: the time, then what the system is doing
-    call bar_clock
-    lea rdi, [bar_clock_text]
-    mov esi, [f_body]
-    call uf_width
-    mov rdi, [scr_w]
-    sub rdi, [m_bar_pad]
-    sub rdi, rax
-    mov r12, rdi
+    call bar_layout                     ; where each thing is
+    call bt_paint                       ; the open menu's title lit, the app,
+    call bar_mark                       ; the menus; the mark
+    mov rdi, [bar_clock_x]              ; at the right: the time,
     mov rsi, r13
     lea rdx, [bar_clock_text]
     mov ecx, [th_c + TC_TEXT]
     mov r8d, [f_body]
     call uf_text
-    lea rdi, [bar_status]
-    mov esi, [f_body]
-    call uf_width
-    mov rdi, r12
-    sub rdi, [m_bar_pad]
-    sub rdi, [m_bar_pad]
-    sub rdi, rax
-    mov rsi, r13
-    lea rdx, [bar_status]
-    mov ecx, [th_c + TC_TEXT2]
-    mov r8d, [f_body]
-    call uf_text
-.out:
+    call st_paint                       ; and the battery, the network, the
+.out:                                   ; launcher
     pop r13
     pop r12
     pop rbx
@@ -2312,6 +2912,7 @@ bar_mark:
     ret
 
 ; bar_clock: bar_clock_text = the day and the time, as "Sat 18 Oct  14:05"
+; (desktop.clock: "2:05 PM" as 12-hour; nothing at all when it is off)
 bar_clock:
     push rax
     push rcx
@@ -2357,7 +2958,13 @@ bar_clock:
     lea rax, [month_names]
     lea r9, [rax + rcx * 4]
     lea rdi, [bar_clock_text]
-    SPRINTF rdi, "%s %u %s  %u:%02u", r8, qword [rtc_day], r9, qword [rtc_hour], qword [rtc_min]
+    mov byte [rdi], 0
+    cmp qword [cfg_vals + CFG_CLOCK * 8], 2
+    je .said
+    SPRINTF rdi, "%s %u %s  ", r8, qword [rtc_day], r9
+    add rdi, rax
+    call cfg_clock                      ; the time, as desktop.clock has it
+.said:
     pop r9
     pop r8
     pop rdi
@@ -2376,6 +2983,8 @@ desk_tick:
     mov [bar_minute], rax
     call desk_bar_damage
 .out:
+    call st_tick                        ; the battery and the network,
+    call wg_tick                        ; the widgets
     pop rax
     ret
 
@@ -2396,6 +3005,8 @@ win_app:
     je .system
     cmp rdi, [cpu_win]
     je .system
+    cmp rdi, [demo_win]
+    je .mandel
     xor ecx, ecx
 .each:
     cmp ecx, DOCK_APPS
@@ -2421,6 +3032,9 @@ win_app:
     jmp .out
 .system:
     mov eax, APP_SYSTEM
+    jmp .out
+.mandel:
+    mov eax, APP_MANDEL
     jmp .out
 .none:
     mov eax, -1
@@ -2502,7 +3116,7 @@ dock_layout:
     mov rdi, [rax + rbx * 8]
     test rdi, rdi
     jz .extra_next
-    test dword [rdi + WN_FLAGS], WF_CLOSING
+    test dword [rdi + WN_FLAGS], WF_CLOSING | WF_AWAY
     jnz .extra_next
     call win_app
     test eax, eax
@@ -2553,7 +3167,7 @@ dock_layout:
     mov rdi, [rax + rbx * 8]
     test rdi, rdi
     jz .min_next
-    test dword [rdi + WN_FLAGS], WF_SHOWN | WF_CLOSING
+    test dword [rdi + WN_FLAGS], WF_SHOWN | WF_CLOSING | WF_AWAY
     jnz .min_next
     cmp qword [rdi + WN_THUMB + SF_PTR], 0
     jne .has_thumb
@@ -2613,6 +3227,8 @@ dock_layout:
     inc rbx
     jmp .x
 .placed:
+    call dock_magnify                   ; magnified as it is now,
+    call dock_pane                      ; its glass,
     call dock_damage                    ; and where it is now
     pop r14
     pop r13
@@ -2620,7 +3236,8 @@ dock_layout:
     pop rbx
     ret
 
-; dock_running(EDI = an app) -> RAX = 1 if it has a window. Preserves others.
+; dock_running(EDI = an app) -> RAX = 1 if it has a window (not put away).
+; Preserves others.
 dock_running:
     push rcx
     push rdx
@@ -2632,7 +3249,7 @@ dock_running:
     mov rdi, [rax + rcx * 8]
     test rdi, rdi
     jz .next
-    test dword [rdi + WN_FLAGS], WF_CLOSING
+    test dword [rdi + WN_FLAGS], WF_CLOSING | WF_AWAY
     jnz .next
     call win_app
     cmp eax, edx
@@ -2651,44 +3268,67 @@ dock_running:
     pop rcx
     ret
 
-; dock_damage: the dock and the name over it. Preserves all.
+; dock_damage: the dock and the name over it, where they were drawn last
+; and where they are now. Preserves all.
 dock_damage:
+    push rax
     push rdi
     push rsi
     push rdx
     push rcx
+    push r8
     cmp qword [dock_w], 0
     je .out
-    xor edi, edi                        ; the width of the screen: a name
-    mov rsi, [m_dock_y]                 ; may stand past the dock's ends
-    sub rsi, [m_tip_h]
-    sub rsi, [m_tip_gap]
-    sub rsi, [m_tip_gap]
-    mov rdx, [scr_w]
-    mov rcx, [scr_h]
+    call dock_extent
+    mov rax, [dock_seen_x0]             ; with where it was drawn
+    mov [dock_seen_x0], rdi
+    cmp rax, rdi
+    jge .x0
+    mov rdi, rax
+.x0:
+    mov rax, [dock_seen_x1]
+    mov [dock_seen_x1], rdx
+    cmp rax, rdx
+    jle .x1
+    mov rdx, rax
+.x1:
+    mov rax, [dock_seen_y0]
+    mov [dock_seen_y0], rsi
+    cmp rax, rsi
+    jge .y0
+    mov rsi, rax
+.y0:
+    sub rdx, rdi
+    mov rcx, [scr_h]                    ; down to the screen's bottom
     sub rcx, rsi
-    call desk_damage
+    lea r8, [dock_gl]                   ; its own: its glass is as it was
+    call desk_damage_own
 .out:
+    pop r8
     pop rcx
     pop rdx
     pop rsi
     pop rdi
+    pop rax
     ret
 
-; dock_paint: the dock, within the clip
+; dock_paint: the dock, within the clip: its icons magnified round the
+; pointer (DI_MX, DI_MS), an app's bouncing as it starts
 dock_paint:
     push rbx
     push r12
     push r13
+    push r14
     cmp qword [dock_w], 0
     je .out
-    mov rdi, [dock_x]                   ; glass: blurred, tinted, outlined
+    mov rdi, [dock_mx0]                 ; glass: blurred, tinted, outlined
     mov rsi, [m_dock_y]
-    mov rdx, [dock_w]
+    mov rdx, [dock_mx1]
+    sub rdx, rdi
     mov rcx, [m_dock_h]
-    mov r8, [m_dock_r]
-    mov r9, [m_blur]
-    call gfx_frost
+    lea rax, [dock_gl]
+    mov r10, [m_dock_r]
+    call glass_paint
     mov r8d, [th_c + TC_DOCK]
     mov r9d, [th_c + TC_DOCK_A]
     mov r10, [m_dock_r]
@@ -2702,13 +3342,14 @@ dock_paint:
 .item:
     cmp rbx, [dock_n]
     jae .out
-    cmp rbx, [dock_sep]                 ; the line before the minimised
-    jne .icon
+    cmp rbx, [dock_sep]                 ; the line before the minimised:
+    jne .icon                           ; midway from the item before
     test rbx, rbx
     jz .icon
-    mov rdi, [r12 + DI_X]
-    sub rdi, [m_dock_space]
-    dec rdi
+    mov rdi, [r12 - DI_SIZE + DI_MX]
+    add rdi, [r12 - DI_SIZE + DI_MS]
+    add rdi, [r12 + DI_MX]
+    sar rdi, 1
     mov rsi, [m_dock_y]
     add rsi, [m_dock_pad]
     add rsi, [m_dock_pad]
@@ -2720,10 +3361,31 @@ dock_paint:
     mov r9d, 90
     call gfx_fill_a
 .icon:
+    cmp dword [r12 + DI_KIND], DK_MIN   ; a window going in or coming out:
+    jne .picture                        ; it is drawn as it moves
+    mov rax, [r12 + DI_WIN]
+    test dword [rax + WN_FLAGS], WF_ANIM
+    jnz .next
+.picture:
     mov rdx, [r12 + DI_ICON]
     cmp qword [rdx + SF_PTR], 0
     je .dot
-    mov rdi, [r12 + DI_X]               ; centred in its place
+    xor r13d, r13d                      ; R13: how far up, bouncing
+    cmp dword [r12 + DI_KIND], DK_APP
+    jne .alpha
+    mov eax, [r12 + DI_APP]
+    call dock_rise
+    mov r13, rax
+.alpha:
+    mov r8d, 256
+    cmp rbx, [dock_press]               ; held down: darker
+    jne .sized
+    mov r8d, 170
+.sized:
+    mov r14, [r12 + DI_MS]              ; R14: its side
+    cmp r14, [m_icon]
+    jne .scaled
+    mov rdi, [r12 + DI_MX]              ; as made: centred in its place
     mov rax, [m_icon]
     sub rax, [rdx + SF_W]
     sar rax, 1
@@ -2734,17 +3396,54 @@ dock_paint:
     sub rax, [rdx + SF_H]
     sar rax, 1
     add rsi, rax
-    mov r8d, 256
-    cmp rbx, [dock_press]               ; held down: darker
-    jne .draw
-    mov r8d, 170
-.draw:
+    sub rsi, r13
     call gfx_image
+    jmp .dot
+.scaled:
+    mov r9d, r8d                        ; magnified: from an app's big icon,
+    mov r8, rdx                         ; else its own scaled; centred in its
+    cmp dword [r12 + DI_KIND], DK_APP   ; place, on the icons' line
+    jne .from
+    mov eax, [r12 + DI_APP]
+    imul rax, rax, SF_SIZE
+    lea rcx, [app_icons_big]
+    add rax, rcx
+    cmp qword [rax + SF_PTR], 0
+    je .from
+    mov r8, rax
+.from:
+    mov rax, [rdx + SF_W]               ; the size: its own, scaled
+    imul rax, r14
+    xor edx, edx
+    div qword [m_icon]
+    mov rsi, rax                        ; (w)
+    mov rdx, [r12 + DI_ICON]
+    mov rax, [rdx + SF_H]
+    imul rax, r14
+    xor edx, edx
+    div qword [m_icon]
+    mov rcx, rax                        ; h
+    mov rdx, rsi                        ; w
+    mov rdi, r14
+    sub rdi, rdx
+    sar rdi, 1
+    add rdi, [r12 + DI_MX]
+    mov rsi, [m_dock_y]
+    add rsi, [m_dock_pad]
+    add rsi, [m_icon]
+    sub rsi, r14
+    mov rax, r14
+    sub rax, rcx
+    sar rax, 1
+    add rsi, rax
+    sub rsi, r13
+    mov r10d, 1
+    call pic_draw
 .dot:
     cmp qword [r12 + DI_RUN], 0
     je .next
-    mov rdi, [r12 + DI_X]
-    mov rax, [m_icon]
+    mov rdi, [r12 + DI_MX]
+    mov rax, [r12 + DI_MS]
     sub rax, [m_dot]
     sar rax, 1
     add rdi, rax
@@ -2763,6 +3462,7 @@ dock_paint:
     inc rbx
     jmp .item
 .out:
+    pop r14
     pop r13
     pop r12
     pop rbx
@@ -2779,6 +3479,13 @@ tip_paint:
     imul rbx, rbx, DI_SIZE
     lea rax, [dock_items]
     add rbx, rax
+    cmp dword [rbx + DI_KIND], DK_APP   ; not while it bounces, starting
+    jne .named
+    mov eax, [rbx + DI_APP]
+    lea rcx, [dock_bounce]
+    cmp qword [rcx + rax * 8], 0
+    jne .out
+.named:
     mov rdi, [rbx + DI_LABEL]
     mov esi, [f_body]
     call uf_width
@@ -2786,17 +3493,30 @@ tip_paint:
     lea rdx, [rax + 0]
     add rdx, [m_tip_pad]
     add rdx, [m_tip_pad]                ; the pill's
-    mov rdi, [rbx + DI_X]
-    mov rax, [m_icon]
+    mov rdi, [rbx + DI_MX]
+    mov rax, [rbx + DI_MS]
     sub rax, rdx
     sar rax, 1
     add rdi, rax
+    mov rax, [scr_w]                    ; on the screen
+    sub rax, rdx
+    cmp rdi, rax
+    jle .right
+    mov rdi, rax
+.right:
     test rdi, rdi
     jns .left
     xor edi, edi
 .left:
     mov r13, rdi
+    mov rsi, [m_dock_y]                 ; over the item's top, or the dock's
+    add rsi, [m_dock_pad]
+    add rsi, [m_icon]
+    sub rsi, [rbx + DI_MS]
+    cmp rsi, [m_dock_y]
+    jle .over
     mov rsi, [m_dock_y]
+.over:
     sub rsi, [m_tip_gap]
     sub rsi, [m_tip_h]
     mov rcx, [m_tip_h]
@@ -2829,23 +3549,32 @@ tip_paint:
     pop rbx
     ret
 
-; dock_at(RDI x, RSI y) -> RAX = the item there, CF if none. Preserves others.
+; dock_at(RDI x, RSI y) -> RAX = the item there (as magnified), CF if none.
+; Preserves others.
 dock_at:
     push rcx
     push rdx
-    cmp rsi, [m_dock_y]
-    jl .none
     xor ecx, ecx
     lea rdx, [dock_items]
 .each:
     cmp rcx, [dock_n]
     jae .none
-    mov rax, [rdx + DI_X]
+    mov rax, [rdx + DI_MX]
     cmp rdi, rax
     jl .next
-    add rax, [m_icon]
+    add rax, [rdx + DI_MS]
     cmp rdi, rax
-    jl .found
+    jge .next
+    mov rax, [m_dock_y]                 ; below its top, or the dock's
+    add rax, [m_dock_pad]
+    add rax, [m_icon]
+    sub rax, [rdx + DI_MS]
+    cmp rax, [m_dock_y]
+    jle .top
+    mov rax, [m_dock_y]
+.top:
+    cmp rsi, rax
+    jge .found
 .next:
     add rdx, DI_SIZE
     inc rcx
@@ -2859,6 +3588,67 @@ dock_at:
 .out:
     pop rdx
     pop rcx
+    ret
+
+; dock_spot(RDI = a window) -> RDI x, RSI y, RDX w, RCX h: its picture in
+; the dock, minimised; CF if it is not there. Preserves others but RAX.
+dock_spot:
+    push r8
+    xor ecx, ecx
+    lea r8, [dock_items]
+.each:
+    cmp rcx, [dock_n]
+    jae .none
+    cmp dword [r8 + DI_KIND], DK_MIN
+    jne .next
+    cmp [r8 + DI_WIN], rdi
+    je .found
+.next:
+    add r8, DI_SIZE
+    inc rcx
+    jmp .each
+.found:
+    mov rax, [r8 + DI_ICON]             ; its size (as magnified), centred
+    mov rdx, [rax + SF_W]               ; in its place, on the icons' line
+    mov rcx, [rax + SF_H]
+    test rdx, rdx
+    jz .square
+    test rcx, rcx
+    jnz .sized
+.square:
+    mov rdx, [m_icon]
+    mov rcx, rdx
+.sized:
+    push r9
+    mov r9, rdx
+    mov rax, rcx
+    imul rax, [r8 + DI_MS]
+    xor edx, edx
+    div qword [m_icon]
+    mov rcx, rax                        ; h
+    mov rax, r9
+    imul rax, [r8 + DI_MS]
+    xor edx, edx
+    div qword [m_icon]
+    mov rdx, rax                        ; w
+    pop r9
+    mov rdi, [r8 + DI_MS]
+    sub rdi, rdx
+    sar rdi, 1
+    add rdi, [r8 + DI_MX]
+    mov rsi, [r8 + DI_MS]
+    sub rsi, rcx
+    sar rsi, 1
+    add rsi, [m_dock_y]
+    add rsi, [m_dock_pad]
+    add rsi, [m_icon]
+    sub rsi, [r8 + DI_MS]
+    pop r8
+    clc
+    ret
+.none:
+    pop r8
+    stc
     ret
 
 ; dock_click(RAX = an item): what it is for
@@ -2881,23 +3671,38 @@ dock_click:
     jmp .out
 .app:
     mov edi, [rbx + DI_APP]
-    call app_front                      ; its windows, if it has any
+    call app_open
+.out:
+    pop rbx
+    ret
+
+; app_open(EDI = an app): its windows forward, if it has any; else it
+; starts (the dock's apps, the menus)
+app_open:
+    push rbx
+    mov ebx, edi
+    call app_front
     jnc .out
-    mov edi, [rbx + DI_APP]
-    cmp edi, APP_TERMINAL
+    cmp ebx, APP_TERMINAL
     je .terminal
-    cmp edi, APP_SYSTEM
+    cmp ebx, APP_SYSTEM                 ; built in: their windows are always
+    je .out                             ; there, put away or not
+    cmp ebx, APP_MANDEL
     je .out
-    imul rax, rdi, DA_SIZE
+    imul rax, rbx, DA_SIZE
     lea rcx, [dock_apps]
     mov rdi, [rcx + rax + DA_PROG]
     lea rsi, [str_empty]
     xor edx, edx
     mov ecx, 1                          ; not tied to a prompt
     call user_start
-    jmp .out
+    jc .out
+    jmp .bounce
 .terminal:
     call term_new
+.bounce:
+    mov edi, ebx                        ; its icon bounces as it starts
+    call dock_bounce_start
 .out:
     pop rbx
     ret
@@ -3019,8 +3824,18 @@ win_app_front:
 
 ; desk_hit(RDI x, RSI y) -> RAX = the window there (0: none), EDX = P_*,
 ; R8, R9 = the point in its client, ECX = the edges (P_GRIP) or the dock's
-; item (P_DOCK). Preserves RBX, RBP, R12-R15.
+; item (P_DOCK); full screen, that window's client everywhere. Preserves
+; RBX, RBP, R12-R15.
 desk_hit:
+    mov rax, [desk_screen]
+    test rax, rax
+    jz .desk
+    mov r8, rdi                         ; (its client's top left is the
+    mov r9, rsi                         ; screen's)
+    xor ecx, ecx
+    mov edx, P_CLIENT
+    ret
+.desk:
     push rbx
     push r12
     push r13
@@ -3164,6 +3979,11 @@ desk_press:
     push r12
     push r13
     mov r12d, edx
+    cmp qword [desk_screen], 0          ; (full screen: no bar, no menus)
+    jne .hit
+    call mn_press                       ; the bar's, or an open menu's?
+    jc .done
+.hit:
     mov rdi, [ptr_x]
     mov rsi, [ptr_y]
     call desk_hit
@@ -3175,8 +3995,11 @@ desk_press:
     je .dock
     test rbx, rbx
     jz .done
+    cmp rbx, [desk_screen]              ; (it has the keys, on top)
+    je .focused
     mov rdi, rbx
     call win_focus
+.focused:
     cmp edx, P_CLIENT
     je .client
     cmp r12d, 1                         ; the frame's parts: the left button
@@ -3245,6 +4068,8 @@ desk_press:
     mov rax, [rbx + WN_H]
     mov [drag_h0], rax
     and dword [rbx + WN_FLAGS], ~WF_ZOOMED
+    mov rdi, rbx
+    call zoom_tell
     jmp .done
 .client:
     mov [press_win], rbx
@@ -3273,6 +4098,7 @@ desk_press:
 
 ; desk_release(EDX = button)
 desk_release:
+    call mn_release                     ; over an open menu's item: it is done
     cmp edx, 1
     jne .press
     mov byte [drag_mode], DRAG_NONE
@@ -3384,6 +4210,7 @@ desk_motion:
     je .out
 .moved:
     and dword [rdi + WN_FLAGS], ~WF_ZOOMED
+    call zoom_tell
     jmp win_move
 .size:
     ; from where it was: each edge held follows the pointer
@@ -3444,6 +4271,8 @@ desk_motion:
 ; desk_hover: what is under the pointer, for the buttons that light and
 ; the dock's names
 desk_hover:
+    call mn_hover                       ; an open menu's item, or another menu
+    call dock_point                     ; the dock magnified round it
     push rbx
     mov rdi, [ptr_x]
     mov rsi, [ptr_y]
@@ -3509,12 +4338,36 @@ desk_wheel:
     pop rbx
     ret
 
-; desk_key(EAX = key code): to the window with the keys
+; desk_key(EAX = key code): to an open menu; else to the window with the
+; keys; with none, to the first shell, brought forward. Ctrl+meta+F is the
+; desk's: the window with the keys full screen, or back.
 desk_key:
+    cmp qword [mn_which], -1
+    jne mn_key
+    cmp eax, 'F' - 64
+    jne .key
+    mov cl, [kbd_got]
+    and cl, WM_CTRL | WM_META
+    cmp cl, WM_CTRL | WM_META
+    jne .key
+    mov rdi, [desk_focus]
+    test rdi, rdi
+    jnz win_screen_flip
+    ret
+.key:
     push rbx
     mov rbx, [desk_focus]
     test rbx, rbx
+    jnz .to
+    mov rbx, [con_first]
+    test rbx, rbx
     jz .out
+    mov rbx, [rbx + TW_WIN]
+    test rbx, rbx
+    jz .out
+    mov rdi, rbx
+    call win_focus
+.to:
     mov rdx, [rbx + WN_OPS]
     mov rdx, [rdx + OP_KEY]
     test rdx, rdx
@@ -3525,7 +4378,7 @@ desk_key:
     ret
 
 ; -----------------------------------------------------------------------------
-;  win [move|size|raise|min|close <n> ...]
+;  win [move|size|raise|min|zoom|screen|close <n> ...]
 ; -----------------------------------------------------------------------------
 cmd_win:
     push rbx
@@ -3536,6 +4389,13 @@ cmd_win:
     je .list
     call arg_split
     mov r12, rsi                        ; the verb
+    push rdi
+    mov rdi, r12
+    lea rsi, [str_win_speed]
+    call streq
+    pop rdi
+    test eax, eax
+    jnz .speed
     mov rsi, rdi
     call arg_split
     mov r13, rdi                        ; what follows the number
@@ -3573,6 +4433,11 @@ cmd_win:
     test eax, eax
     jnz .zoom
     mov rdi, r12
+    lea rsi, [str_win_screen]
+    call streq
+    test eax, eax
+    jnz .screen
+    mov rdi, r12
     lea rsi, [str_win_close]
     call streq
     test eax, eax
@@ -3606,6 +4471,12 @@ cmd_win:
     mov rdi, rbx
     call win_zoom
     jmp .said
+.screen:
+    test dword [rbx + WN_FLAGS], WF_RESIZE
+    jz .fixed
+    mov rdi, rbx
+    call win_screen_flip
+    jmp .said
 .close:
     test dword [rbx + WN_FLAGS], WF_CLOSE
     jz .stays
@@ -3616,7 +4487,12 @@ cmd_win:
     KLOG "desk: '%s' closes", rax
     jmp .out
 .asked:
+    test dword [rbx + WN_FLAGS], WF_AWAY
+    jnz .put_away
     KLOG "desk: '%s' is asked to close", rax
+    jmp .out
+.put_away:
+    KLOG "desk: '%s' is put away (its app in the dock brings it back)", rax
     jmp .out
 .said:
     mov rdi, rbx
@@ -3646,8 +4522,11 @@ cmd_win:
 .no_window:
     KLOG "desk: no window %u ('win' lists them)", rbx
     jmp .out
+.speed:
+    call ds_say
+    jmp .out
 .usage:
-    KLOG "usage: win [move <n> <x> <y> | size <n> <w> <h> | raise <n> | min <n> | zoom <n> | close <n>]"
+    KLOG "usage: win [move <n> <x> <y> | size <n> <w> <h> | raise <n> | min <n> | zoom <n> | screen <n> | close <n> | speed]"
 .out:
     pop r13
     pop r12
@@ -3684,10 +4563,16 @@ win_say:
     test dword [rbx + WN_FLAGS], WF_SHOWN
     jnz .state
     lea rdx, [str_win_hidden]
+    test dword [rbx + WN_FLAGS], WF_AWAY
+    jz .state
+    lea rdx, [str_win_away]
 .state:
     cmp rbx, [desk_focus]
     jne .say
     lea rdx, [str_win_focused]
+    cmp rbx, [desk_screen]
+    jne .say
+    lea rdx, [str_win_full]
 .say:
     lea rdi, [term_ops]                 ; a shell: how much it holds
     cmp [rbx + WN_OPS], rdi
@@ -3710,10 +4595,14 @@ str_win_size:   db 'size', 0
 str_win_raise:  db 'raise', 0
 str_win_min:    db 'min', 0
 str_win_zoom:   db 'zoom', 0
+str_win_screen: db 'screen', 0
 str_win_close:  db 'close', 0
+str_win_speed:  db 'speed', 0
 str_win_shown:  db 'shown', 0
 str_win_hidden: db 'minimised', 0
+str_win_away:   db 'away', 0
 str_win_focused: db 'focused', 0
+str_win_full:   db 'full screen', 0
 str_finder:     db 'Axiom', 0
 str_empty:      db 0
 align 4
@@ -3739,6 +4628,7 @@ dock_apps:
     dq str_app_paint, str_prog_paint, icon_paint
     dq str_app_settings, str_prog_settings, icon_settings
     dq str_app_system, 0, icon_system
+    dq str_app_mandel, 0, icon_mandel
 str_app_terminal: db 'Terminal', 0
 str_app_files:  db 'Files', 0
 str_app_notes:  db 'Notes', 0
@@ -3779,6 +4669,11 @@ m_dock_gap:     resq 1                  ; under the dock,
 m_dock_r:       resq 1                  ; its corners,
 m_dock_h:       resq 1
 m_dock_y:       resq 1                  ; its top
+m_dock_top:     resq 1                  ; its icons' highest, magnified
+m_icon_big:     resq 1                  ; an icon, magnified the most
+m_dock_reach:   resq 1                  ; how far the magnifying reaches
+m_dock_ext:     resq 1                  ; how far the glass grows each way
+m_bounce:       resq 1                  ; how high an icon bounces
 m_dot:          resq 1                  ; an app that runs
 m_work_y1:      resq 1                  ; where windows that fill stop
 m_blur:         resq 1                  ; the glass's blur
@@ -3788,10 +4683,19 @@ m_tip_gap:      resq 1
 m_bar_pad:      resq 1
 m_gap:          resq 1                  ; between windows placed
 m_mark:         resq 1                  ; Axiom's mark in the bar
+ds_frames:      resq 1                  ; 'win speed': frames composed,
+ds_cycles:      resq 1                  ; the time it took,
+ds_max:         resq 1                  ; the longest,
+ds_px:          resq 1                  ; pixels composed,
+ds_parts:       resq DS_PARTS           ; the time by part (cleared with those)
+ds_share:       resq DS_PARTS
+ds_last:        resq 1
 f_body:         resd 1                  ; fonts: text,
 f_title:        resd 1                  ; titles,
 f_small:        resd 1                  ; small
 alignb 8
+alignb 8
+dock_gl:        resb GL_SIZE            ; the dock's glass
 sh_focus:       resb SH_SIZE            ; the shadow of the window with the keys
 sh_other:       resb SH_SIZE            ; of the others
 bar_sf:         resb SF_SIZE            ; the menu bar's glass
@@ -3799,6 +4703,8 @@ desk_wins:      resq DESK_MAX           ; by slot
 desk_z:         resq DESK_MAX           ; bottom to top
 desk_zn:        resq 1
 desk_focus:     resq 1                  ; the window with the keys
+desk_screen:    resq 1                  ; the window full screen, 0 if none:
+                                        ; shown, on top, with the keys
 desk_focus_n:   resq 1                  ; how many times the keys have moved
 desk_next_id:   resq 1
 hover_win:      resq 1                  ; the window whose buttons the pointer is on
@@ -3828,6 +4734,5 @@ dock_w:         resq 1
 dock_items:     resb DOCK_MAX * DI_SIZE
 app_icons:      resb DOCK_APPS * SF_SIZE
 bar_minute:     resq 1
-bar_status:     resb 160
 bar_clock_text: resb 64
 light_pts:      resd 32

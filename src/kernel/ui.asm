@@ -200,6 +200,11 @@ ui_init:
     sub rcx, [fr_b]
     call term_open
     mov [con_first], rax
+    test rax, rax                       ; put away: a clean desktop, until
+    jz .no_first                        ; the dock or a key brings it
+    mov rdi, [rax + TW_WIN]
+    call win_put_away
+.no_first:
     pop rbx
     ret
 
@@ -263,10 +268,11 @@ ui_ready:
     mov rdx, [left_w]
     mov rcx, [sys_h]
     call ui_client
-    mov r10d, WF_RESIZE
+    mov r10d, WF_RESIZE | WF_CLOSE
     lea r11, [str_app_system]
     call win_new
     mov [sys_win], rax
+    call .away
     lea rdi, [cpu_ops]
     lea rsi, [str_t_processors]
     mov r8, [right_x]
@@ -274,10 +280,11 @@ ui_ready:
     mov rdx, [right_w]
     mov rcx, [cores_h]
     call ui_client
-    mov r10d, WF_RESIZE
+    mov r10d, WF_RESIZE | WF_CLOSE
     lea r11, [str_app_system]
     call win_new
     mov [cpu_win], rax
+    call .away
     lea rdi, [demo_base]                ; the demo's title
     cmp byte [mandel_ok], 0
     je .no_avx
@@ -294,13 +301,28 @@ ui_ready:
     mov rdx, [right_w]
     mov rcx, [demo_h]
     call ui_client
-    mov r10d, WF_RESIZE
+    mov r10d, WF_RESIZE | WF_CLOSE
     lea r11, [str_app_mandel]
     call win_new
     mov [demo_win], rax
+    call .away
     pop r12
     pop rbx
     ret
+; RAX = a window made, or 0: put away until the dock brings it
+.away:
+    test rax, rax
+    jz .none
+    mov rdi, rax
+    call win_put_away
+.none:
+    ret
+
+; ui_put_away (OP_ASK, RBX = window): a built-in window's close button puts
+; it away; the dock brings it back
+ui_put_away:
+    mov rdi, rbx
+    jmp win_put_away
 
 ; -----------------------------------------------------------------------------
 ;  The demo's window
@@ -925,97 +947,21 @@ ui_tile_label:
     ret
 
 ; -----------------------------------------------------------------------------
-;  ui_refresh: fresh telemetry, the header summary and the tiles
+;  ui_refresh: fresh telemetry, and the tiles
 ; -----------------------------------------------------------------------------
 ui_refresh:
     push rbx
-    push r12
-    push r13
-    push r14
-    call telemetry_sample_all
     call cpu_package_power
-    xor r12d, r12d                      ; sum of MHz
-    xor r13d, r13d                      ; CPUs reporting a clock
-    xor r14d, r14d                      ; hottest
-    xor ecx, ecx
-.sum:
-    cmp ecx, [cpu_count]
-    jae .summed
-    PERCPU rbx, rcx
-    cmp qword [rbx + PC_ONLINE], 0
-    je .sum_next
-    mov rax, [rbx + PC_MHZ]
-    test rax, rax
-    jz .temp
-    add r12, rax
-    inc r13
-.temp:
-    mov rax, [rbx + PC_TEMP]
-    cmp rax, r14
-    cmova r14, rax
-.sum_next:
-    inc ecx
-    jmp .sum
-.summed:
-    mov rax, r12
-    test r13, r13
-    jz .avg_done
-    xor edx, edx
-    div r13
-.avg_done:
-    mov r12, rax                        ; average MHz (0 = unknown)
-    call uptime_ms
-    xor edx, edx
-    mov ecx, 1000
-    div rcx
-    xor edx, edx
-    mov ecx, 60
-    div rcx
-    mov r8, rdx                         ; seconds
-    xor edx, edx
-    div rcx
-    mov r9, rdx                         ; minutes
-    mov r10, rax                        ; hours
-    mov rax, [rapl_mw]
-    xor edx, edx
-    mov ecx, 100
-    div rcx
-    mov r11, rax                        ; tenths of a watt
-    lea rdi, [ui_buf]
-    mov eax, [cpus_online]
-    SPRINTF rdi, {"%u threads ", G_MIDDOT, " "}, rax
-    add rdi, rax
-    test r12, r12
-    jz .no_clock
-    SPRINTF rdi, {"avg %u MHz ", G_MIDDOT, " "}, r12
-    add rdi, rax
-.no_clock:
-    test r14, r14
-    jz .no_heat
-    SPRINTF rdi, {"max %u", G_DEGREE, "C ", G_MIDDOT, " "}, r14
-    add rdi, rax
-.no_heat:
-    test r11, r11
-    jz .no_power
-    SPRINTF rdi, {"package %t W ", G_MIDDOT, " "}, r11
-    add rdi, rax
-.no_power:
-    SPRINTF rdi, "up %u:%02u:%02u", r10, r9, r8
-
-    lea rsi, [ui_buf]                   ; at the right of the bar
-    call desk_status
     mov rbx, [cpu_win]                  ; the tiles, if they are seen
     test rbx, rbx
     jz .out
     test dword [rbx + WN_FLAGS], WF_SHOWN
     jz .out
-    call cpu_paint
+    call telemetry_sample_all           ; each CPU's clock and heat, for them
+    call cpu_paint                      ; (waking every CPU only then)
     mov rdi, rbx
     call win_damage_all
 .out:
-    pop r14
-    pop r13
-    pop r12
     pop rbx
     ret
 
@@ -1175,9 +1121,9 @@ str_l_network:      db 'Network', 0
 str_l_isa:          db 'ISA', 0
 str_l_boot:         db 'Boot', 0
 align 8
-sys_ops:        dq sys_paint, 0, 0, 0, 0, 0, 0
-cpu_ops:        dq cpu_paint, 0, 0, 0, 0, 0, 0
-demo_ops:       dq demo_paint, 0, demo_click, demo_wheel, 0, 0, 0
+sys_ops:        dq sys_paint, 0, 0, 0, 0, 0, ui_put_away
+cpu_ops:        dq cpu_paint, 0, 0, 0, 0, 0, ui_put_away
+demo_ops:       dq demo_paint, 0, demo_click, demo_wheel, 0, 0, ui_put_away
 info_labels:
     dq str_l_machine, str_l_firmware, str_l_cpu, str_l_cores, str_l_clocks
     dq str_l_memory, str_l_display, str_l_acpi, str_l_pci, str_l_storage

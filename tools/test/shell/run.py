@@ -18,8 +18,9 @@ the next one's, and checks what each printed:
     a quote not closed, '&' (not yet);
   - what prints, piped as lines ('echo hi | count'); cpus, mem, threads,
     tasks as records, and 'tasks stop' refusing the kernel's own task;
+    heat: no sensor in QEMU, then 'heat simulate' read at 47 C;
   - programs by name, case aside, and by path; each given only what its
-    header wants, and what +net, +store, +desk grant for one run; '&' runs
+    header wants, and what +net, +store, +desk, +settings grant for one run; '&' runs
     one in the background, ctrl+C stops only the one in front, 'tasks stop'
     takes a name; a program's exit code is what && and || see;
   - afterwards, the stick's FAT is checked from here: no damage, and the
@@ -169,7 +170,7 @@ STEPS = [
     ("files remove old", lambda l: l == ["removed old"], "files remove, the folder emptied"),
     ("files old", said("nothing called 'old' there"), "the folder is gone"),
     ("files /EFI/AXIOM | to text > list.txt", lambda l: re.fullmatch(
-        r"wrote \d+ B to list\.txt", l[0] if l else "") is not None, "> list.txt"),
+        r"wrote (\d+ B|[\d.]+ KiB) to list\.txt", l[0] if l else "") is not None, "> list.txt"),
     ("cpus | count >> list.txt", lambda l: l == ["added 2 B to list.txt"], ">> list.txt"),
     ("files /EFI/AXIOM | first 2 | to json > list.json", said("to list.json"),
      "to json > list.json"),
@@ -215,6 +216,11 @@ STEPS = [
     ("cpus | count", lambda l: l == ["4"], "cpus | count: 4"),
     ("cpus | pick cpu kind | to json", lambda l: len(json.loads("\n".join(l))) == 4 and
      set(json.loads("\n".join(l))[0]) == {"cpu", "kind"}, "cpus | pick | to json"),
+    ("heat", said("heat: no reading (no digital thermal sensor here)"), "heat: QEMU has no sensor"),
+    ("heat simulate", said("heat: simulated from now on: 53 below a TjMax of 100, 47 C"),
+     "heat simulate: a sensor where there is none"),
+    ("heat", said("heat: 47 C (simulated, 'heat simulate'; TjMax 100 C)"),
+     "heat: the simulated sensor, read through the same decoding"),
     ("mem | pick usable free", lambda l: set(record(l)) == {"usable", "free"},
      "mem | pick usable free: one record, two fields"),
     ("mem kinds | where kind = conventional | count", lambda l: l == ["1"],
@@ -259,16 +265,19 @@ PROGRAMS_STEPS = [
     ("+net +desk hello", said("hello: given: net desk"), "+net +desk: granted, for that run",
      LINE),
     ("+files hello", said("hello: given: files"), "+files: granted, for that run", LINE),
+    ("+settings hello", said("hello: given: settings"), "+settings: granted, for that run",
+     LINE),
     ("hello", said("hello: given: nothing"), "and only for that run", LINE),
     ("HELLO", said("run: HELLO exited with 0"), "its name in any case", LINE),
     ("/EFI/AXIOM/HELLO.AXE by path", said("hello: arguments: by path"), "a program by its path",
      LINE),
     ("run hello via run", said("hello: arguments: via run"), "run <program>, as its name", LINE),
     ("+bogus hello", said("'+bogus' is not something a program can be given; there are +net, "
-                          "+store, +desk, +files and +sound"), "+bogus: not a capability"),
-    ("+net files", said("+net, +store, +desk, +files and +sound are for programs; 'files' is a "
-                        "command"), "+net before a command: no"),
-    ("+net", said("+net, +store, +desk, +files and +sound come before a program's name"),
+                          "+store, +desk, +files, +settings and +sound"), "+bogus: not a capability"),
+    ("+net files", said("+net, +store, +desk, +files, +settings and +sound are for programs; "
+                        "'files' is a command"), "+net before a command: no"),
+    ("+net", said("+net, +store, +desk, +files, +settings and +sound come before a program's "
+                  "name"),
      "+net alone: no"),
     ("files &", said("'&' is for programs; 'files' is a command"), "& after a command: no"),
     ("hello | count &", said("a program in the background has no | or > after it"),

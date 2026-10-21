@@ -1092,6 +1092,30 @@ dm_walk:
 ; domain's devices; a page mapped twice must be unmapped twice. A domain of
 ; 0 does nothing. Preserves others.
 iommu_map:
+    call iommu_map_pages
+    jc .out
+    call iommu_cm_forget
+.out:
+    ret
+
+; iommu_cm_forget(RDI = domain): a unit that caches what is not there (QEMU's
+; caching mode) forgets the domain, so the pages just mapped are seen.
+; Preserves all.
+iommu_cm_forget:
+    cmp byte [iommu_cm], 0
+    je .out
+    test rdi, rdi
+    jz .out
+    push rsi
+    xor esi, esi
+    call iommu_forget
+    pop rsi
+.out:
+    ret
+
+; iommu_map_pages: iommu_map, but a unit in caching mode not yet told
+; (iommu_cm_forget, once for many)
+iommu_map_pages:
     test rdi, rdi
     jz .nothing
     push rax
@@ -1150,12 +1174,6 @@ iommu_map:
     lea rdi, [r12 + DM_LOCK]
     call spin_unlock
     popfq
-    cmp byte [iommu_cm], 0              ; a unit that caches what is not there
-    je .ok
-    mov rdi, r12
-    xor esi, esi
-    call iommu_forget
-.ok:
     clc
     jmp .out
 .oom:
@@ -1182,10 +1200,37 @@ iommu_map:
 ; it (each once the last map holding it is undone), and out of every unit's
 ; IOTLB before this returns. Preserves all.
 iommu_unmap:
-    test rdi, rdi
-    jz .nothing
     push rax
     push rcx
+    call iommu_unmap_pages
+    call iommu_unmap_forget
+    pop rcx
+    pop rax
+    ret
+
+; iommu_unmap_forget(RDI = domain, RAX = pages cleared, RCX = the first): out
+; of every unit's IOTLB, that page alone, or the whole domain if more.
+; Preserves all.
+iommu_unmap_forget:
+    test rax, rax
+    jz .out
+    push rsi
+    mov rsi, rcx
+    cmp rax, 1
+    je .forget
+    xor esi, esi
+.forget:
+    call iommu_forget
+    pop rsi
+.out:
+    ret
+
+; iommu_unmap_pages: iommu_unmap, but the IOTLB not yet told -> RAX = pages
+; cleared, RCX = the first (for iommu_unmap_forget). Preserves others.
+iommu_unmap_pages:
+    xor eax, eax
+    test rdi, rdi
+    jz .nothing
     push rdx
     push rsi
     push rdi
@@ -1246,24 +1291,14 @@ iommu_unmap:
     lea rdi, [r12 + DM_LOCK]
     call spin_unlock
     popfq
-    test r9, r9
-    jz .out
-    mov rdi, r12                        ; one page: just it; more: the domain
-    mov rsi, rdx
-    cmp r9, 1
-    je .forget
-    xor esi, esi
-.forget:
-    call iommu_forget
-.out:
+    mov rax, r9
+    mov rcx, rdx
     pop r12
     pop r9
     pop r8
     pop rdi
     pop rsi
     pop rdx
-    pop rcx
-    pop rax
 .nothing:
     ret
 
@@ -1348,13 +1383,16 @@ iommu_map_va:
     jc .fail
     mov rsi, rax
     mov edx, 4096
-    call iommu_map
+    call iommu_map_pages
     jc .fail
     add r9, 4096
     jmp .page
 .ok:
     clc
 .fail:
+    pushfq
+    call iommu_cm_forget                ; once for them all
+    popfq
     pop r9
     pop r8
     pop rsi
@@ -1373,11 +1411,15 @@ iommu_unmap_va:
     push rax
     push rdx
     push rsi
+    push rcx
     push r8
     push r9
+    push r10
+    push r11
     lea r8, [rsi + rdx]
     mov r9, rsi
     and r9, -4096
+    xor r10d, r10d                      ; R10 = pages cleared, R11 = the first
 .page:
     cmp r9, r8
     jae .out
@@ -1388,13 +1430,26 @@ iommu_unmap_va:
     jc .next
     mov rsi, rax
     mov edx, 4096
-    call iommu_unmap
+    call iommu_unmap_pages
+    test rax, rax
+    jz .next
+    test r10, r10
+    jnz .counted
+    mov r11, rcx
+.counted:
+    add r10, rax
 .next:
     add r9, 4096
     jmp .page
 .out:
+    mov rax, r10                        ; the IOTLB told once for them all
+    mov rcx, r11
+    call iommu_unmap_forget
+    pop r11
+    pop r10
     pop r9
     pop r8
+    pop rcx
     pop rsi
     pop rdx
     pop rax

@@ -88,6 +88,9 @@ isr_common:
     push r14
     push r15
     cld
+    cmp dword [gs:PC_TLB_LAZY], 0       ; woken from the idle HLT: a shootdown
+    jne .lazy                           ; that let it sleep is answered first
+.awake:
     mov rbp, rsp                        ; RBP = frame
     and rsp, -16
     mov rdi, rbp
@@ -113,6 +116,10 @@ isr_common:
     jmp .return
 .exception:
     call exception_dispatch
+    jmp .return
+.lazy:
+    call tlb_wake
+    jmp .awake
 .return:
     test byte [rbp + FR_CS], 3
     jz .restore
@@ -241,6 +248,8 @@ panic:
     call log_panic                      ; onto the boot stick, if that is safe
     cmp byte [harness_on], 0
     jne harness_crashed                 ; a test run: its log kept, and a restart
+    cmp byte [upd_trial], 0
+    jne update_crashed                  ; a new kernel on trial: the same, and the kept one
 .halt:
     cli
     hlt

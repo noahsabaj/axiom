@@ -63,8 +63,8 @@ sh_echo:
     jmp con_putc
 
 ; shell_wait: the command runs on (a fetch); the prompt of the terminal it
-; prints to waits for shell_resume, and keys but ctrl+C are ignored
-; meanwhile. Preserves all.
+; prints to waits for shell_resume. Keys typed meanwhile are kept, and typed
+; once it is back (ctrl+C stops it, and drops them). Preserves all.
 shell_wait:
     push rax
     call con_target
@@ -76,8 +76,9 @@ shell_wait:
     ret
 
 ; shell_resume: what the prompt of the terminal this thread prints to
-; waited for is over: the prompt comes back, or what was left of the line
-; runs, from the main loop (shell_service). Preserves all.
+; waited for is over: what was left of the line runs, or the prompt comes
+; back and the keys typed meanwhile after it, from the main loop
+; (shell_service), where the keys come too. Preserves all.
 shell_resume:
     push rax
     call con_target
@@ -85,13 +86,6 @@ shell_resume:
     jz .out
     cmp byte [rax + TW_SH_WAIT], 0
     je .out
-    cmp byte [rax + TW_SH_REST], 0
-    jne .rest
-    mov byte [rax + TW_SH_WAIT], 0
-    mov byte [rax + TW_SH_FAILED], 0    ; (nothing after it to know)
-    call shell_prompt
-    jmp .out
-.rest:
     mov byte [rax + TW_SH_WAIT], 2
     mov byte [shell_pending], 1
     push rdi
@@ -132,13 +126,18 @@ shell_service:
     ret
 
 ; shell_rest: what was left of the line, in the terminal this thread prints
-; to (TW_SH_REST)
+; to (TW_SH_REST); then the prompt, and the keys typed meanwhile
 shell_rest:
     push rbx
     call con_target
     mov rbx, rax
     test rbx, rbx
     jz .out
+    cmp byte [rbx + TW_SH_REST], 0
+    jne .rest
+    mov byte [rbx + TW_SH_FAILED], 0    ; (nothing after it to know)
+    jmp .prompt
+.rest:
     lea rdi, [sh_line]
     lea rsi, [rbx + TW_SH_REST]
     mov ecx, LINE_MAX + 1
@@ -157,8 +156,38 @@ shell_rest:
     jne .out
 .prompt:
     call shell_prompt
+    call sh_ahead
 .out:
     pop rbx
+    ret
+
+; sh_ahead(RBX = a terminal, its prompt back): the keys typed while its
+; command ran, typed now, until a command runs on again (the rest kept for
+; then). Preserves RBX.
+sh_ahead:
+    push r12
+    xor r12d, r12d
+.next:
+    cmp r12d, [rbx + TW_AHEAD_N]
+    jae .all
+    cmp byte [rbx + TW_SH_WAIT], 0
+    jne .later
+    movzx edi, byte [rbx + TW_AHEAD + r12]
+    inc r12d
+    call shell_key
+    jmp .next
+.later:
+    mov ecx, [rbx + TW_AHEAD_N]         ; what is left, to the front
+    sub ecx, r12d
+    mov [rbx + TW_AHEAD_N], ecx
+    lea rdi, [rbx + TW_AHEAD]
+    lea rsi, [rdi + r12]
+    rep movsb
+    jmp .out
+.all:
+    mov dword [rbx + TW_AHEAD_N], 0
+.out:
+    pop r12
     ret
 
 ; sh_secret(RDI = line) -> CF if it sets a secret ('claude key <key>'):
@@ -224,7 +253,7 @@ shell_key:
     cmp eax, 3                          ; ctrl+C, always
     je .cancel
     cmp byte [rbx + TW_SH_WAIT], 0
-    jne .out
+    jne .ahead
     cmp eax, 10
     je .enter
     cmp eax, 8
@@ -281,9 +310,26 @@ shell_key:
     mov dword [rbx + TW_SH_LEN], 0
     call shell_prompt
     jmp .out
+.ahead:                                 ; a command runs on: kept for the
+    cmp eax, 8                          ; prompt (sh_ahead), the line's keys
+    je .keep
+    cmp eax, 10
+    je .keep
+    cmp eax, 32
+    jb .out
+    cmp eax, 126
+    ja .out
+.keep:
+    mov ecx, [rbx + TW_AHEAD_N]
+    cmp ecx, TW_AHEAD_MAX
+    jae .out
+    mov [rbx + TW_AHEAD + rcx], al
+    inc dword [rbx + TW_AHEAD_N]
+    jmp .out
 .cancel:
     mov byte [rbx + TW_SH_WAIT], 0      ; (the prompt comes back below)
-    mov byte [rbx + TW_SH_REST], 0      ; and the rest of the line is dropped
+    mov byte [rbx + TW_SH_REST], 0      ; and the rest of the line is dropped,
+    mov dword [rbx + TW_AHEAD_N], 0     ; and what was typed meanwhile
     mov rdi, rbx                        ; what this terminal started stops:
     call net_forget                     ; a ping, a lookup or a fetch,
     mov rdi, rbx
@@ -1135,7 +1181,7 @@ sh_head:
     mov r13, rsi
     mov r15d, edx
     mov dword [sh_grants], 0
-.grant:                                 ; +net, +store, +desk, +files, +sound: for a program
+.grant:                                 ; +net, +store, +desk, +files, +settings, +sound
     mov rsi, [r13]
     cmp byte [rsi], '+'
     jne .granted
@@ -1146,7 +1192,7 @@ sh_head:
     add r13, 8
     dec r12d
     jnz .grant
-    KLOG "+net, +store, +desk, +files and +sound come before a program's name"
+    KLOG "+net, +store, +desk, +files, +settings and +sound come before a program's name"
     stc
     jmp .out
 .granted:
@@ -1244,7 +1290,7 @@ sh_head:
     call user_start
     jmp .out
 .granted_command:
-    KLOG "+net, +store, +desk, +files and +sound are for programs; '%s' is a command", rax
+    KLOG "+net, +store, +desk, +files, +settings and +sound are for programs; '%s' is a command", rax
     stc
     jmp .out
 .background_command:
@@ -1287,7 +1333,7 @@ sh_grant:
     clc
     jmp .out
 .none:
-    KLOG "'+%s' is not something a program can be given; there are +net, +store, +desk, +files and +sound", rsi
+    KLOG "'+%s' is not something a program can be given; there are +net, +store, +desk, +files, +settings and +sound", rsi
     stc
 .out:
     pop rdi
@@ -1687,10 +1733,12 @@ cmd_info:
     pop rbx
     ret
 
-; cpus: each logical CPU, in the dashboard's order
+; cpus: each logical CPU, in the dashboard's order; its clock since last
+; asked, and its heat now
 cmd_cpus:
     push rbx
     push r12
+    call telemetry_sample_all
     COLUMN 'cpu', FT_TEXT
     COLUMN 'kind', FT_TEXT
     COLUMN 'apic', FT_INT
@@ -1892,7 +1940,12 @@ cmd_clear:
 
 cmd_uptime:
     call uptime_ms
-    KLOG "up %u ms since power-on", rax
+    mov rcx, rax
+    call load_info                      ; in hundredths
+    xor edx, edx
+    mov r8d, 100
+    div r8
+    KLOG "up %u ms since power-on; load %u.%02u (the last minute's average)", rcx, rax, rdx
     ret
 
 cmd_echo:
@@ -1926,9 +1979,11 @@ str_sh_store:   db 'store', 0
 str_sh_desk:    db 'desk', 0
 str_sh_files:   db 'files', 0
 str_sh_sound:   db 'sound', 0
+str_sh_settings: db 'settings', 0
 align 8
 sh_grants_names: dq str_sh_net, AW_NET, str_sh_store, AW_STORE, str_sh_desk, AW_DESK
-                dq str_sh_files, AW_FILES, str_sh_sound, AW_SOUND, 0, 0
+                dq str_sh_files, AW_FILES, str_sh_settings, AW_SETTINGS
+                dq str_sh_sound, AW_SOUND, 0, 0
 sh_escapable:   db ' "$|>;&\', 0x27, 0   ; what a \ takes as it is
 sh_tok_pipe:    db '|', 0
 sh_tok_gt:      db '>', 0
@@ -1984,14 +2039,17 @@ commands:
     VERB    'set',      cmd_set,      'set [name [value...]]: every variable ($name), one removed, or one set'
     COMMAND 'shell',    cmd_shell,    'a new shell, in a window of its own'
     COMMAND 'screen',   cmd_screen,   "what this shell's window shows, as text, to the serial log"
-    COMMAND 'win',      cmd_win,      'win [move <n> <x> <y> | size <n> <w> <h> | raise <n> | min <n> | zoom <n> | close <n>]: the windows'
+    COMMAND 'win',      cmd_win,      'win [move <n> <x> <y> | size <n> <w> <h> | raise <n> | min <n> | zoom <n> | screen <n> | close <n> | speed]: the windows'
+    COMMAND 'motion',   cmd_motion,   'motion [on | off | slow]: windows, the dock and menus moving (slow: ten times slower)'
     THING   'theme',    themes_actions, 'how the desktop looks: light or dark, its accent, its scale'
     COMMAND 'info',     cmd_info,     'what this machine is'
     VERB    'cpus',     cmd_cpus,     'each logical CPU: kind, core, clock, heat, work'
+    THING   'heat',     heat_actions, "the CPU's temperature now, from its package's sensor"
     THING   'power',    power_actions, 'what the processor draws and how it rests; how idle CPUs sleep; its bias'
     THING   'mem',      mem_actions,  'memory: what uses it, by firmware type, what an address is; a self-test'
     THING   'threads',  threads_actions, 'every thread; each CPU; a self-test of the scheduler; load to watch'
     THING   'tasks',    tasks_actions, 'every task: its threads and handles; one stopped'
+    THING   'settings', settings_actions, "the machine's settings: the look, the keyboard, the pointer, the network...; one changed, or put back"
     COMMAND 'objects',  cmd_objects,  'objects [test | audit | <task id>]: objects and tasks, the handles a task holds, the audit ring, or a self-test of capabilities'
     COMMAND 'rings',    cmd_rings,    'rings [test]: each ring, its entries and completions, and the thread that finishes requests; or a self-test'
     COMMAND 'run',      cmd_run,      'run <program> [arguments]: /EFI/AXIOM/<PROGRAM>.AXE in ring 3, as its name alone runs it (for one a command hides: run net)'
@@ -2023,12 +2081,15 @@ commands:
     COMMAND 'crypto',   cmd_crypto,   'check the TLS crypto against its test vectors, and time it'
     COMMAND 'log',      cmd_log,      'log [save|on|off]: AXIOM.LOG on the boot stick'
     COMMAND 'demo',     cmd_demo,     'pause or resume the Mandelbrot zoom'
-    COMMAND 'bench',    cmd_bench,    'one core against all of them'
+    THING   'bench',    bench_actions, 'what things cost, measured: boot, scheduler, memory, capabilities, drawing, files'
     COMMAND 'uptime',   cmd_uptime,   'time since power-on'
     COMMAND 'echo',     cmd_echo,     'echo <words>: them, as a line'
     COMMAND 'clear',    cmd_clear,    'clear the console (also ctrl+L)'
     COMMAND 'panic',    cmd_panic,    'panic [null|code|const|nx|stack|guard|twice|after|page|vm|thread]: test the crash screen, or a kind of memory fault'
     THING   'harness',  harness_actions, 'test runs on a machine no one is at (tools/hw/hp1.py): its script, its log'
+    THING   'update',   update_actions, 'a new kernel: tried at the next start, then kept, or given up on its own'
+    THING   'watchdog', watch_actions, 'the chipset resetting this machine when Axiom stops (a machine no one is at)'
+    THING   'battery',  battery_actions, "a laptop's battery: its charge; kept between 75% and 80% on its charger"
     COMMAND 'reboot',   cmd_reboot,   'restart the machine'
     COMMAND 'poweroff', cmd_poweroff, 'turn the machine off'
     dq 0, 0, 0, 0, 0
@@ -2061,6 +2122,12 @@ threads_actions:
 tasks_actions:
     ACTION  '',       tasks_list,   '', 'every task: who made it, its threads, handles, operations, refusals'
     ACTION  'stop',   tasks_stop,   '<id or program>...', 'programs stopped (by id, or each of that name), and what they started'
+    dq 0, 0, 0, 0, 0
+
+settings_actions:
+    ACTION  '',       settings_list, '[name | pattern]', 'every setting: name, value, default, kind, about; or one, with what it takes'
+    ACTION  'set',    settings_set,  '<name> <value>', 'changed, now, and kept on the boot stick'
+    ACTION  'reset',  settings_reset, '<name | pattern | all>...', 'back to the default'
     dq 0, 0, 0, 0, 0
 
 mem_type_names:

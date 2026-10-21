@@ -4,7 +4,7 @@
 ;
 ;  Colors have names (TC_*): the desktop and the windows draw with th_c +
 ;  TC_*, never with a color of their own, so a theme changes all of them.
-;  The accent (th_accent) is one of eight, each with a light and a dark
+;  The accent (th_accent) is one of nine, each with a light and a dark
 ;  shade. Text a terminal was given keeps the color it was written in (the
 ;  dark theme's COL_*); theme_color says what each of those is now.
 ;
@@ -12,8 +12,16 @@
 ;  as 1280x800 points, and a 1920x1080 one at 1.25 pixels a point. pt()
 ;  turns points into pixels. Measures in this file and desk.asm are points.
 ;
-;  The wallpaper is made, not stored: a gradient and soft light over it,
-;  computed at a quarter of the size, then drawn smooth and dithered.
+;  The wallpaper is made, not stored: wall.asm's mountains over a lake, or
+;  one of the gradients here (wall_grad: a gradient and soft light over it,
+;  computed at a quarter of the size, then drawn smooth and dithered), as
+;  desktop.wallpaper names.
+;
+;  The look, the accent, the scale and the wallpaper are settings
+;  (settings.asm: display.theme, display.accent, display.scale,
+;  desktop.wallpaper): kept on the stick, and changed from the shell's
+;  'settings set' or a Settings window as from here (cfg_theme,
+;  cfg_set_look). display.scale auto is th_auto_s4, this screen's own.
 ;
 ;  In the shell, 'theme' is a thing: theme (as it is), theme dark, theme
 ;  light, theme accent <name>, theme scale <1..2 in quarters: 4..8>.
@@ -35,12 +43,12 @@ WL_BOTTOM       equ 4
 WL_BLOBS        equ 8
 WL_SIZE         equ WL_BLOBS + WALL_BLOBS * WB_SIZE
 
-ACCENTS         equ 8
+ACCENTS         equ 9
 
 section .text
 
-; theme_init: the scale for this screen, and the dark theme with the blue
-; accent. Before desk_init.
+; theme_init: the scale for this screen, and the look the settings say
+; (after cfg_init). Before desk_init.
 theme_init:
     push rax
     push rcx
@@ -58,9 +66,9 @@ theme_init:
     jbe .high
     mov eax, 8
 .high:
+    mov [th_auto_s4], eax
     mov [ui_s4], eax
-    mov byte [th_mode], TH_DARK
-    mov byte [th_accent_i], 0
+    call cfg_theme                      ; th_mode, th_accent_i, th_wall, ui_s4
     call theme_load
     pop rdx
     pop rcx
@@ -141,9 +149,10 @@ theme_apply:
     jmp look_update                     ; and programs told
 
 ; -----------------------------------------------------------------------------
-;  The wallpaper, into wall_sf (the screen's size)
+;  wall_grad: one of the gradient wallpapers (walls: th_wall - 1), into
+;  wall_sf (the screen's size), for wall.asm's wall_make
 ; -----------------------------------------------------------------------------
-wall_make:
+wall_grad:
     push rbx
     push rbp
     push r12
@@ -171,10 +180,17 @@ wall_make:
     test rax, rax
     jz .out
     mov [wall_grid], rax
-    lea rbx, [wall_dark]
-    cmp byte [th_mode], TH_LIGHT
-    jne .params
-    lea rbx, [wall_light]
+    movzx eax, byte [th_wall]           ; desktop.wallpaper: 0 is wall.asm's
+    dec eax                             ; (a gradient's, from 1)
+    cmp eax, WALLS
+    jb .wall
+    xor eax, eax
+.wall:
+    shl eax, 1
+    movzx ecx, byte [th_mode]
+    add eax, ecx
+    lea rbx, [walls]
+    mov rbx, [rbx + rax * 8]
 .params:
     cvtsi2ss xmm8, qword [scr_w]
     cvtsi2ss xmm9, qword [scr_h]
@@ -441,10 +457,14 @@ theme_show:
 
 theme_dark:
     mov byte [th_mode], TH_DARK
-    jmp theme_changed
+    jmp theme_mode_set
 
 theme_light:
     mov byte [th_mode], TH_LIGHT
+theme_mode_set:
+    mov edi, CFG_THEME                  ; kept, as display.theme
+    movzx esi, byte [th_mode]
+    call cfg_set_look
     jmp theme_changed
 
 ; theme accent <name>
@@ -469,13 +489,17 @@ theme_set_accent:
     jmp .find
 .found:
     mov [th_accent_i], cl
+    mov edi, CFG_ACCENT                 ; kept, as display.accent
+    lea rax, [accent_colors]
+    mov esi, [rax + rcx * 8]
+    call cfg_set_look
     jmp theme_changed
 .unknown:
-    KLOG "theme: no accent '%s' (blue, purple, pink, red, orange, yellow, green, graphite)", rdi
+    KLOG "theme: no accent '%s' (blue, purple, pink, red, orange, yellow, green, teal, graphite)", rdi
     stc
     ret
 .usage:
-    KLOG "usage: theme accent <blue|purple|pink|red|orange|yellow|green|graphite>"
+    KLOG "usage: theme accent <blue|purple|pink|red|orange|yellow|green|teal|graphite>"
     stc
     ret
 
@@ -491,6 +515,9 @@ theme_set_scale:
     cmp eax, 8
     ja .usage
     mov [ui_s4], eax
+    mov edi, CFG_SCALE                  ; kept, as display.scale (1x: 1)
+    lea esi, [eax - 3]
+    call cfg_set_look
     jmp theme_changed
 .usage:
     KLOG "usage: theme scale <4..8>: pixels a point, in quarters (4: 1, 6: 1.5, 8: 2)"
@@ -504,7 +531,7 @@ theme_changed:
 
 section .rodata
 align 4
-f_0_25:         dd 0.25
+f_0_25:         dd 0.25                 ; for wall_grad
 f_0_75:         dd 0.75
 f_256:          dd 256.0
 f_1000:         dd 1000.0
@@ -561,7 +588,7 @@ theme_map:
     dd 0xF5F543, TC_T_YELLOW2
     dd -1, -1
 
-; the eight accents: dark shade, light shade
+; the nine accents (graphite last, as icons.asm has it): dark shade, light shade
 accent_colors:
     dd 0x0A84FF, 0x007AFF               ; blue
     dd 0xBF5AF2, 0xAF52DE               ; purple
@@ -570,11 +597,12 @@ accent_colors:
     dd 0xFF9F0A, 0xFF9500               ; orange
     dd 0xFFD60A, 0xFFCC00               ; yellow
     dd 0x30D158, 0x28CD41               ; green
+    dd 0x40C8E0, 0x30B0C7               ; teal
     dd 0x98989D, 0x8E8E93               ; graphite
 align 8
 accent_names:
     dq str_ac_blue, str_ac_purple, str_ac_pink, str_ac_red
-    dq str_ac_orange, str_ac_yellow, str_ac_green, str_ac_graphite
+    dq str_ac_orange, str_ac_yellow, str_ac_green, str_ac_teal, str_ac_graphite
 str_ac_blue:    db 'blue', 0
 str_ac_purple:  db 'purple', 0
 str_ac_pink:    db 'pink', 0
@@ -582,25 +610,56 @@ str_ac_red:     db 'red', 0
 str_ac_orange:  db 'orange', 0
 str_ac_yellow:  db 'yellow', 0
 str_ac_green:   db 'green', 0
+str_ac_teal:    db 'teal', 0
 str_ac_graphite: db 'graphite', 0
 
-; the wallpapers: night, a deep blue going violet, with lights of indigo,
-; teal and rose; day, a pale lilac going blue, with peach, sky and mint
+; the gradient wallpapers, as desktop.wallpaper's choices after the first
+; (mountains: wall.asm) have them (settings.asm, cfg_walls): for each, the
+; dark theme's and the light's
+WALLS           equ 5
+align 8
+walls:          dq grad_aurora_dark, grad_aurora_light            ; aurora
+                dq grad_plain_dark, grad_plain_light
+                dq grad_dusk, grad_dusk
+                dq grad_ocean, grad_ocean
+                dq grad_graphite, grad_graphite
+
+; aurora: night, a deep blue going violet, with lights of indigo, teal and
+; rose; day, a pale lilac going blue, with peach, sky and mint
 align 4
-wall_dark:
+grad_aurora_dark:
     dd 0x0B1030, 0x150A2A
     dd 180, 260, 520, 0x3B2FB0, 230
     dd 820, 220, 460, 0x0E7490, 200
     dd 560, 920, 560, 0x7C2D92, 210
     dd 980, 980, 380, 0xD9466F, 150
     dd 420, 480, 300, 0x1D4ED8, 110
-wall_light:
+grad_aurora_light:
     dd 0xEDE7FB, 0xDCEBFB
     dd 160, 220, 520, 0xFFD2B8, 230
     dd 840, 260, 460, 0xB8E0FF, 230
     dd 560, 940, 560, 0xD8C7FF, 220
     dd 960, 960, 380, 0xC4F1E1, 200
     dd 420, 520, 320, 0xFFE7C2, 120
+grad_plain_dark:                        ; one colour, no lights
+    dd COL_BG, COL_BG
+    times WALL_BLOBS dd 0, 0, 1, 0, 0
+grad_plain_light:
+    dd 0xE5E5EA, 0xE5E5EA
+    times WALL_BLOBS dd 0, 0, 1, 0, 0
+grad_dusk:                              ; violet into coral, a warm light low
+    dd 0x231C42, 0xC9736A
+    dd 780, 900, 520, 0xF2A65A, 120
+    dd 200, 200, 420, 0x4B2A7B, 140
+    times WALL_BLOBS - 2 dd 0, 0, 1, 0, 0
+grad_ocean:                             ; deep into shallow, light from above
+    dd 0x0A2342, 0x2C8BA6
+    dd 500, 0, 620, 0x3FB8C9, 110
+    dd 150, 950, 480, 0x06304F, 160
+    times WALL_BLOBS - 2 dd 0, 0, 1, 0, 0
+grad_graphite:
+    dd 0x1C1C1E, 0x58585E
+    times WALL_BLOBS dd 0, 0, 1, 0, 0
 
 section .data
 align 8
@@ -608,7 +667,7 @@ themes_actions:
     ACTION  '',       theme_show,   '', 'how the desktop looks: light or dark, its accent, its scale'
     ACTION  'dark',   theme_dark,   '', 'the dark look'
     ACTION  'light',  theme_light,  '', 'the light look'
-    ACTION  'accent', theme_set_accent, '<color>', 'the accent: blue, purple, pink, red, orange, yellow, green or graphite'
+    ACTION  'accent', theme_set_accent, '<color>', 'the accent: blue, purple, pink, red, orange, yellow, green, teal or graphite'
     ACTION  'scale',  theme_set_scale, '<4..8>', 'pixels a point, in quarters'
     dq 0, 0, 0, 0, 0
 
@@ -617,12 +676,13 @@ alignb 8
 ui_s4:          resd 1                  ; quarters of a pixel a point
 th_mode:        resb 1                  ; TH_*
 th_accent_i:    resb 1                  ; which accent
+th_wall:        resb 1                  ; which wallpaper: 0 mountains, else walls
 alignb 4
+th_auto_s4:     resd 1                  ; ui_s4 for this screen (display.scale auto)
 th_accent:      resd 1                  ; its color in this theme
 th_c:           resd TC_COUNT / 4
 alignb 8
-wall_sf:        resb SF_SIZE
-wall_grid:      resq 1
-wall_gw:        resq 1
-wall_gh:        resq 1
-wall_row:       resd (4096 / 4 + 4) * 3
+wall_grid:      resq 1                  ; wall_grad's: its grid of points,
+wall_gw:        resq 1                  ; how wide,
+wall_gh:        resq 1                  ; how tall
+wall_row:       resd (4096 / 4 + 4) * 3 ; a row of it, 8.8

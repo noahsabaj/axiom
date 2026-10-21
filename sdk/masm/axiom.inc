@@ -14,6 +14,7 @@ OT_NET          EQU 9  ; the network, to some hosts and ports (socket.asm)
 OT_SOCKET       EQU 10  ; a connection, or a port listened on (socket.asm)
 OT_DESK         EQU 11  ; the desktop: windows can be opened on it (window.asm)
 OT_WINDOW       EQU 12  ; a program's window (window.asm)
+OT_SETTINGS     EQU 13  ; the machine's settings (settings.asm)
 OT_FILES        EQU 14  ; files on FAT volumes, or in a folder (fscap.asm)
 OT_SOUND        EQU 15  ; the speakers: streams can be opened on them (sound.asm)
 OT_STREAM       EQU 16  ; a stream of sound, playing (sound.asm)
@@ -49,8 +50,11 @@ RT_DESK_WINDOW  EQU 1 SHL 8  ; the desktop: open windows on it
 RT_WIN_DRAW     EQU 1 SHL 8  ; a window: show what was drawn, title it
 RT_FS_READ      EQU 1 SHL 8  ; files: list folders, read files
 RT_FS_WRITE     EQU 1 SHL 9  ; write, make, rename, remove
+RT_FS_KERNEL    EQU 1 SHL 10  ; every volume: a new kernel (RO_FS_UPDATE)
 RT_SOUND_PLAY   EQU 1 SHL 8  ; the speakers: open streams on them
 RT_STREAM_PLAY  EQU 1 SHL 8  ; a stream: play it, wait on it
+RT_SET_READ     EQU 1 SHL 8  ; the settings: read them, wait for a change
+RT_SET_CHANGE   EQU 1 SHL 9  ; change them
 RT_ALL          EQU 0FFFFh
 E_BADH          EQU - 1  ; no such handle
 E_TYPE          EQU - 2  ; the wrong type of object
@@ -135,6 +139,8 @@ RO_NET_SHUT     EQU 28  ; handle = a socket: a FIN once what was
 RO_NET_SUB      EQU 29  ; handle = the network, handle2 + a0: a
 RO_WIN_SHOW     EQU 30  ; handle = a window, a0 = x, a1 = y, a2 =
 RO_WIN_TITLE    EQU 31  ; handle, handle2 + a0: a1 bytes of UTF-8, its title
+RO_SET_LIST     EQU 32  ; handle = the settings, into handle2 + a0,
+RO_SET_CHANGE   EQU 33  ; handle, a0 = which (its record's place),
 RO_DESK_LOOK    EQU 34  ; handle = the desktop -> a handle to the
 RO_FS_VOLUMES   EQU 35  ; handle, into handle2 + a0, a1 bytes at
 RO_FS_LIST      EQU 36  ; handle, handle2 + a0: a folder; into
@@ -146,7 +152,17 @@ RO_FS_RENAME    EQU 41  ; handle, handle2 + a0: a file or a folder,
 RO_FS_SUB       EQU 42  ; handle, handle2 + a0: a folder, a1 =
 RO_WIN_POINTER  EQU 43  ; handle = a window, a0 = PTRM_*: the
 RO_NET_ADDR     EQU 44  ; handle = a socket, into handle2 + a0:
-RO_COUNT        EQU 45
+RO_FS_UPDATE    EQU 45  ; handle = files, to every volume, with
+RO_WIN_ZOOM     EQU 46  ; handle = a window that may be resized,
+RO_COUNT        EQU 47
+UPD_STATE       EQU 0  ; -> UPS_*
+UPD_TRY         EQU 1  ; handle2 + a0: a kernel.bin's path, a2 =
+UPD_KEEP        EQU 2  ; on trial -> 0: kept, for every start
+UPD_RESTART     EQU 3  ; a2 = seconds, 1 to 60 -> 0: with a trial
+UPS_SLOT        EQU 0FFh  ; the kernel running: 'A', 'B'; 0 built in
+UPS_TRIAL       EQU 1 SHL 8  ; it is on trial, not kept yet
+UPS_KEPT_SHIFT  EQU 16  ; << the one kept: 'A', 'B'; 0 none
+UPS_NEXT_SHIFT  EQU 24  ; << the one the next start tries, or 0
 FS_PATH         EQU 256  ; a path's field
 FV_INDEX        EQU 0  ; a volume (RO_FS_VOLUMES): dword, its n in "vol<n>:"
 FV_FLAGS        EQU 4  ; dword FVF_*
@@ -156,7 +172,7 @@ FV_FREE         EQU 64  ; bytes free on it
 FV_SIZE         EQU 72
 FVF_WRITABLE    EQU 1  ; 'vol <n> rw' was said
 FVF_REMOVABLE   EQU 2  ; a stick, a card
-FVF_BOOT        EQU 4  ; the stick Axiom started from
+FVF_BOOT        EQU 4  ; the volume Axiom started from
 FE_LEN          EQU 0  ; a thing in a folder (RO_FS_LIST): dword, the record's bytes
 FE_ATTR         EQU 4  ; dword FEA_*
 FE_SIZE         EQU 8  ; bytes, 0 for a folder
@@ -171,6 +187,20 @@ FEA_DIR         EQU 1
 FEA_RO          EQU 2
 FEA_HIDDEN      EQU 4
 FEA_SYSTEM      EQU 8
+SI_NAME         EQU 0  ; 32 bytes, NUL-ended: display.theme ...
+SI_KIND         EQU 32  ; dword SK_*
+SI_FLAGS        EQU 36  ; dword SIF_*
+SI_VALUE        EQU 40  ; a choice's place, 0 or 1, a number,
+SI_DEFAULT      EQU 48
+SI_MIN          EQU 56  ; a number's or a zone's least,
+SI_MAX          EQU 64  ; most (a choice: how many there are),
+SI_STEP         EQU 72  ; and step
+SI_TEXT         EQU 80  ; 64 bytes: the value as the shell shows it
+SI_UNIT         EQU 144  ; 16 bytes: a number's unit (ms, ...)
+SI_CHOICES      EQU 160  ; 128 bytes: a choice's, or a colour's
+SI_SWATCHES     EQU 288  ; 16 dwords: a colour's swatches, 0xRRGGBB
+SI_ABOUT        EQU 352  ; 128 bytes: what it is
+SI_SIZE         EQU 512
 NETF_TLS        EQU 1
 NETF_INSECURE   EQU 2  ; with NETF_TLS: the certificate not checked
 NETF_LOOKUP     EQU 4  ; alone: the host only looked up; the socket
@@ -225,9 +255,11 @@ AXE_HDR         EQU 56
 AW_NET          EQU 1  ; the network (SB_NET)
 AW_STORE        EQU 2  ; its own names in the store (SB_STORE)
 AW_DESK         EQU 4  ; the desktop, to open windows on (SB_DESK)
+AW_SETTINGS     EQU 8  ; the settings, to read and change (SB_SETTINGS)
 AW_FILES        EQU 16  ; the files on every volume (SB_FILES)
 AW_SOUND        EQU 32  ; the speakers (SB_SOUND)
-AW_ALL          EQU 7 OR AW_FILES OR AW_SOUND
+AW_UPDATE       EQU 64  ; with AW_FILES: a new kernel (RT_FS_KERNEL)
+AW_ALL          EQU 15 OR AW_FILES OR AW_SOUND OR AW_UPDATE
 SB_RING         EQU 0  ; dword: a handle to the task's ring
 SB_RING_MEM     EQU 4  ; dword: to the ring's memory
 SB_CONSOLE      EQU 8  ; dword: to the console
@@ -238,6 +270,7 @@ SB_ARGS_LEN     EQU 32  ; dword
 SB_STORE        EQU 36  ; dword: to the store under "name/", or 0
 SB_NET          EQU 40  ; dword: to the network, or 0
 SB_DESK         EQU 44  ; dword: to the desktop, or 0
+SB_SETTINGS     EQU 48  ; dword: to the settings, or 0
 SB_FILES        EQU 52  ; dword: to the files, or 0
 SB_GIFT2        EQU 56  ; dword: a second thing it was given, or 0
 SB_SOUND        EQU 60  ; dword: to the speakers, or 0
@@ -267,6 +300,13 @@ SI_CPUS         EQU 1  ; CPUs running
 SI_RAM          EQU 2  ; bytes of memory Axiom has
 SI_RAM_FREE     EQU 3  ; of those, bytes free
 SI_UPTIME       EQU 4  ; milliseconds since power-on
+SI_BATTERY      EQU 5  ; the battery as last read (each minute), or E_EMPTY
+SI_BAT_PERCENT  EQU 0FFh  ; SI_BATTERY: its charge, in percent
+SI_BAT_PLUGGED  EQU 1 SHL 8  ; on its charger
+SI_BAT_HELD     EQU 1 SHL 9  ; kept between 75% and 80% ('battery hold')
+SI_BAT_MODE_SHIFT EQU 16  ; bits 19:16: 0 charging as the firmware likes, 2 run from the battery, 5 not charging
+SI_TEMP         EQU 6  ; the CPU's temperature now, degrees C (its package's sensor), or E_EMPTY
+SI_LOAD         EQU 7  ; the load average over the last minute, in hundredths
 SN_WRITE        EQU 0  ; dword: frames written, in all (the program's)
 SN_READ         EQU 4  ; dword: frames taken to play, in all
 SN_FRAMES       EQU 8  ; dword: the ring's, a power of two
@@ -293,6 +333,7 @@ WE_FOCUS        EQU 9  ; WE_CODE = 1: it has the keys now; 0: not
 WE_KEYDOWN      EQU 10  ; WNF_KEYS: a key went down, once (held, it
 WE_KEYUP        EQU 11  ; and came up (or one went down before it
 WE_LEAVE        EQU 12  ; WNF_HOVER: the pointer left it
+WE_ZOOM         EQU 13  ; WE_CODE = WZ_*: full screen, zoomed or
 WM_SHIFT        EQU 1  ; WE_KEY's WE_X: the modifiers held
 WM_CTRL         EQU 2
 WM_ALT          EQU 4
@@ -301,9 +342,13 @@ WNF_RESIZE      EQU 1  ; SYS_WINDOW_NEW: the user may resize it
 WNF_FULL        EQU 2  ; as WNF_RESIZE, and zoomed to begin with:
 WNF_KEYS        EQU 4  ; WE_KEYDOWN and WE_KEYUP too (games)
 WNF_HOVER       EQU 8  ; WE_MOVE without a button, and WE_LEAVE
+WNF_SCREEN      EQU 16  ; as WNF_RESIZE, and full screen to begin
 PTRM_ARROW      EQU 0  ; RO_WIN_POINTER: the arrow, as anywhere
 PTRM_HIDDEN     EQU 1  ; none over it (it draws its own)
 PTRM_GRAB       EQU 2  ; none, and held in its middle while it
+WZ_NORMAL       EQU 0  ; RO_WIN_ZOOM, WE_ZOOM: where it was put
+WZ_ZOOMED       EQU 1  ; the screen between the bar and the dock
+WZ_SCREEN       EQU 2  ; the whole screen, over all else, with
 WIN_MAX         EQU 4096  ; a side, at most
 TC_WINDOW       EQU 0  ; a window's own background, a terminal's
 TC_TITLE        EQU 4  ; the title bar of the window with the keys

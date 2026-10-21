@@ -75,6 +75,7 @@ start block:
 | (8) | | reserved for the settings, on their branch |
 | `AW_FILES` | 16 | every FAT volume |
 | `AW_SOUND` | 32 | the speakers, to open streams of sound on |
+| `AW_UPDATE` | 64 | with `AW_FILES`: `RT_FS_KERNEL` on that handle, a new kernel for the machine |
 
 The shell gives a program what it wants and no more. The user can grant
 more for one run: `+net hello`, `+files notes`. A program started by
@@ -197,7 +198,19 @@ Notes:
   RTC read at boot (taken as UTC) and kept by the TSC; `SI_CPUS` (1) is
   the CPUs running; `SI_RAM` (2) and `SI_RAM_FREE` (3) the bytes of memory
   Axiom has and of those free; `SI_UPTIME` (4) the milliseconds since
-  power-on. Anything else is `E_ARG`.
+  power-on; `SI_BATTERY` (5) a laptop's battery as last read (each
+  minute): its percent in bits 7:0, `SI_BAT_PLUGGED` (bit 8) on its
+  charger, `SI_BAT_HELD` (bit 9) kept between 75% and 80% (`battery
+  hold`), and HP's charge mode in bits 19:16 (0 as the firmware likes,
+  2 run from the battery, which counts as plugged, 5 not charging); or
+  `E_EMPTY` where there is no battery whose charge Axiom reads, or the
+  last reading failed; `SI_TEMP` (6) the CPU's temperature now, in
+  degrees C, from its package's digital thermal sensor (else the calling
+  CPU's core's), or `E_EMPTY` where there is none (QEMU; AMD's are not
+  read); `SI_LOAD` (7) the load average over the last minute, in
+  hundredths, as Unix's: every 5 s, the CPUs' busy time and the threads
+  waiting for one, folded into an exponential average. Anything else is
+  `E_ARG`.
 - **`SYS_SPAWN`**: the text is at most 255 bytes, and programs nest eight
   deep. The gifts move to the child before it runs. The child is the
   caller's own: the caller's task handle can `RO_KILL` it (`RO_JOIN` on
@@ -236,7 +249,8 @@ Each object type has its own `OT_*`:
 **Rights** (`RT_*`): three for any object, `RT_DUP` 1, `RT_GIVE` 2 and
 `RT_INFO` 4. The rest are by type, from bit 8: `RT_MEM_READ` and
 `RT_MEM_WRITE`, `RT_CH_SEND` and `RT_CH_RECV`, `RT_WIN_DRAW`, `RT_FS_READ`
-and `RT_FS_WRITE`, `RT_SOUND_PLAY` and `RT_STREAM_PLAY`, and so on.
+and `RT_FS_WRITE` (and `RT_FS_KERNEL`, for `RO_FS_UPDATE`), `RT_SOUND_PLAY`
+and `RT_STREAM_PLAY`, and so on.
 
 - `RO_DUP` derives a handle with the same rights or fewer, and an expiry
   (a TSC value, 0 for none) no later than its own.
@@ -377,8 +391,10 @@ requests still waiting with that data.
 | 42 | `RO_FS_SUB` | handle2 + a0: a folder, a1 = rights | a handle to that folder alone |
 | 43 | `RO_WIN_POINTER` | handle = a window, a0 = `PTRM_*` | |
 | 44 | `RO_NET_ADDR` | handle = a socket, into handle2 + a0: `NA_SIZE` bytes (`NA_*`) | 0, or `E_EMPTY` while it is looked up |
+| 45 | `RO_FS_UPDATE` | handle = files, to every volume, with `RT_FS_KERNEL`; a1 = `UPD_*` (see Files) | `UPS_*`, or 0 |
+| 46 | `RO_WIN_ZOOM` | handle = a window, a0 = `WZ_*` | 0, or `E_ARG` if it can't be resized |
 
-`RO_COUNT` is 45. Anything from there up is `E_ARG`.
+`RO_COUNT` is 47. Anything from there up is `E_ARG`.
 
 **Fixed fields**: a path (`FS_PATH`, 256 bytes), a store name (64), a host
 (256) or a pattern (64) is read at its full size from handle2 + a0,
@@ -421,9 +437,10 @@ showing all that was drawn by then.
 
 - **Pixels**: B, G, R, x, 4 bytes each.
   - A row is `width * 4` bytes.
-  - With `WNF_RESIZE` or `WNF_FULL`, a row is the screen's width × 4, with
-    the screen's height of rows. `WE_RESIZED` says how much of them shows.
-    The screen's size is in the look (`LK_SCR_W`, `LK_SCR_H`).
+  - With `WNF_RESIZE`, `WNF_FULL` or `WNF_SCREEN`, a row is the screen's
+    width × 4, with the screen's height of rows. `WE_RESIZED` says how much
+    of them shows. The screen's size is in the look (`LK_SCR_W`,
+    `LK_SCR_H`).
 - **Flags** (`WNF_*`):
 
   | Flag | Value | What |
@@ -432,6 +449,7 @@ showing all that was drawn by then.
   | `WNF_FULL` | 2 | resizable, and starts zoomed between the menu bar and the dock |
   | `WNF_KEYS` | 4 | keys down and up too |
   | `WNF_HOVER` | 8 | `WE_MOVE` with no button held, and `WE_LEAVE` |
+  | `WNF_SCREEN` | 16 | resizable, and starts full screen |
 
 - **Events**: 16-byte messages (`WE_SIZE`) at the program's end. Read them
   with `RO_RECV`, or `RO_WAIT` then `RO_RECV`. Each is `WE_KIND`, `WE_CODE`,
@@ -452,6 +470,7 @@ showing all that was drawn by then.
   | 10 | `WE_KEYDOWN` | with `WNF_KEYS`: the USB HID usage (page 7); X = `WM_*` |
   | 11 | `WE_KEYUP` | the same, once each way |
   | 12 | `WE_LEAVE` | with `WNF_HOVER`: the pointer left it |
+  | 13 | `WE_ZOOM` | `WZ_*`: full screen, zoomed or neither now; before the `WE_RESIZED` that follows |
 
 - **Keys as text** (`WE_KEY`):
   - A code is a byte of text, or `KEY_UP` 0x80, `DOWN`, `LEFT`, `RIGHT`,
@@ -467,6 +486,18 @@ showing all that was drawn by then.
   - `PTRM_GRAB` 2 hides it and holds it at the window's middle while the
     window has the keys. Only `WE_MOVE`'s deltas change then, sent whatever
     the flags. Ctrl+alt lets it go until a click in the window.
+- **Full screen** (`RO_WIN_ZOOM`, for a window that can be resized):
+  - `WZ_NORMAL` 0 is where it was put, `WZ_ZOOMED` 1 the screen between
+    the menu bar and the dock, `WZ_SCREEN` 2 the whole screen: no title
+    bar, frame, menu bar or dock, over every other window, with the keys.
+  - `WE_ZOOM` says the state each time it changes, whoever changed it (this
+    op, the zoom button, the title's double click, the Window menu,
+    ctrl+meta+F, dragging or resizing a zoomed window), before the
+    `WE_RESIZED` for its new size.
+  - Full screen ends when another window takes the keys (`WE_FOCUS` 0,
+    `WE_ZOOM`, then `WE_RESIZED`), or when the user presses ctrl+meta+F
+    (not sent as a key; with `WNF_KEYS` its keys still go down and up).
+  - A pointer held (`PTRM_GRAB`) stays held, at the middle of the new size.
 - **The look**: `RO_DESK_LOOK` gives memory to map read only: the theme
   (`LK_MODE`, `LK_ACCENT`, the colours by role at `LK_C` + `TC_*`), the
   scale (`LK_S4`: quarters of a pixel a point), the screen's size and the
@@ -534,6 +565,23 @@ With `AW_FILES`:
   the first time a program uses that volume's files.
 - **Writes**: `RO_FS_WRITE` replaces the whole file. A read or a write is at
   most `FS_ROOM_MAX` (16 MiB).
+- **A new kernel**: with `AW_UPDATE` too, the handle to every volume has
+  `RT_FS_KERNEL`, and `RO_FS_UPDATE` does what the shell's `update` does
+  (a1 = `UPD_*`):
+  - `UPD_STATE` -> `UPS_*`: the kernel running (`UPS_SLOT`: `'A'`, `'B'`,
+    0 for the one built into the loader), `UPS_TRIAL` if it is on trial,
+    the one kept `<< UPS_KEPT_SHIFT`, the one the next start tries
+    `<< UPS_NEXT_SHIFT`.
+  - `UPD_TRY`: handle2 + a0, a kernel.bin's path; a2 = seconds to keep it
+    in, 30 to 3600 (0: 600). It goes into the slot not kept, and the next
+    start tries it. Not a kernel, or too big: `E_ARG`.
+  - `UPD_KEEP`: on trial, this kernel kept for every start; else `E_ARG`.
+  - `UPD_RESTART`: a2 = seconds, 1 to 60: with a trial to come, the
+    machine restarts into it that long from now; else `E_ARG`.
+
+  A trial not kept in time, a panic on trial, or a hang, and the machine
+  restarts into the kernel kept. `fleet` keeps a trial once a client
+  reaches it.
 
 ## Time
 

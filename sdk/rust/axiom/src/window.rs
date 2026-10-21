@@ -32,6 +32,14 @@
 //! hides the pointer and holds it in the window's middle while the window
 //! has the keys, so that it never leaves: only Move's dx and dy change. The
 //! user takes it back with ctrl+alt, until they click in the window again.
+//!
+//! One that can be resized can go full screen (Window::SCREEN to begin
+//! with, or Window::set_zoom(Zoom::Screen)): all of the screen is its own,
+//! with no title bar, menu bar or dock, over every other window and with
+//! the keys, until another window takes them or the user presses
+//! ctrl+meta+F. Event::Zoom says which it is now, full screen, zoomed or
+//! neither, whoever changed it, before the Event::Resized that follows; a
+//! grabbed pointer stays held, in the middle of its new size.
 
 use core::sync::atomic::{AtomicPtr, Ordering};
 
@@ -63,6 +71,7 @@ const WE_FOCUS: u32 = 9;
 const WE_KEYDOWN: u32 = 10;
 const WE_KEYUP: u32 = 11;
 const WE_LEAVE: u32 = 12;
+const WE_ZOOM: u32 = 13;
 
 static LOOK: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
 
@@ -296,6 +305,18 @@ pub enum Pointer {
     Grab = 2,
 }
 
+/// How a window that can be resized fills the screen (Window::set_zoom,
+/// Event::Zoom).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Zoom {
+    /// where it was put
+    Normal = 0,
+    /// zoomed: the screen between the menu bar and the dock
+    Zoomed = 1,
+    /// full screen: all of it, over all else, with the keys
+    Screen = 2,
+}
+
 /// A mouse button.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Button {
@@ -342,6 +363,8 @@ pub enum Event {
     Look,
     /// it has the keys now, or not
     Focus(bool),
+    /// full screen, zoomed or neither now (before the Resized that follows)
+    Zoom(Zoom),
     /// the window is gone (the desktop let it go)
     Gone,
 }
@@ -402,11 +425,13 @@ impl Window {
     pub const FULL: u32 = 2;
     pub const KEYS: u32 = 4;
     pub const HOVER: u32 = 8;
+    pub const SCREEN: u32 = 16;
 
     /// A window `width` by `height` pixels (no larger than the screen), with
     /// any of Window::RESIZE (the user may resize it), Window::FULL (as
     /// RESIZE, and zoomed to begin with: it fills the screen between the bar
     /// and the dock, and is `width` by `height` when zoomed back),
+    /// Window::SCREEN (as RESIZE, and full screen to begin with),
     /// Window::KEYS (keys down and up) and Window::HOVER (the pointer with
     /// no button held), or 0. Shown once drawn and shown. Event::Resized
     /// gives its size as soon as the desktop has settled it.
@@ -442,7 +467,7 @@ impl Window {
                 return Err(e);
             }
         };
-        let any = flags & (Window::RESIZE | Window::FULL) != 0;
+        let any = flags & (Window::RESIZE | Window::FULL | Window::SCREEN) != 0;
         Ok(Window {
             win,
             end: ours,
@@ -510,6 +535,15 @@ impl Window {
         let mut e = Entry::new(RO_WIN_POINTER, self.win);
         e.a0 = pointer as u64;
         let _ = ring::call(&e);
+    }
+
+    /// Full screen, zoomed or neither (RO_WIN_ZOOM), for one that can be
+    /// resized (else Error::ARG). Done once the desktop gets to it:
+    /// Event::Zoom, then Event::Resized, say so.
+    pub fn set_zoom(&self, zoom: Zoom) -> Result<()> {
+        let mut e = Entry::new(RO_WIN_ZOOM, self.win);
+        e.a0 = zoom as u64;
+        ring::call(&e).map(|_| ())
     }
 
     /// The next thing that happened, if one did (it does not wait).
@@ -621,6 +655,11 @@ impl Window {
             }
             WE_LOOK => Event::Look,
             WE_FOCUS => Event::Focus(code != 0),
+            WE_ZOOM => Event::Zoom(match code {
+                1 => Zoom::Zoomed,
+                2 => Zoom::Screen,
+                _ => Zoom::Normal,
+            }),
             _ => return None,
         })
     }

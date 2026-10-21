@@ -52,9 +52,40 @@ BI_RUN_SIZE     equ 496                 ; dword: its bytes; 0 if this is no test
 BI_TCO          equ 500                 ; word: I/O base of the TCO watchdog the loader started, or 0
 BI_TCO_STS      equ 502                 ; word: TCO2_STS as found (bit 1: the watchdog reset the
                                         ; machine); bit 15: its NO_REBOOT is locked on
-BI_SIZE         equ 512
+BI_SLOT         equ 504                 ; byte: the kernel started, from a slot ('A', 'B'), or 0:
+                                        ; the one built into the loader
+BI_TRIAL        equ 505                 ; byte: 1 if it is on trial (AxiomTry named it)
+BI_SLOT_TRY     equ 506                 ; byte: the slot AxiomTry named for a trial, or 0
+BI_SLOT_ERR     equ 507                 ; byte: why a slot was passed over (SLOT_*): bits 3:0
+                                        ; AxiomTry's, bits 7:4 AxiomSlot's
+BI_TRIAL_S      equ 508                 ; word: the seconds AxiomTry gives the trial (0: unsaid)
+BI_EXT          equ 510                 ; word: the block's bytes as the loader filled it (its
+                                        ; BI_SIZE); 0 from a loader whose block was 512 bytes
+BI_SETTINGS     equ 512                 ; SETTINGS.TXT from that volume (physical), 0 if none
+BI_SETTINGS_LEN equ 520                 ; its bytes (at most 8 KiB)
+BI_TSC_DISPLAY  equ 528                 ; TSC: the display's mode set
+BI_TSC_CALIB    equ 536                 ; TSC: the config tables, the boot volume, the TSC
+BI_TSC_TABLES   equ 544                 ; TSC: the kernel copied, its page tables built
+BI_SIZE         equ 552
 
-; Axiom's UEFI variables (AxiomRun, AxiomLog) are under this vendor GUID:
+; A/B updates (src/kernel/update.asm): kernels in /EFI/AXIOM/KERNEL.A and
+; KERNEL.B on the boot volume. The UEFI variables AxiomTry (a trial, once)
+; and AxiomSlot (the kept one) name one each, in UV_BYTES:
+UV_SLOT         equ 0                   ; byte: 'A' or 'B'; AxiomTry's made small once tried
+UV_TRIAL        equ 2                   ; word: seconds the trial has to be kept (AxiomTry)
+UV_SIZE         equ 4                   ; dword: the file's bytes
+UV_HASH         equ 8                   ; qword: its FNV-1a hash (64-bit)
+UV_BYTES        equ 16
+SLOT_MAX        equ 32 * 1024 * 1024    ; the most a slot's file may hold
+SLOT_MEM_MAX    equ 1024 * 1024 * 1024  ; and the most memory its kernel may ask for
+SLOT_OK         equ 0
+SLOT_MISSING    equ 1                   ; no file, or it could not be read
+SLOT_DAMAGED    equ 2                   ; not a kernel, or not the size or hash the variable says
+SLOT_UNMARKED   equ 3                   ; AxiomTry could not be marked tried, so no trial
+FNV_BASIS       equ 0xCBF29CE484222325
+FNV_PRIME       equ 0x100000001B3
+
+; Axiom's UEFI variables (AxiomRun, AxiomLog, AxiomTry, AxiomSlot) are under this vendor GUID:
 ; 8b367f3b-9403-4cf2-81cd-bda84a771936 (tools/hw/hp1.py)
 %macro AXIOM_VENDOR_GUID 0
     dd 0x8B367F3B

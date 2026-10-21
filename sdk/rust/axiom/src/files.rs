@@ -63,6 +63,29 @@ impl DirEntry {
     }
 }
 
+/// The kernels of this machine (Files::kernel): each 'A' or 'B', a slot on
+/// the volume Axiom started from, or None.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Kernel {
+    /// The one running; None: the one built into the loader.
+    pub running: Option<char>,
+    /// It is on trial: keep_kernel keeps it; otherwise, in time, the
+    /// machine restarts into the one kept.
+    pub trial: bool,
+    /// The one every start uses; None: the built-in one.
+    pub kept: Option<char>,
+    /// The one the next start tries (try_kernel).
+    pub next: Option<char>,
+}
+
+fn slot(b: u64) -> Option<char> {
+    match (b & 0xFF) as u8 {
+        b'A' => Some('A'),
+        b'B' => Some('B'),
+        _ => None,
+    }
+}
+
 #[cfg(feature = "alloc")]
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Volume {
@@ -190,6 +213,37 @@ impl Files {
         e.handle2 = io;
         e.a1 = FS_PATH as u64;
         r.call(&e).map(|_| ())
+    }
+
+    /// The kernels of this machine. A new kernel needs the handle to every
+    /// volume of a program that wants both FILES and UPDATE (RT_FS_KERNEL).
+    pub fn kernel(self) -> Result<Kernel> {
+        let s = self.op(RO_FS_UPDATE, "", UPD_STATE, 0)?;
+        Ok(Kernel {
+            running: slot(s & UPS_SLOT),
+            trial: s & UPS_TRIAL != 0,
+            kept: slot(s >> UPS_KEPT_SHIFT),
+            next: slot(s >> UPS_NEXT_SHIFT),
+        })
+    }
+
+    /// `path`, a kernel.bin, into the slot not kept: the next start tries
+    /// it, and keep_kernel there keeps it within `seconds` (30 to 3600; 0
+    /// for 600), else the machine restarts into the one kept. A panic or a
+    /// hang on trial ends the same way.
+    pub fn try_kernel(self, path: &str, seconds: u32) -> Result<()> {
+        self.op(RO_FS_UPDATE, path, UPD_TRY, seconds as u64).map(|_| ())
+    }
+
+    /// On trial: this kernel kept, for every start.
+    pub fn keep_kernel(self) -> Result<()> {
+        self.op(RO_FS_UPDATE, "", UPD_KEEP, 0).map(|_| ())
+    }
+
+    /// With a trial to come: the machine restarts into it `seconds` (1 to
+    /// 60) from now. What has not been written by then is lost.
+    pub fn restart_for_trial(self, seconds: u32) -> Result<()> {
+        self.op(RO_FS_UPDATE, "", UPD_RESTART, seconds as u64).map(|_| ())
     }
 
     /// A handle to a folder alone, with `rights` (RT_FS_READ, RT_FS_WRITE)

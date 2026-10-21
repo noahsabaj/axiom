@@ -33,6 +33,17 @@ pub const SI_CPUS: u64 = 1;
 pub const SI_RAM: u64 = 2;
 pub const SI_RAM_FREE: u64 = 3;
 pub const SI_UPTIME: u64 = 4;
+/// SYS_INFO's: the battery as last read (each minute): its percent, with
+/// the flags below and its charge mode at bits 19:16; negative with none.
+pub const SI_BATTERY: u64 = 5;
+pub const SI_BAT_PERCENT: u64 = 0xFF;
+pub const SI_BAT_PLUGGED: u64 = 1 << 8;
+pub const SI_BAT_HELD: u64 = 1 << 9;
+pub const SI_BAT_MODE_SHIFT: u32 = 16;
+/// SYS_INFO's: the CPU's temperature now, in degrees C; negative with none.
+pub const SI_TEMP: u64 = 6;
+/// SYS_INFO's: the load average over the last minute, in hundredths.
+pub const SI_LOAD: u64 = 7;
 
 // what a ring entry asks for (RO_*)
 pub const RO_NOP: u8 = 0;
@@ -70,8 +81,20 @@ pub const RO_FS_RENAME: u8 = 41;
 pub const RO_FS_SUB: u8 = 42;
 pub const RO_WIN_POINTER: u8 = 43;
 pub const RO_NET_ADDR: u8 = 44;
+pub const RO_FS_UPDATE: u8 = 45;
+pub const RO_WIN_ZOOM: u8 = 46;
 
 pub const SQF_LINK: u8 = 1; // the next entry starts once this one succeeds
+
+// a new kernel (RO_FS_UPDATE's a1, UPD_*; UPD_STATE's result, UPS_*)
+pub const UPD_STATE: u64 = 0;
+pub const UPD_TRY: u64 = 1;
+pub const UPD_KEEP: u64 = 2;
+pub const UPD_RESTART: u64 = 3;
+pub const UPS_SLOT: u64 = 0xFF;
+pub const UPS_TRIAL: u64 = 1 << 8;
+pub const UPS_KEPT_SHIFT: u32 = 16;
+pub const UPS_NEXT_SHIFT: u32 = 24;
 
 // rights (RT_*)
 pub const RT_DUP: u32 = 1 << 0;
@@ -80,6 +103,7 @@ pub const RT_INFO: u32 = 1 << 2;
 pub const RT_DESK_WINDOW: u32 = 1 << 8;
 pub const RT_FS_READ: u32 = 1 << 8;
 pub const RT_FS_WRITE: u32 = 1 << 9;
+pub const RT_FS_KERNEL: u32 = 1 << 10;
 pub const RT_NET_CONNECT: u32 = 1 << 8;
 pub const RT_NET_TLS: u32 = 1 << 9;
 pub const RT_NET_INSECURE: u32 = 1 << 10;
@@ -347,6 +371,49 @@ pub fn ram() -> (u64, u64) {
 /// Milliseconds since the machine was switched on.
 pub fn uptime_ms() -> u64 {
     unsafe { syscall(SYS_INFO, SI_UPTIME, 0, 0, 0, 0) }.0.max(0) as u64
+}
+
+/// A laptop's battery, as Axiom last read it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Battery {
+    /// 0 to 100.
+    pub percent: u8,
+    /// On its charger (also while Axiom runs it from the battery on purpose).
+    pub plugged: bool,
+    /// Kept between 75% and 80% ('battery hold').
+    pub held: bool,
+    /// HP's charge mode: 0 charging as the firmware likes, 2 running from
+    /// the battery, 5 not charging.
+    pub mode: u8,
+}
+
+/// The battery, where Axiom reads one; None on a machine without one, or
+/// whose charge Axiom cannot read.
+pub fn battery() -> Option<Battery> {
+    let r = unsafe { syscall(SYS_INFO, SI_BATTERY, 0, 0, 0, 0) }.0;
+    if r < 0 {
+        return None;
+    }
+    let r = r as u64;
+    Some(Battery {
+        percent: (r & SI_BAT_PERCENT) as u8,
+        plugged: r & SI_BAT_PLUGGED != 0,
+        held: r & SI_BAT_HELD != 0,
+        mode: ((r >> SI_BAT_MODE_SHIFT) & 0x0F) as u8,
+    })
+}
+
+/// The CPU's temperature now, in degrees C, from its package's sensor (else
+/// the calling CPU's core's); None where Axiom reads none (QEMU, AMD).
+pub fn cpu_temp() -> Option<u32> {
+    let r = unsafe { syscall(SYS_INFO, SI_TEMP, 0, 0, 0, 0) }.0;
+    if r < 0 { None } else { Some(r as u32) }
+}
+
+/// The load average over the last minute, as Unix's: the threads running
+/// or waiting for a CPU, averaged every 5 s (1.0: one CPU's worth).
+pub fn load() -> f64 {
+    unsafe { syscall(SYS_INFO, SI_LOAD, 0, 0, 0, 0) }.0.max(0) as f64 / 100.0
 }
 
 /// Others run first.

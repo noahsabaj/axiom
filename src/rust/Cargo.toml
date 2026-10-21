@@ -1,0 +1,22 @@
+# The kernel's Rust: a static library linked into kernel.bin with the
+# assembly (tools/build.py), for x86_64-axiom-kernel.json, core built from
+# source. The same crate builds for the host, with std, for its tests
+# (cargo test; tools/test/json).
+[package]
+name = "axiom-kernel"
+version = "0.1.0"
+edition = "2024"
+description = "The parts of Axiom's kernel written in Rust, behind the assembly's own calls"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+doctest = false
+
+[profile.release]
+opt-level = 2
+codegen-units = 1
+lto = true
+
+[workspace]
