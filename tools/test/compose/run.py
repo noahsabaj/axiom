@@ -10,7 +10,8 @@ stick, and a USB tablet. In it, by keyboard and mouse:
     =C2+C3), checked from F12's log of the document; dark, as the
     desktop's theme is, then light after 'settings set display.theme light';
   - a slide frame; Slides (F2), PgUp to the first; F5 presents in a window
-    of its own, the arrow key moves on, Esc ends it;
+    of its own, full screen (over the bar and the dock), the arrow key
+    moves on, Esc ends it;
   - Grid (F3), a click on a cell, a formula over the table's totals;
   - the desktop dark again, then F7: light paper, the window still dark;
   - ctrl+S saves into the store and commits; ctrl+Q closes it;
@@ -44,6 +45,7 @@ ACCENT = (0x0A, 0x84, 0xFF)
 DARK_PAPER = (0x1C, 0x1C, 0x1F)
 DARK_BAR = (0x32, 0x32, 0x36)
 LIGHT_BAR = (0xED, 0xED, 0xF0)
+BAR_SPOT, DOCK_SPOT = (SCR_W - 10, 20), (SCR_W // 2, SCR_H - 15)  # the menu bar, the dock
 
 
 def at(x, y):
@@ -118,10 +120,7 @@ def script():
         shot("slides"),
         "sendkey pgup", "wait 0.3",
         "sendkey f5", "until compose: presenting slide", "wait 1",
-        shot("presenting"),
-        f"abs {at(*SHELL1)} left", "wait 0.5",               # the windows, listed
-        "type win\\n", "until Presenting", "wait 0.5",
-        f"abs {at(*TITLE_BAR)} left", "wait 0.5",      # compose's title: the keys back
+        shot("presenting"),                                  # full screen, with the keys
         "sendkey right", "until compose: presenting slide 2", "wait 0.5",
         "sendkey esc", "until compose: presenting ended", "wait 0.5",
         f"abs {at(*TITLE_BAR)} left", "wait 0.5",      # the keys back from where they went
@@ -183,8 +182,10 @@ def check(log, err):
     result(re.search(r'^compose: 0 h1 "Quarterly report"$', log, re.M) is not None,
            "a heading typed")
     result("compose: presenting slide 1 of 2" in log, "presenting, from the slide shown")
-    result(re.search(r"^desk: \d+ 'Presenting .{1,3} Compose' at -?\d+,-?\d+, 2560x\d+", log, re.M)
-           is not None, "the presenter's window: the screen")
+    shown = log[log.find("compose: view slides"):log.find("compose: presenting ended")]
+    over = [pixel("presenting.png", *p) for p in (BAR_SPOT, DOCK_SPOT)]
+    result("goes full screen" in shown and all(near(p, (0, 0, 0), 2) for p in over),
+           f"the presenter's window: the screen, over the bar and the dock ({over})")
     result("compose: presenting slide 2 of 2" in log, "the next slide")
     result("compose: presenting ended" in log, "presenting ended")
     grid = d[1] if len(d) > 1 else {}
