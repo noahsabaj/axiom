@@ -42,6 +42,7 @@ kernel_main:
     call log_init
     call harness_init                   ; a test run the loader found (hp-1)
     call update_init                    ; a new kernel on trial: its watchdog
+    call cfg_init                       ; the settings: SETTINGS.TXT, or the defaults
     lea rax, [cpu_brand]
     KLOG "cpu: %s, TSC %u MHz", rax, qword [tsc_mhz]
 
@@ -168,7 +169,8 @@ ML_COMPOSE      equ 16
 ML_REFRESH      equ 17
 ML_MANDEL       equ 18
 ML_WATCH        equ 19
-ML_PARTS        equ 20
+ML_CFG          equ 20
+ML_PARTS        equ 21
 
 ; ML_TIMED function, part: called (what it is given kept), and the longest
 ; it took kept by its part
@@ -197,6 +199,7 @@ main_loop:
     ML_TIMED usb_service, ML_USB
     ML_TIMED net_service, ML_NET
     ML_TIMED log_service, ML_LOG
+    ML_TIMED cfg_service, ML_CFG        ; settings: the stick's, applied, kept
     ML_TIMED pointer_service, ML_POINTER
     ML_TIMED user_service, ML_PROGRAMS
     ML_TIMED iommu_service, ML_IOMMU
@@ -268,6 +271,8 @@ main_loop:
     cmp byte [shell_pending], 0
     jne .awake
     cmp byte [harness_ready], 0         ; a test run's line done: the next
+    jne .awake
+    cmp qword [cfg_pending], 0          ; a program changed a setting
     jne .awake
     cmp byte [lx_pending], 0            ; a Linux process ended
     jne .awake
@@ -378,6 +383,7 @@ ml_names:       dq str_ml_usb, str_ml_net, str_ml_log, str_ml_pointer
                 dq str_ml_harness, str_ml_update, str_ml_battery, str_ml_load
                 dq str_ml_keys, str_ml_desk, str_ml_term, str_ml_motion
                 dq str_ml_compose, str_ml_refresh, str_ml_mandel, str_ml_watch
+                dq str_ml_cfg
 str_ml_usb:     db 'usb', 0
 str_ml_net:     db 'net', 0
 str_ml_log:     db 'log', 0
@@ -396,6 +402,7 @@ str_ml_term:    db 'terminal', 0
 str_ml_motion:  db 'motion', 0
 str_ml_compose: db 'compose', 0
 str_ml_watch:   db 'watchdog', 0
+str_ml_cfg:     db 'settings', 0
 str_ml_refresh: db 'refresh', 0
 str_ml_mandel:  db 'mandelbrot', 0
 

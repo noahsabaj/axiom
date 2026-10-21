@@ -2912,6 +2912,7 @@ bar_mark:
     ret
 
 ; bar_clock: bar_clock_text = the day and the time, as "Sat 18 Oct  14:05"
+; (desktop.clock: "2:05 PM" as 12-hour; nothing at all when it is off)
 bar_clock:
     push rax
     push rcx
@@ -2957,7 +2958,13 @@ bar_clock:
     lea rax, [month_names]
     lea r9, [rax + rcx * 4]
     lea rdi, [bar_clock_text]
-    SPRINTF rdi, "%s %u %s  %u:%02u", r8, qword [rtc_day], r9, qword [rtc_hour], qword [rtc_min]
+    mov byte [rdi], 0
+    cmp qword [cfg_vals + CFG_CLOCK * 8], 2
+    je .said
+    SPRINTF rdi, "%s %u %s  ", r8, qword [rtc_day], r9
+    add rdi, rax
+    call cfg_clock                      ; the time, as desktop.clock has it
+.said:
     pop r9
     pop r8
     pop rdi

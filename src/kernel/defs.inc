@@ -89,7 +89,7 @@ OT_NET          equ 9                   ; the network, to some hosts and ports (
 OT_SOCKET       equ 10                  ; a connection, or a port listened on (socket.asm)
 OT_DESK         equ 11                  ; the desktop: windows can be opened on it (window.asm)
 OT_WINDOW       equ 12                  ; a program's window (window.asm)
-                                        ; (13: the settings, on its own branch)
+OT_SETTINGS     equ 13                  ; the machine's settings (settings.asm)
 OT_FILES        equ 14                  ; files on FAT volumes, or in a folder (fscap.asm)
 OT_SOUND        equ 15                  ; the speakers: streams can be opened on them (sound.asm)
 OT_STREAM       equ 16                  ; a stream of sound, playing (sound.asm)
@@ -130,6 +130,8 @@ RT_FS_WRITE     equ 1 << 9              ; write, make, rename, remove
 RT_FS_KERNEL    equ 1 << 10             ; every volume: a new kernel (RO_FS_UPDATE)
 RT_SOUND_PLAY   equ 1 << 8              ; the speakers: open streams on them
 RT_STREAM_PLAY  equ 1 << 8              ; a stream: play it, wait on it
+RT_SET_READ     equ 1 << 8              ; the settings: read them, wait for a change
+RT_SET_CHANGE   equ 1 << 9              ; change them
 RT_ALL          equ 0xFFFF
 
 ; what handle operations return when they fail
@@ -467,7 +469,18 @@ RO_WIN_SHOW     equ 30                  ; handle = a window, a0 = x, a1 = y, a2 
                                         ; w | h << 32 (0: all of it): what was
                                         ; drawn there is shown
 RO_WIN_TITLE    equ 31                  ; handle, handle2 + a0: a1 bytes of UTF-8, its title
-                                        ; (32, 33: the settings', on their branch)
+RO_SET_LIST     equ 32                  ; handle = the settings, into handle2 + a0,
+                                        ; a1 bytes at most: a record (SI_*) for
+                                        ; each that fits -> how many there are;
+                                        ; what RO_WAIT on it waited for is seen
+RO_SET_CHANGE   equ 33                  ; handle, a0 = which (its record's place),
+                                        ; a1 = the value (SI_VALUE's form); or
+                                        ; with a2 > 0, the value as text, a2
+                                        ; bytes at handle2 + a1 -> 0, or E_ARG
+                                        ; (not one it takes), E_RANGE (no such
+                                        ; setting). RO_WAIT on the settings
+                                        ; waits until one changed since the last
+                                        ; RO_SET_LIST
 RO_DESK_LOOK    equ 34                  ; handle = the desktop -> a handle to the
                                         ; look, memory to map and read (LK_*)
 ; files (fscap.asm): handle = files, handle2 + a0: a path (an FS_PATH field,
@@ -540,6 +553,32 @@ FEA_DIR         equ 1
 FEA_RO          equ 2
 FEA_HIDDEN      equ 4
 FEA_SYSTEM      equ 8
+
+; a setting, as RO_SET_LIST gives it
+SI_NAME         equ 0                   ; 32 bytes, NUL-ended: display.theme ...
+SI_KIND         equ 32                  ; dword SK_*
+SI_FLAGS        equ 36                  ; dword SIF_*
+SI_VALUE        equ 40                  ; a choice's place, 0 or 1, a number,
+                                        ; 0xRRGGBB, minutes from UTC; 0 for text
+SI_DEFAULT      equ 48
+SI_MIN          equ 56                  ; a number's or a zone's least,
+SI_MAX          equ 64                  ; most (a choice: how many there are),
+SI_STEP         equ 72                  ; and step
+SI_TEXT         equ 80                  ; 64 bytes: the value as the shell shows it
+SI_UNIT         equ 144                 ; 16 bytes: a number's unit (ms, ...)
+SI_CHOICES      equ 160                 ; 128 bytes: a choice's, or a colour's
+                                        ; swatches' names, each NUL-ended
+SI_SWATCHES     equ 288                 ; 16 dwords: a colour's swatches, 0xRRGGBB
+SI_ABOUT        equ 352                 ; 128 bytes: what it is
+SI_SIZE         equ 512
+SK_CHOICE       equ 1                   ; one of a few names
+SK_SWITCH       equ 2                   ; on or off
+SK_NUMBER       equ 3                   ; a whole number, from SI_MIN to SI_MAX
+SK_COLOUR       equ 4                   ; 0xRRGGBB
+SK_ZONE         equ 5                   ; minutes east of UTC
+SK_TEXT         equ 6                   ; a word
+SIF_RESTART     equ 1                   ; it takes effect at the next start
+SIF_CHANGED     equ 2                   ; it is not the default
 
 ; RO_NET_CONNECT's a2 (and RO_NET_LISTEN's: NETF_TLS)
 NETF_TLS        equ 1
@@ -707,15 +746,16 @@ AXE_WANTS       equ 48                  ; what it needs to be given (AW_*), and 
 AXE_HDR         equ 56
 
 ; what a program can be given when it is run from the shell: declared in its
-; header (WANTS, axe.inc), or granted for one run (+net, +store, +desk)
+; header (WANTS, axe.inc), or granted for one run (+net, +store, +desk,
+; +settings)
 AW_NET          equ 1                   ; the network (SB_NET)
 AW_STORE        equ 2                   ; its own names in the store (SB_STORE)
 AW_DESK         equ 4                   ; the desktop, to open windows on (SB_DESK)
-                                        ; (8: the settings, on their branch)
+AW_SETTINGS     equ 8                   ; the settings, to read and change (SB_SETTINGS)
 AW_FILES        equ 16                  ; the files on every volume (SB_FILES)
 AW_SOUND        equ 32                  ; the speakers (SB_SOUND)
 AW_UPDATE       equ 64                  ; with AW_FILES: a new kernel (RT_FS_KERNEL)
-AW_ALL          equ 7 | AW_FILES | AW_SOUND | AW_UPDATE
+AW_ALL          equ 15 | AW_FILES | AW_SOUND | AW_UPDATE
 
 ; the start block, at USER_START; the first thread starts with RDI = it
 SB_RING         equ 0                   ; dword: a handle to the task's ring
@@ -728,11 +768,13 @@ SB_ARGS_LEN     equ 32                  ; dword
 SB_STORE        equ 36                  ; dword: to the store under "name/", or 0
 SB_NET          equ 40                  ; dword: to the network, or 0
 SB_DESK         equ 44                  ; dword: to the desktop, or 0
+SB_SETTINGS     equ 48                  ; dword: to the settings, or 0
 SB_FILES        equ 52                  ; dword: to the files, or 0
 SB_GIFT2        equ 56                  ; dword: a second thing it was given, or 0
                                         ; (each given handle to a desktop, files,
-                                        ; the speakers, the network or the store
-                                        ; is in its slot too, if that was empty)
+                                        ; the speakers, the network, the store or
+                                        ; the settings is in its slot too, if that
+                                        ; was empty)
 SB_SOUND        equ 60                  ; dword: to the speakers, or 0
 SB_ARGS         equ 64                  ; the arguments it was run with, NUL-ended
 SB_ARGS_MAX     equ 4096 - SB_ARGS - 1

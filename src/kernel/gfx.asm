@@ -75,6 +75,7 @@ gfx_init:
     inc r8d
     jmp .font_loop
 .font_done:
+    call cfg_font                       ; display.text-size
     mov edi, ecx
     call gfx_set_font
     mov byte [gfx_ready], 1

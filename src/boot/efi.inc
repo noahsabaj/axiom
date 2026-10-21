@@ -57,6 +57,13 @@ EFI_FILE_MODE_READ      equ 1
 ; EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL
 CON_OUTPUT_STRING       equ 8
 
+; EFI_SIMPLE_FILE_SYSTEM_PROTOCOL and EFI_FILE_PROTOCOL
+SFS_OPEN_VOLUME         equ 8
+FP_OPEN                 equ 8
+FP_CLOSE                equ 16
+FP_READ                 equ 32
+EFI_FILE_MODE_READ      equ 1
+
 ; EFI_GRAPHICS_OUTPUT_PROTOCOL
 GOP_QUERY_MODE          equ 0
 GOP_SET_MODE            equ 8

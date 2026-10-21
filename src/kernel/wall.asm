@@ -164,12 +164,22 @@ wall_make:
     movzx ecx, byte [th_mode]
     shl rcx, 40
     or rax, rcx
+    movzx ecx, byte [th_wall]           ; desktop.wallpaper
+    shl rcx, 48
+    or rax, rcx
     mov [wl_want], rax
     cmp rax, [wl_made]
     jne .make
     cmp qword [wall_sf + SF_PTR], 0
     jne .out
 .make:
+    cmp byte [th_wall], 0               ; not the mountains: a gradient
+    je .mountains
+    call wall_grad
+    mov rax, [wl_want]
+    mov [wl_made], rax
+    jmp .out
+.mountains:
     mov qword [wl_made], 0
     lea rdi, [wall_sf]
     mov rsi, [scr_w]

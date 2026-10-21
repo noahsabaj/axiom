@@ -65,8 +65,8 @@
 ;      AW_*) -> RAX = a task (a reference), RDX = its first thread, started
 ;      (a reference, for user_wait); RAX = 0 if it could not be loaded
 ;      (said why), RDX = E_*. One the shell runs gets the network, its
-;      names in the store and the desktop only as it wants or is granted
-;      them, and writes to the shell's terminal; one a task starts gets
+;      names in the store, the desktop and the settings only as it wants
+;      or is granted them, and writes to the shell's terminal; one a task starts gets
 ;      none of them, only what it is given, and writes where its parent does
 ;    user_wait(RDI = task, RSI = its first thread) -> RAX = what that thread
 ;      returned, once it and every other thread of the task have ended
@@ -1026,7 +1026,8 @@ spawn_one:
 
 ; gift_slot(EAX = a handle the new task was given, RBP = its start block;
 ; that task the current one): where a handle of its kind goes as well
-; (SB_DESK, SB_FILES, SB_NET, SB_STORE, SB_SOUND), if that is empty. Preserves RAX.
+; (SB_DESK, SB_FILES, SB_NET, SB_STORE, SB_SETTINGS, SB_SOUND), if that is empty.
+; Preserves RAX.
 gift_slot:
     push rax
     push rcx
@@ -2071,6 +2072,11 @@ user_load:
     call desk_program                   ; the desktop
     mov [rbp + SB_DESK], eax
 .no_desk:
+    test qword [rsp + 8 + 48], AW_SETTINGS
+    jz .no_settings
+    call cfg_program                    ; the settings
+    mov [rbp + SB_SETTINGS], eax
+.no_settings:
     test qword [rsp + 8 + 48], AW_FILES
     jz .no_files
     xor esi, esi
@@ -2925,7 +2931,7 @@ section .rodata
 str_ot_console: db 'console', 0
 align 4
 gift_slots:     dd OT_DESK, SB_DESK, OT_FILES, SB_FILES, OT_NET, SB_NET, OT_STORE, SB_STORE
-                dd OT_SOUND, SB_SOUND
+                dd OT_SETTINGS, SB_SETTINGS, OT_SOUND, SB_SOUND
                 dd 0, 0
 str_user_oom:   db 'Out of memory for the console', 0
 str_user_ring:  db 'ring', 0

@@ -240,8 +240,10 @@ log_service:
 .out:
     ret
 
-; log_final: before a reboot or power-off. Preserves all.
+; log_final: before a reboot or power-off (the settings kept too).
+; Preserves all.
 log_final:
+    call cfg_final
     push rax
     cmp byte [log_auto], 0
     je .out

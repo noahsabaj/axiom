@@ -221,6 +221,22 @@ dhcp_end:
     mov si, [rax + NI_MAC + 4]
     mov [rdi + 7], si
     add rdi, 9
+    call cfg_host                       ; host name: network.name
+    mov byte [rdi], 12
+    lea rax, [rdi + 2]
+.name:
+    mov cl, [rsi]
+    test cl, cl
+    jz .named
+    mov [rax], cl
+    inc rsi
+    inc rax
+    jmp .name
+.named:
+    lea rcx, [rax - 2]
+    sub rcx, rdi
+    mov [rdi + 1], cl
+    mov rdi, rax
     lea rsi, [dhcp_tail]
     mov ecx, DHCP_TAIL
     rep movsb
@@ -1871,8 +1887,7 @@ lease_text:
     ret
 
 section .rodata
-dhcp_tail:      db 12, 5, 'axiom'               ; host name
-                db 55, 4, 1, 3, 6, 51           ; mask, router, DNS, lease
+dhcp_tail:      db 55, 4, 1, 3, 6, 51           ; mask, router, DNS, lease
                 db 255
 DHCP_TAIL       equ $ - dhcp_tail
 str_unreachable: db 'destination unreachable', 0

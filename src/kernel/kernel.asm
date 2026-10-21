@@ -125,6 +125,7 @@ section .text
 %include "icons.asm"
 %include "look.asm"
 %include "fscap.asm"
+%include "settings.asm"
 %include "desk.asm"
 %include "menus.asm"
 %include "motion.asm"
