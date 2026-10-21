@@ -90,6 +90,12 @@ def main():
         result = subprocess.run([sys.executable, str(ROOT / "tools" / "mkwebfont.py")], cwd=ROOT)
         if result.returncode:
             sys.exit("mkwebfont.py failed: browse needs the DejaVu fonts")
+    # and compose's, twice those sizes, after them (src/user/gen/docfont.*)
+    doc = font.with_name("docfont.pak")
+    if not doc.exists() or not doc.with_suffix(".inc").exists():
+        result = subprocess.run([sys.executable, str(ROOT / "tools" / "mkdocfont.py")], cwd=ROOT)
+        if result.returncode:
+            sys.exit("mkdocfont.py failed: compose needs the DejaVu fonts")
 
     first = [(BUILD / "kernel.bin", "kernel",
               ["-f", "bin", "-Ox" if opts.small else "-O1", "-w-reloc-abs-qword", "-w-reloc-abs-dword", "-w-reloc-rel-dword",

@@ -1566,6 +1566,56 @@ text rows.
   for the host, so a page can be laid out and drawn there; the QEMU suite,
   `tools/test/browse/run.py`, compares browse's window with that.
 
+## Compose: `src/user/compose.asm`, `src/user/compose/`
+
+- One ring-3 program for documents, slides and spreadsheets, in a
+  resizable kit window (1040×600 points to start with), with the desktop
+  and the store capabilities. The whole
+  of it is described in `docs/COMPOSE.md`; this is how it is put together.
+- **One model, three views.** A document is a list of blocks (text,
+  headings, list items, grids, images, slide frames; `compose/doc.inc`).
+  Pages, Slides and Grid are only layouts of that list (`layout.inc`,
+  `view.inc`): a table on a page is a grid block, a slide is a frame and
+  the blocks it holds (or a Heading 1 and what follows it), so a grid can
+  sit in a page or on a slide, and a page's text on a slide.
+- **Cells** (`calc.inc`): what was typed is kept, and the value worked out
+  from it. A change marks the cell and everything that depends on it, and
+  only those are worked out again, depth first, on a stack of their own; a
+  cycle is caught as it is found.
+- **Events in, pixels out.** `compose.asm` is only the platform: the
+  memory (one object for each part, as one is 64 MiB at most), the kit's
+  window (`kit_open`, `kit_next`) and the presenter's own window (polled
+  while `kit_next` waits with a deadline), their events, and the store. The rest is plain code
+  behind six hooks (`plat_log`, `plat_title`, `plat_save`, `plat_load`,
+  `plat_present`, `plat_mem`), so `tools/test/compose/shim.asm` links the
+  same files into a DLL and `host.py` drives it on Windows.
+- **Files**: `.axd`, a tag, a length and a payload for each record, so a
+  reader skips what it does not know; saved with `RO_ST_PUT` and committed
+  with `RO_ST_COMMIT`. The store gives the program only the names under
+  `compose/`. Undo and the clipboard keep pieces of documents in the same
+  format.
+- **Points, at the desktop's scale** (`compose/draw.inc`): everything is
+  laid out and hit-tested in points; drawing turns them into pixels at the
+  scale (`scale_set`, quarters of a pixel a point), and events come in as
+  points. The document's text is `web/draw.inc`'s DejaVu with point
+  advances, its glyphs from the nearest of twelve sizes (browse's and
+  twice them, `gen/docfont.pak`, PackBits, unpacked as it starts: a
+  program is 16 MiB at most). The window's own text is the kit's Noto.
+  The Slides view draws its slide at the largest whole scale that fits;
+  thumbnails are the slide drawn at the window's scale and box-filtered;
+  the presenter draws it at up to 2× and scales it to its window,
+  bilinear.
+- **Light and dark**: the window's colours (`pal`, `ui.inc`) come from the
+  desktop's look (`kit_c`, the accent) and the controls are the kit's
+  (`kit_button`, `kit_field`), so a WE_LOOK is a paint. The paper's (`dpal`:
+  pages, slides, the presenter, the grid's cells) is light or dark as the
+  theme is, or light whatever it is: F7, kept in the store as
+  `compose/theme`. The layout is made again at each paint, and the
+  thumbnails again when the paper or the scale changes.
+- Each open, save, view and slide is logged (`compose: saved report.axd,
+  ...`), and F12 logs the document block by block and cell by cell, which
+  `tools/test/compose/run.py` reads.
+
 ## Linux programs: `linux.asm`, `lxmm.asm`, `lxfs.asm`, `lxsig.asm`, `lxtty.asm`, `lxproc.asm`, `lxpipe.asm`
 
 - `linux <program> [arguments]` runs an unchanged Linux x86-64 program
@@ -1856,7 +1906,8 @@ capabilities it says it needs.
   net`). Several run at once: `&` at the end of a command runs it in the
   background, the job's task number said, and `tasks` lists them. A
   program gets only the capabilities it declares in its header (paint: the
-  desktop; browse: the desktop and the network; net: the network; stash:
+  desktop; browse: the desktop and the network; compose: the desktop and
+  the store; net: the network; stash:
   the store; the rest nothing); `+net`, `+store` and `+desk` before its name
   grant more, for that run (`+net hello`). Commands take neither grants nor
   `&`, and a program in the background takes no `|` or `>`.
