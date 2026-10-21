@@ -666,7 +666,21 @@ tools/mkuifont.py       rasterize the desktop's font into src/kernel/gen/
 docs/                   vision, architecture, and the ABI programs see (ABI.md)
 ```
 
+## License
+
+Axiom is licensed under either of
+
+- the Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE)), or
+- the MIT license ([LICENSE-MIT](LICENSE-MIT)),
+
+at your option. Unless you explicitly state otherwise, any contribution
+intentionally submitted for inclusion in Axiom by you, as defined in the
+Apache-2.0 license, shall be dual licensed as above, without any additional
+terms or conditions.
+
 ## License notes
+
+What Axiom includes from others keeps its own license:
 
 The console font is rasterized from **Cascadia Mono**, © Microsoft Corporation,
 licensed under the [SIL Open Font License 1.1](https://openfontlicense.org).
