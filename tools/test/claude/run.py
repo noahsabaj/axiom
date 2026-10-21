@@ -100,8 +100,9 @@ def main():
     for _, until in steps:
         if until:
             result(until in log, f"Axiom said '{until}'")
-    # the network's own lines (TLS, IPv6 coming up) may land inside an answer
-    body = "".join(l for l in log.split("\n") if not l.startswith(("https: ", "ip6: ")))
+    # the network's own lines (TLS, IPv6 coming up) and start.asm's, at a
+    # fixed time after boot, may land inside an answer
+    body = "".join(l for l in log.split("\n") if not l.startswith(("https: ", "ip6: ", "start: ")))
     for i, a in enumerate(mock.answers):
         result(a.replace("\n", "") in body, f"answer {i + 1} ({len(a)} characters) "
                                             f"logged whole, as UTF-8")
