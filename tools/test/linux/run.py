@@ -42,16 +42,28 @@ and runs in the shell:
   - bash -c (arithmetic, a pipe, command substitution, a loop, ||, exit 5),
     sh -c (dash: tr, grep, cut, xargs), then bash typed at: a command,
     sleep ended by ctrl+C (job control: its own process group), cd, the
-    line again from readline's history (up), exit.
+    line again from readline's history (up), exit;
+  - /test/net, ours in C (net.c), on an RTL8139 on QEMU's user network:
+    TCP to an echo server here (200 KB, a nonblocking connect, shutdown),
+    UDP to one here (sendmmsg and recvmmsg too), the kernel's resolv.conf,
+    names through glibc's resolver (a DNS server on 127.0.0.1:53 if it can
+    be had), socketpair, eventfd, timerfd, epoll (edge, oneshot, hangup);
+    last a listener on 7777, which a client here reaches through QEMU's
+    forwarded port, sending 100 KB.
 Outputs go to build/test/linux/.
 """
 import argparse
 import datetime
 import hashlib
 import pathlib
+import random
 import re
+import socket
+import struct
 import subprocess
 import sys
+import threading
+import time
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "tools" / "test"))
@@ -60,6 +72,14 @@ from qemu import boot_all  # noqa: E402
 OUT = ROOT / "build" / "test" / "linux"
 LINUX = ROOT / "build" / "linux"
 FAILS = 0
+
+
+def free_port():
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    p = s.getsockname()[1]
+    s.close()
+    return p
 
 
 def result(ok, text):
@@ -89,6 +109,125 @@ def run(cmd, name, until=None):
             f"type linux {typed(cmd)}\\n", f"until linux: {until or name}", "wait 0.3"]
 
 
+TCP_ECHO, UDP_ECHO, SERVE = free_port(), free_port(), free_port()
+SENT = bytes(random.Random(7).randrange(256) for _ in range(100_000))
+heard = []                              # what the guest's listener said back
+
+
+def echo_servers():
+    """TCP and UDP, back whatever comes, on 127.0.0.1 (10.0.2.2 to the guest)."""
+    l = socket.socket()
+    l.bind(("127.0.0.1", TCP_ECHO))
+    l.listen(8)
+    u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    u.bind(("127.0.0.1", UDP_ECHO))
+
+    def one(c):
+        with c:
+            while True:
+                try:
+                    b = c.recv(65536)
+                except OSError:
+                    return
+                if not b:
+                    return
+                c.sendall(b)
+
+    def tcp():
+        while True:
+            c, _ = l.accept()
+            threading.Thread(target=one, args=(c,), daemon=True).start()
+
+    def udp():
+        while True:
+            try:
+                b, peer = u.recvfrom(65536)
+                u.sendto(b, peer)
+            except OSError:
+                pass
+    threading.Thread(target=tcp, daemon=True).start()
+    threading.Thread(target=udp, daemon=True).start()
+
+
+def dns_server():
+    """axiom.test is 10.0.2.2; anything else does not exist. -> the names
+    asked for, or None if port 53 cannot be had (by name is not tried)."""
+    try:
+        u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        u.bind(("127.0.0.1", 53))
+    except OSError:
+        return None
+    asked = []
+
+    def loop():
+        while True:
+            try:
+                q, peer = u.recvfrom(512)
+            except OSError:
+                return
+            qid = struct.unpack(">H", q[:2])[0]
+            i, labels = 12, []
+            while q[i]:
+                labels.append(q[i + 1:i + 1 + q[i]].decode())
+                i += 1 + q[i]
+            name = ".".join(labels).lower()
+            asked.append(name)
+            question = q[12:i + 5]
+            qtype = struct.unpack(">H", q[i + 1:i + 3])[0]
+            if name == "axiom.test" and qtype == 1:
+                ans = b"\xc0\x0c" + struct.pack(">HHIH", 1, 1, 60, 4) + socket.inet_aton("10.0.2.2")
+                r = struct.pack(">HHHHHH", qid, 0x8180, 1, 1, 0, 0) + question + ans
+            elif name == "axiom.test":
+                r = struct.pack(">HHHHHH", qid, 0x8180, 1, 0, 0, 0) + question  # no AAAA
+            else:
+                r = struct.pack(">HHHHHH", qid, 0x8183, 1, 0, 0, 0) + question
+            u.sendto(r, peer)
+    threading.Thread(target=loop, daemon=True).start()
+    return asked
+
+
+def client(log_path, started):
+    """Once /test/net listens: SENT to it, its end, then what it says back."""
+    deadline = time.time() + 500
+    while time.time() < deadline:
+        try:
+            if log_path.stat().st_mtime >= started and \
+                    "net: listening on 7777" in log_path.read_text(errors="replace"):
+                break
+        except OSError:
+            pass
+        time.sleep(0.3)
+    else:
+        return
+    try:
+        c = socket.create_connection(("127.0.0.1", SERVE), timeout=20)
+        c.sendall(SENT)
+        c.shutdown(socket.SHUT_WR)
+        back = b""
+        while True:
+            b = c.recv(4096)
+            if not b:
+                break
+            back += b
+        c.close()
+        heard.append(back)
+    except OSError as e:
+        heard.append(repr(e))
+
+
+def sum31(data):
+    """net.c's sum: each byte, sum * 31 + it, in 32 bits."""
+    s = 0
+    for b in data:
+        s = (s * 31 + b) & 0xFFFFFFFF
+    return s
+
+
+NET = ["tcp", "names", "fstat", "echo", "opts", "big", "nbconnect", "isconn", "shutdown",
+       "refused", "notconn", "netlink", "udp", "udpport", "udpconn", "rcvtimeo", "mmsg", "resolv",
+       "localhost", "pair", "pairfork", "pairshut", "eventfd", "semaphore", "timerfd",
+       "interval", "disarmed", "abstime", "epoll", "epolltimer", "epolldel", "edge", "oneshot",
+       "hup", "gone", "epollsock", "listen", "noone", "accept", "served"]
 BASH = ("bash -c 'echo sum $((6*7)); echo one two three | wc -w; echo \"sub $(echo inner)\"; "
         "for i in 1 2 3; do printf \"i%s \" $i; done; echo; false || echo or; "
         "echo top $(seq 5 | sort -r | head -1); exit 5'")
@@ -98,9 +237,14 @@ PROCS = ["fork", "memory", "exec", "vfork", "spawn", "pipe", "fifo", "eof", "pol
          "sigchld", "pgid", "setsid", "enoent", "script", "cloexec"]
 
 
-def script():
+def net_cmd(dns):
+    return f"/test/net {TCP_ECHO} {UDP_ECHO} {1 if dns else 0}"
+
+
+def script(dns):
     return [
-        "until log: kept in", "wait 0.5",
+        "until log: kept in", "until dhcp: address", "wait 0.5",
+        *(["type ip 10.0.2.15/24 10.0.2.2 10.0.2.2\\n", "wait 0.5"] if dns else []),
         *run("/test/hello", "hello", "hello exited"),
         *run("true", "true", "true exited"),
         *run("false", "false", "false exited"),
@@ -147,6 +291,7 @@ def script():
         "type linux less /etc/passwd\\n", "wait 3", "type q", "until linux: less exited",
         "wait 0.3",
         *run("/test/procs", "procs", "procs exited"),
+        *run(net_cmd(dns), "net", "net exited"),
         *run(BASH, "bash", "bash exited"),
         *run(DASH, "dash", "dash exited"),
         "type echo -- bash\\n", "wait 0.2",
@@ -177,7 +322,20 @@ def ended(log, cmd, name, code):
                   f"'linux {cmd}' exited with {code}")
 
 
-def check(log, err):
+def check_net(log, dns):
+    cmd = net_cmd(dns)
+    net = after(log, cmd)
+    for name in NET + (["dns", "nxdomain"] if dns else []):
+        m = re.search(rf"^(ok|FAIL) {name}\b.*$", net, re.M)
+        result(m is not None and m.group(1) == "ok", f"net: {m.group(0) if m else name + ' not said'}")
+    result("\nnet: all ok\n" in net, "net: all ok")
+    ended(log, cmd, "net", 0)
+    want = f"got {len(SENT)} bytes, sum {sum31(SENT)}\n".encode()
+    got = heard[0] if heard else "nothing"
+    result(got == want, f"net: the host's 100 KB, its sum said back ({got!r})")
+
+
+def check(log, err, dns):
     hello = after(log, "/test/hello")
     result("hello: a Linux program on Axiom" in hello, "hello: its first line")
     result("hello: brk and mmap work" in hello, "hello: brk and mmap")
@@ -291,6 +449,7 @@ def check(log, err):
         result(m is not None and m.group(1) == "ok", f"procs: {m.group(0) if m else name + ' not said'}")
     result("\nprocs: all ok\n" in procs, "procs: all ok")
     ended(log, "/test/procs", "procs", 0)
+    check_net(log, dns)
     bash = after(log, BASH)
     for line in ("sum 42", "3", "sub inner", "i1 i2 i3 ", "or", "top 5"):
         result(f"\n{line}\n" in bash, f"bash -c: {line!r}")
@@ -327,10 +486,16 @@ def main():
     stick = OUT / "stick.img"
     subprocess.run([sys.executable, str(ROOT / "tools" / "mkstick.py"), str(stick),
                     "--linux", str(LINUX)], cwd=ROOT, check=True, capture_output=True)
-    logs = boot_all(OUT, {"linux": (script(), ["--smp", "4", "--stick",
-                                                stick.relative_to(ROOT).as_posix()], 420, 1)})
+    echo_servers()
+    dns = dns_server()
+    print(f"DNS on 127.0.0.1:53: {'yes' if dns is not None else 'no (by name is not tried)'}")
+    threading.Thread(target=client, args=(OUT / "linux.log", time.time()), daemon=True).start()
+    fwd = f"user,hostfwd=tcp:127.0.0.1:{SERVE}-:7777"
+    logs = boot_all(OUT, {"linux": (script(dns is not None), [
+        "--smp", "4", "--stick", stick.relative_to(ROOT).as_posix(),
+        "--nic", "rtl8139", "--netdev", fwd], 540, 1)})
     print("-- linux")
-    check(*logs["linux"])
+    check(*logs["linux"], dns is not None)
     print(f"{'all passed' if FAILS == 0 else f'{FAILS} failed'}")
     return 1 if FAILS else 0
 

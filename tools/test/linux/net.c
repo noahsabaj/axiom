@@ -537,10 +537,10 @@ static void check_listen(void)
     getsockopt(s, SOL_SOCKET, SO_ACCEPTCONN, &acc, &al);
     CHECK("listen", b == 0 && l == 0 && ntohs(me.sin_port) == 7777 && acc == 1,
           "bind %d, listen %d, port %d, acceptconn %d", b, l, ntohs(me.sin_port), acc);
+    fcntl(s, F_SETFL, O_NONBLOCK);          /* (SOCK_NONBLOCK is the new socket's) */
     int nb = accept4(s, NULL, NULL, SOCK_NONBLOCK);
     CHECK("noone", nb < 0 && errno == EAGAIN, "accept4 with none waiting: %d (%s)", nb,
           strerror(errno));
-    fcntl(s, F_SETFL, O_NONBLOCK);
     printf("net: listening on 7777\n");
     fflush(stdout);
     int ev = ready(s, POLLIN, 60000);
