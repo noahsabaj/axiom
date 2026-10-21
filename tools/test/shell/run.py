@@ -170,7 +170,7 @@ STEPS = [
     ("files remove old", lambda l: l == ["removed old"], "files remove, the folder emptied"),
     ("files old", said("nothing called 'old' there"), "the folder is gone"),
     ("files /EFI/AXIOM | to text > list.txt", lambda l: re.fullmatch(
-        r"wrote \d+ B to list\.txt", l[0] if l else "") is not None, "> list.txt"),
+        r"wrote (\d+ B|[\d.]+ KiB) to list\.txt", l[0] if l else "") is not None, "> list.txt"),
     ("cpus | count >> list.txt", lambda l: l == ["added 2 B to list.txt"], ">> list.txt"),
     ("files /EFI/AXIOM | first 2 | to json > list.json", said("to list.json"),
      "to json > list.json"),
